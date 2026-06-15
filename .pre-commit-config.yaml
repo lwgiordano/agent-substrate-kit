@@ -1,0 +1,110 @@
+# Substrate pre-commit config.
+# Profile markers: bootstrap.sh strips blocks not matching the selected
+# profile. starter < standard < strict (each level includes the ones
+# below it). python-only blocks are stripped when --lang != python.
+repos:
+  - repo: local
+    hooks:
+      # --- core (all profiles, all languages) ---
+      - id: check-import-shadowing
+        name: No repo-local stdlib shadowing
+        entry: .substrate/venv/bin/python -I scripts/check_import_shadowing.py
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: update-manifest-check
+        name: Manifest is current
+        entry: .substrate/venv/bin/python -I scripts/update_manifest.py --check
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: check-doc-drift
+        name: Docs/code drift check
+        entry: .substrate/venv/bin/python -I scripts/check_doc_drift.py --strict
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: check-python-syntax
+        name: Governed Python compiles (no fail-open hooks)
+        entry: .substrate/venv/bin/python -I scripts/check_python_syntax.py
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: check-harness-patterns
+        name: Harness safety-policy data is intact
+        entry: .substrate/venv/bin/python -I scripts/check_harness_patterns.py
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: check-policy-code-integrity
+        name: Policy + scanner logic is intact (AST-pinned)
+        entry: .substrate/venv/bin/python -I scripts/check_policy_code_integrity.py
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: check-harness-smoke
+        name: Agent-harness scanner blocks injected context
+        entry: .substrate/venv/bin/python -I scripts/check_harness_smoke.py
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: check-hook-smoke
+        name: Security hooks actually deny (behavioral)
+        entry: .substrate/venv/bin/python -I scripts/check_hook_smoke.py
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: check-substrate-config
+        name: .substrate/config is safe data
+        entry: .substrate/venv/bin/python -I scripts/check_substrate_config.py
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: check-agent-harness
+        name: Agent harness safety check
+        entry: .substrate/venv/bin/python -I scripts/check_agent_harness.py
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: check-secrets
+        name: Secrets scan
+        entry: .substrate/venv/bin/python -I scripts/check_secrets.py
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: check-history-sha
+        name: HISTORY SHA validity
+        entry: .substrate/venv/bin/python -I scripts/check_history_sha.py
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: ruff-format
+        name: Ruff format
+        entry: bash scripts/run_python_gate.sh format
+        language: system
+        files: \.py$
+        pass_filenames: true
+      - id: ruff-check
+        name: Ruff check
+        entry: bash scripts/run_python_gate.sh lint
+        language: system
+        files: \.py$
+        pass_filenames: true
+      - id: smoke-tests
+        name: Pytest
+        entry: bash scripts/run_python_gate.sh test
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: check-postmortem-gates-resolved
+        name: Postmortem gates resolve to real files
+        entry: .substrate/venv/bin/python -I scripts/check_postmortem_gates_resolved.py
+        language: system
+        files: ^docs/postmortems/.*\.md$
+        pass_filenames: false
+      - id: substrate-audit-manual
+        name: Substrate audit report
+        entry: .substrate/venv/bin/python -I scripts/substrate_audit.py --mode quick --write-report
+        language: system
+        stages: [manual]
+        pass_filenames: false

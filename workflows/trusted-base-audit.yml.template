@@ -1,0 +1,96 @@
+name: Trusted-base policy audit
+# STRICT ROOT OF TRUST. The local `manage.sh check` and agent-config-audit
+# run validators FROM THE PR — so a PR that edits both the policy AND its
+# validator can pass its own gate (the v3.2.17 finding). The earlier overlay
+# approach OVERWROTE the PR's validators with base copies, which silently
+# masked a PR that was trying to change a validator (the v3.2.18 finding).
+#
+# This job instead FREEZES the validator/policy CODE relative to the base
+# branch: a PR may NOT modify any trusted policy/validator file. Because the
+# validators are then provably identical to the protected base, running them
+# against the PR is equivalent to running the base validators — and they DO
+# judge the PR's data and agent context (harness_patterns.json, AGENTS.md,
+# docs, .substrate/config), which PRs may legitimately change. Policy/
+# validator changes must go through the protected substrate release (a
+# maintainer updating base + pins under CODEOWNERS), not a normal PR.
+#
+# Requires branch protection / a ruleset that makes this check REQUIRED and
+# restricts who can edit the base-branch validators (CODEOWNERS). Without
+# branch protection this is advisory — see README "Root of trust".
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  trusted-base-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 0}
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      - name: Freeze guard — a PR may not modify trusted policy/validator code
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin "${{ github.base_ref }}"
+          # Freeze ALL code that enforces policy OR runs CI: every validator and
+          # gate (scripts/ — strict mode RESERVES scripts/ for substrate; put
+          # project scripts elsewhere), the runner (manage.sh), the pre-commit
+          # config, every workflow, AND the profile lock (.substrate/required_
+          # profile). NOT the audited DATA/content — harness_patterns.json is
+          # .json (data) and AGENTS.md / docs / .substrate/config (command
+          # values) may change. (v3.2.19/20 findings.)
+          TRUSTED="scripts manage.sh .pre-commit-config.yaml .github/workflows .substrate/required_profile"
+          # carve the one DATA file back out of scripts/ (PRs may extend it; the
+          # frozen check_harness_patterns.py validates it against pinned hashes).
+          changed="$(git diff --name-only "origin/${{ github.base_ref }}...HEAD" -- $TRUSTED \
+                      | grep -v '^scripts/harness_patterns\.json$' || true)"
+          if [ -n "$changed" ]; then
+            echo "::error::This PR modifies frozen policy/validator/CI code:"
+            echo "$changed" | sed 's/^/::error::  - /'
+            echo "::error::These files are frozen relative to the base branch. Update them"
+            echo "::error::only through the protected substrate release process (maintainer +"
+            echo "::error::CODEOWNERS), never a normal PR — see README 'Root of trust'."
+            exit 1
+          fi
+          # Profile authority: even though .substrate/config is editable DATA
+          # (command values), the PROFILE within it is frozen — a PR must not
+          # flip strict->standard/starter to disable strict-only behavior.
+          if git diff "origin/${{ github.base_ref }}...HEAD" -- .substrate/config \
+               | grep -Eq '^[+-]\s*SUBSTRATE_PROFILE='; then
+            echo "::error::This PR changes SUBSTRATE_PROFILE in .substrate/config."
+            echo "::error::The profile is frozen in strict mode (.substrate/required_profile)."
+            echo "::error::Lowering it disables strict-only behavior — route through release."
+            exit 1
+          fi
+          echo "freeze-guard: ok — no frozen policy/validator/CI/profile change"
+      - name: Run the (frozen) validators + strict governance against PR content
+        run: |
+          set -euo pipefail
+          # Validators + runner are provably == base (freeze guard), so this
+          # judges the PR's data/content with base-trusted code. Run the
+          # validators DIRECTLY, isolated (-I), not via manage.sh.
+          python3 -I scripts/check_import_shadowing.py
+          python3 -I scripts/check_python_syntax.py
+          python3 -I scripts/check_harness_patterns.py
+          python3 -I scripts/check_policy_code_integrity.py
+          python3 -I scripts/check_harness_smoke.py
+          python3 -I scripts/check_hook_smoke.py
+          python3 -I scripts/check_agent_harness.py
+          python3 -I scripts/check_substrate_config.py
+          # Static strict GOVERNANCE (CODEOWNERS coverage/placeholder/3MB/owner
+          # syntax + profile lock) — no venv needed. The trusted-base job is the
+          # strict root of trust, so it must verify governance too, not only the
+          # policy-integrity chain.
+          python3 -I scripts/substrate_doctor.py --strict-governance
+      - name: Verify GitHub branch protection enforces the root of trust
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # Advisory by default: the default GITHUB_TOKEN usually cannot read
+        # branch protection (needs admin), so this SKIPS rather than fails for
+        # a permissions reason. To ENFORCE, give it an admin-scoped token and
+        # add `--require` so a branch lacking required-check / code-owner-review
+        # protection fails the audit.
+        run: python3 -I scripts/check_github_governance.py --branch "${{ github.base_ref }}"

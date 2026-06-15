@@ -1,0 +1,37 @@
+name: Agent config audit
+on:
+  # NO `paths:` filter — runs on EVERY PR. A path filter has to be kept in
+  # sync with the canonical surface inventory and silently drifts; running
+  # always trades a little CI time for zero trigger-drift. The harness
+  # itself derives the scanned set from scripts/_substrate_surfaces.py.
+  pull_request:
+  schedule:
+    - cron: "30 9 * * 1"
+  workflow_dispatch:
+jobs:
+  agent-config-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      # The FULL policy-integrity chain — kit's own local validators, no
+      # external package install, no unpinned third-party guard, no advisory
+      # `|| true`. A dedicated "Agent config audit" workflow must not show
+      # green while the policy layer is broken (it ran only the harness
+      # before). Order matches `manage.sh check`: syntax → pattern integrity
+      # → hook behavior → harness surface scan → config command values.
+      - name: Policy integrity + agent config audit
+        run: |
+          set -euo pipefail
+          # -I (isolated): a repo-local stdlib shadow can't hijack a validator.
+          python3 -I scripts/check_import_shadowing.py
+          python3 -I scripts/check_python_syntax.py
+          python3 -I scripts/check_harness_patterns.py
+          python3 -I scripts/check_policy_code_integrity.py
+          python3 -I scripts/check_harness_smoke.py
+          python3 -I scripts/check_hook_smoke.py
+          python3 -I scripts/check_agent_harness.py
+          python3 -I scripts/check_substrate_config.py
+          python3 -I scripts/run_substrate_evals.py

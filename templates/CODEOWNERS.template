@@ -1,0 +1,91 @@
+# CODEOWNERS — multi-team review routing
+#
+# GitHub uses this file to auto-request reviews from the right team
+# when a PR touches files matching the pattern. Order matters: LATER
+# patterns override earlier ones (rightmost wins).
+#
+# To activate:
+#   1. Rename .github/CODEOWNERS.suggested to .github/CODEOWNERS. The
+#      bootstrap installs it as `.suggested` ON PURPOSE: an active
+#      CODEOWNERS whose @teams don't exist in your org blocks EVERY PR
+#      merge under branch protection. Fill in real teams/users below
+#      FIRST, then rename. (`./manage.sh doctor` warns while it's still
+#      `.suggested`.)
+#   2. Configure branch protection on `main` to require review from
+#      Code Owners. Settings → Branches → Branch protection rules →
+#      Require review from Code Owners.
+#   3. Each `@team-or-user` reference must exist in the org and have
+#      write access to the repo.
+#
+# Syntax: <pattern> <space> <@user-or-team>+
+#   - patterns are gitignore-style globs
+#   - teams are `@org/team-name`
+#   - users are `@username`
+#   - multiple owners separated by space (any can approve)
+#
+# Customize the entries below. The defaults are placeholders.
+
+# ---------- Default owner (catches everything not matched below) ----
+*                               @your-org/maintainers
+
+# ORDER MATTERS: GitHub uses the LAST matching rule. Broad rules go
+# FIRST; the specific substrate rules below come LAST so they win for
+# the agent/hook surfaces. (If you move the broad `/.github/` rule below
+# `/.github/hooks/`, devops would silently own the hooks — a footgun.)
+
+# ---------- CI / infra (broad — placed FIRST so specifics win) ------
+/.github/                       @your-org/devops
+/Dockerfile                     @your-org/devops
+/docker-compose.yml             @your-org/devops
+
+# ---------- Decisions + postmortems — architectural review ---------
+/docs/decisions/                @your-org/architects
+/docs/postmortems/              @your-org/architects @your-org/sre
+
+# ---------- Substrate — change reviews (LAST so they override broad) -
+# The substrate is load-bearing for every commit. Edits to it should
+# get reviewed by the team that owns the discipline + at least one
+# operator who runs the pipeline daily. Directory rules end in `/` so
+# they cover nested files recursively (GitHub semantics).
+/scripts/                       @your-org/substrate-maintainers
+/tests/                         @your-org/substrate-maintainers
+# Auditor-reference + architecture docs are agent-facing (read by the
+# checklist-auditor, ultrareview, and on architecture work).
+/docs/blind-spot-checklists/    @your-org/substrate-maintainers
+/docs/templates/                @your-org/substrate-maintainers
+/docs/ARCHITECTURE.md           @your-org/substrate-maintainers
+/docs/INTENT.md                 @your-org/substrate-maintainers
+/docs/README.md                 @your-org/substrate-maintainers
+# UI design system — agent reads it on UI work (only if --ui yes).
+/design-system/                 @your-org/frontend @your-org/design-system
+# manage.sh is privileged: CI runs `./manage.sh setup|doctor|check`.
+/manage.sh                      @your-org/substrate-maintainers
+/pytest.ini                     @your-org/substrate-maintainers
+/.pre-commit-config.yaml        @your-org/substrate-maintainers
+/.gitattributes                 @your-org/substrate-maintainers
+/.gitignore                     @your-org/substrate-maintainers
+/.github/dependabot.yml         @your-org/substrate-maintainers
+/AGENTS.md                      @your-org/substrate-maintainers
+/CLAUDE.md                      @your-org/substrate-maintainers
+# Agent-config + privileged-execution surfaces (hooks run with user perms).
+/.substrate/                    @your-org/substrate-maintainers
+/.claude/                       @your-org/substrate-maintainers
+/.codex/                        @your-org/substrate-maintainers
+/.agents/                       @your-org/substrate-maintainers
+/.github/hooks/                 @your-org/substrate-maintainers
+/.github/instructions/          @your-org/substrate-maintainers
+/.github/workflows/             @your-org/substrate-maintainers
+/.github/copilot-instructions.md @your-org/substrate-maintainers
+/.github/CODEOWNERS             @your-org/substrate-maintainers
+# HISTORY is append-only (merge=union), but agents READ it at startup —
+# so it is an agent-context surface and MUST be owned (an ownerless line
+# here would override the catch-all via last-match and leave it unowned).
+/docs/HISTORY.md                @your-org/substrate-maintainers @your-org/sre
+
+# ---------- Project-specific source paths (CUSTOMIZE) ---------------
+# Add patterns for your project's modules. Examples:
+#   /src/auth/                    @your-org/auth-team
+#   /src/billing/                 @your-org/billing-team
+#   /apps/web/                    @your-org/frontend
+#   /infra/terraform/             @your-org/devops
+#   *.sql                         @your-org/data-platform

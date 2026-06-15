@@ -1,0 +1,47 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 0}
+      # The substrate's own validators are Python (stdlib + PyYAML),
+      # regardless of the project's primary language.
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      - name: Bootstrap toolchain (python)
+        run: |
+          set -euo pipefail
+          if [ -f pyproject.toml ]; then
+            pipx install uv
+            uv sync --group dev
+          else
+            python -m pip install --upgrade pip PyYAML pre-commit
+          fi
+      - name: Node toolchain
+        if: hashFiles('package.json') != ''
+        uses: actions/setup-node@v4
+        with: {node-version: "20"}
+      - name: Node install
+        if: hashFiles('package.json') != ''
+        run: npm ci || npm install
+      - name: Go toolchain
+        if: hashFiles('go.mod') != ''
+        uses: actions/setup-go@v5
+        with: {go-version: "stable"}
+      - name: Substrate setup (creates .substrate/venv with validators)
+        run: ./manage.sh setup
+      - name: Doctor (readiness — --strict for strict profile, else --operational)
+        run: |
+          MODE=--operational
+          grep -q 'SUBSTRATE_PROFILE="strict"' .substrate/config && MODE=--strict
+          ./manage.sh doctor "$MODE"
+      - name: Substrate + language checks
+        run: ./manage.sh check

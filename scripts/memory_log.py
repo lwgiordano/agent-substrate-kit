@@ -1,0 +1,288 @@
+#!/usr/bin/env python3
+"""Append-only, hash-chained substrate memory.
+
+An INTEGRITY TRIPWIRE, not adversarial tamper-proofing. The durable
+memory is an append-only event log with a SHA-256 hash chain. It
+reliably detects accidental corruption, truncation, reordering, and
+naive single-event edits. It does NOT prove history was never
+rewritten: anyone with write access can edit an old event AND recompute
+every subsequent hash. For that guarantee you need an anchor OUTSIDE
+the agent's write scope — `memory_log.py anchor` writes the current head
+hash to a git note (refs/notes/substrate-memory), outside events.jsonl;
+`verify --anchor` checks the head against it. For strong assurance push
+that note to a protected remote or anchor in CI.
+
+CURRENT_SESSION.md is a derived, disposable VIEW — never authoritative.
+
+Layout:
+  .substrate/memory/events.jsonl   append-only; one JSON event per line
+
+Each event:
+  {"seq": N, "ts": "...", "type": "...", "prev": "<hash N-1>",
+   "hash": "<sha256(prev + canonical payload)>", "data": {...redacted...}}
+
+The chain root (seq 0) uses prev = 64 zeros. Appends take an exclusive
+file lock (flock where available) so concurrent hooks/subagents don't
+race the sequence number. The events file should be COMMITTED.
+
+Stdlib only (runs from hooks). Secrets redacted on write.
+
+Usage:
+  memory_log.py append --type <t> --json '<data>'   # or --message TEXT
+  memory_log.py verify [--anchor]   # walk chain; --anchor checks head note
+  memory_log.py anchor              # write head hash to a git note
+  memory_log.py tail [N]
+  memory_log.py tasks
+
+Exit codes: 0 ok | 1 chain broken / anchor mismatch / error.
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import re
+import subprocess
+import sys
+from contextlib import suppress
+from datetime import UTC, datetime
+from pathlib import Path
+
+try:
+    import fcntl  # unix; absent on Windows
+except Exception:  # pragma: no cover
+    fcntl = None
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+try:
+    from _substrate_root import substrate_root as _sr
+    ROOT = _sr()
+except Exception:
+    ROOT = Path.cwd()
+MEM = ROOT / ".substrate" / "memory"
+EVENTS = MEM / "events.jsonl"
+ZERO = "0" * 64
+
+_SECRET_PATTERNS = [
+    re.compile(r"\bsk-[A-Za-z0-9][A-Za-z0-9_-]{20,}\b"),
+    re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b"),
+    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+    re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"),
+    re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----"),
+    re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"),
+    re.compile(
+        r"(?i)\b(?:api[_-]?key|secret|token|password|passwd|bearer)\b\s*[:=]\s*"
+        r"['\"]?[A-Za-z0-9._\-/+]{8,}['\"]?"
+    ),
+]
+
+
+def _redact(obj):
+    if isinstance(obj, str):
+        out = obj
+        for rx in _SECRET_PATTERNS:
+            out = rx.sub("[REDACTED-SECRET]", out)
+        return out
+    if isinstance(obj, list):
+        return [_redact(x) for x in obj]
+    if isinstance(obj, dict):
+        return {k: _redact(v) for k, v in obj.items()}
+    return obj
+
+
+def _canonical(payload: dict) -> str:
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+
+def _event_hash(prev: str, seq: int, ts: str, etype: str, data) -> str:
+    payload = _canonical({"seq": seq, "ts": ts, "type": etype, "prev": prev, "data": data})
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _read_events() -> list[dict]:
+    if not EVENTS.exists():
+        return []
+    out = []
+    for line in EVENTS.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(json.loads(line))
+        except Exception:
+            out.append({"_corrupt": line})
+    return out
+
+
+def append(etype: str, data) -> int:
+    try:
+        MEM.mkdir(parents=True, exist_ok=True)
+        lock = MEM / ".lock"
+        with lock.open("w") as lf:
+            # Exclusive lock so concurrent hooks/subagents can't race the
+            # sequence number (read-tail-then-append must be atomic).
+            if fcntl is not None:
+                with suppress(Exception):
+                    fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
+            events = _read_events()
+            prev = events[-1].get("hash", ZERO) if events else ZERO
+            seq = len(events)
+            ts = datetime.now(UTC).replace(microsecond=0).isoformat()
+            data = _redact(data)
+            h = _event_hash(prev, seq, ts, etype, data)
+            event = {"seq": seq, "ts": ts, "type": etype, "prev": prev, "hash": h, "data": data}
+            with EVENTS.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(event, ensure_ascii=True) + "\n")
+            if fcntl is not None:
+                with suppress(Exception):
+                    fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
+    except Exception as e:
+        print(f"memory-log: append failed: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _head_hash() -> str:
+    events = _read_events()
+    return events[-1].get("hash", ZERO) if events else ZERO
+
+
+def anchor() -> int:
+    """Write the current head hash to a git note outside events.jsonl."""
+    head = _head_hash()
+    try:
+        sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT,
+                             capture_output=True, text=True, timeout=10)
+        if sha.returncode != 0:
+            print("memory-log: anchor needs a git repo with at least one commit", file=sys.stderr)
+            return 1
+        r = subprocess.run(
+            ["git", "notes", "--ref", "substrate-memory", "add", "-f",
+             "-m", f"substrate-memory-head:{head}", sha.stdout.strip()],
+            cwd=ROOT, capture_output=True, text=True, timeout=10,
+        )
+        if r.returncode != 0:
+            print(f"memory-log: anchor failed: {r.stderr.strip()[:160]}", file=sys.stderr)
+            return 1
+    except Exception as e:
+        print(f"memory-log: anchor error: {e}", file=sys.stderr)
+        return 1
+    print(f"memory-log: anchored head {head[:12]} to git note (refs/notes/substrate-memory)")
+    return 0
+
+
+def _anchored_head() -> str | None:
+    try:
+        sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT,
+                             capture_output=True, text=True, timeout=10)
+        if sha.returncode != 0:
+            return None
+        r = subprocess.run(["git", "notes", "--ref", "substrate-memory", "show", sha.stdout.strip()],
+                          cwd=ROOT, capture_output=True, text=True, timeout=10)
+        if r.returncode != 0:
+            return None
+        for line in r.stdout.splitlines():
+            if line.startswith("substrate-memory-head:"):
+                return line.split(":", 1)[1].strip()
+    except Exception:
+        return None
+    return None
+
+
+def verify(check_anchor: bool = False) -> int:
+    events = _read_events()
+    prev = ZERO
+    for i, ev in enumerate(events):
+        if "_corrupt" in ev:
+            print(f"memory-log: BREAK at line {i + 1}: not valid JSON", file=sys.stderr)
+            return 1
+        if ev.get("seq") != i:
+            print(f"memory-log: BREAK at seq {i}: out-of-order/missing seq", file=sys.stderr)
+            return 1
+        if ev.get("prev") != prev:
+            print(f"memory-log: BREAK at seq {i}: prev-hash mismatch", file=sys.stderr)
+            return 1
+        expect = _event_hash(prev, ev["seq"], ev["ts"], ev["type"], ev.get("data"))
+        if ev.get("hash") != expect:
+            print(f"memory-log: BREAK at seq {i}: content hash mismatch (tampered)", file=sys.stderr)
+            return 1
+        prev = ev["hash"]
+    if check_anchor:
+        anchored = _anchored_head()
+        if anchored is None:
+            print("memory-log: no anchor note for HEAD (run `memory_log.py anchor`)", file=sys.stderr)
+            return 1
+        if anchored != prev:
+            print("memory-log: ANCHOR MISMATCH — head hash differs from the git-note "
+                  "anchor; history was rewritten since the last anchor", file=sys.stderr)
+            return 1
+        print(f"memory-log: chain OK + anchor verified ({len(events)} events)")
+        return 0
+    print(f"memory-log: chain OK ({len(events)} events)")
+    return 0
+
+
+def tail(n: int) -> int:
+    events = _read_events()
+    for ev in events[-n:]:
+        if "_corrupt" in ev:
+            print("CORRUPT LINE")
+            continue
+        print(f"[{ev.get('seq')}] {ev.get('ts')} {ev.get('type')}: "
+              f"{_canonical(ev.get('data'))[:120]}")
+    return 0
+
+
+def tasks() -> int:
+    events = _read_events()
+    latest: dict[str, dict] = {}
+    for ev in events:
+        if ev.get("type") == "task" and isinstance(ev.get("data"), dict):
+            tid = str(ev["data"].get("id", ev.get("seq")))
+            latest[tid] = ev["data"]
+    if not latest:
+        print("memory-log: no task events")
+        return 0
+    for tid, d in latest.items():
+        print(f"- {tid}: {d.get('status', '?')} — {d.get('content', '')[:80]}")
+    return 0
+
+
+def main(argv: list[str]) -> int:
+    ap = argparse.ArgumentParser()
+    sub = ap.add_subparsers(dest="cmd")
+    ap_app = sub.add_parser("append")
+    ap_app.add_argument("--type", default="note")
+    ap_app.add_argument("--json", default="")
+    ap_app.add_argument("--message", default="")
+    ap_ver = sub.add_parser("verify")
+    ap_ver.add_argument("--anchor", action="store_true")
+    sub.add_parser("anchor")
+    ap_tail = sub.add_parser("tail")
+    ap_tail.add_argument("n", nargs="?", type=int, default=10)
+    sub.add_parser("tasks")
+    a = ap.parse_args(argv)
+    if a.cmd == "append":
+        if a.json:
+            try:
+                data = json.loads(a.json)
+            except Exception:
+                print("memory-log: --json is not valid JSON", file=sys.stderr)
+                return 1
+        else:
+            data = {"message": a.message}
+        return append(a.type, data)
+    if a.cmd == "verify":
+        return verify(check_anchor=a.anchor)
+    if a.cmd == "anchor":
+        return anchor()
+    if a.cmd == "tail":
+        return tail(a.n)
+    if a.cmd == "tasks":
+        return tasks()
+    ap.print_help()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -1,0 +1,386 @@
+#!/usr/bin/env python3
+"""Verify that the agent substrate is installed and wired correctly.
+
+Readiness levels (default runs quick+security+subprocess checks):
+  --quick        file presence + hook wiring only (fast, no subprocesses)
+  --security     adds exfil-guard + secret-deny + absolute-path checks
+  --operational  adds "can it actually RUN?" — substrate venv + pre-commit
+                 present, validators import, configured lang commands
+                 resolve. A pass means setup/check will work, not just
+                 that files exist.
+"""
+from __future__ import annotations
+import argparse, json, shutil, subprocess, sys
+from pathlib import Path
+# Use the shared root resolver (env override / git toplevel / ancestor) like
+# every other validator+hook, so `doctor` is correct when launched from a
+# subdirectory instead of silently checking the wrong tree. Falls back to cwd.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+try:
+    from _substrate_root import substrate_root as _sr
+    ROOT=_sr()
+except Exception:
+    ROOT=Path.cwd()
+REQ=['AGENTS.md','CLAUDE.md','.codex/config.toml','.codex/hooks.json','.substrate/config','.agents/skills/self-audit/SKILL.md','.claude/skills/self-audit/SKILL.md','.claude/skills/session-recovery/SKILL.md','.claude/agents/security-auditor.md','.claude/agents/checklist-auditor.md','.codex/agents/security-auditor.toml','.claude/settings.json','.github/copilot-instructions.md','.github/hooks/exfil-guard.json','.github/instructions/substrate.instructions.md','scripts/check_doc_drift.py','scripts/check_agent_harness.py','scripts/check_exfil_guard.py','scripts/copilot_hook_adapter.py','scripts/session_handoff.py','scripts/todo_state_hook.py','scripts/lint_on_write.py','scripts/memory_log.py','scripts/lang_gate.sh','scripts/run_python_gate.sh','scripts/_substrate_config.sh','scripts/check_substrate_config.py','scripts/command_policy.py','scripts/harness_patterns.json','scripts/_substrate_root.py','scripts/_substrate_surfaces.py','scripts/substrate_audit.py','scripts/release_gate.sh','scripts/update_manifest.py','docs/HISTORY.md','docs/knowledge/00_substrate.md','docs/manifest.json','.pre-commit-config.yaml','.github/workflows/ci.yml','.github/workflows/scheduled-audit.yml','.github/workflows/agent-config-audit.yml','manage.sh']
+WARN=['docs/ARCHITECTURE.md','docs/INTENT.md']
+def _codex_hooks_use_canonical_flag():
+    p=ROOT/'.codex/config.toml'
+    if not p.exists(): return True
+    txt=p.read_text(encoding='utf-8',errors='replace')
+    # canonical is `hooks = true`; deprecated alias is `codex_hooks`.
+    import re as _re
+    return bool(_re.search(r'(?m)^\s*hooks\s*=\s*true', txt))
+def _settings():
+    p=ROOT/'.claude/settings.json'
+    if not p.exists(): return None
+    try: return json.loads(p.read_text(encoding='utf-8'))
+    except Exception: return None
+def _hooks_wired(cfg):
+    if not cfg: return False
+    hooks=cfg.get('hooks',{})
+    return all(k in hooks for k in ('PreToolUse','PreCompact','SessionStart','PostToolUse'))
+def _hook_findings(cfg):
+    """Returns (blocks, warns) for hook security posture."""
+    b=[]; w=[]
+    if not cfg: return (['settings.json unreadable'], [])
+    hooks=cfg.get('hooks',{}); flat=json.dumps(hooks)
+    for script in ('session_handoff.py','todo_state_hook.py','lint_on_write.py','check_exfil_guard.py'):
+        if script not in flat: b.append(f'hook not wired: {script}')
+    if '$CLAUDE_PROJECT_DIR' not in flat: w.append('hooks should use absolute paths ($CLAUDE_PROJECT_DIR)')
+    missing_timeout=[h.get('command','?') for ms in hooks.values() for m in ms for h in m.get('hooks',[]) if 'timeout' not in h]
+    if missing_timeout: w.append(f'{len(missing_timeout)} hook(s) missing explicit timeout')
+    deny=cfg.get('permissions',{}).get('deny',[])
+    if not any('.env' in d for d in deny): w.append('settings.json permissions.deny does not cover .env')
+    return (b,w)
+def _profile():
+    cfg=ROOT/'.substrate/config'
+    if cfg.exists():
+        for line in cfg.read_text(encoding='utf-8',errors='replace').splitlines():
+            if line.strip().startswith('SUBSTRATE_PROFILE='):
+                return line.split('=',1)[1].strip().strip('"\'')
+    return 'standard'
+def _codeowners_path():
+    for loc in ('.github/CODEOWNERS','CODEOWNERS','docs/CODEOWNERS'):
+        if (ROOT/loc).exists(): return ROOT/loc
+    return None
+def _codeowners_active():
+    return _codeowners_path() is not None
+# Placeholder owners that GitHub would silently ignore (no real team).
+import re as _re_co
+_PLACEHOLDER_OWNER=_re_co.compile(r'(?i)@(?:your-org|your-team|org|example|team-or-user|changeme|change-me|todo)\b|<[^>]+>')
+def _codeowners_placeholder_owners():
+    """Returns list of placeholder owner tokens in the ACTIVE file.
+    GitHub assigns no owner for nonexistent teams, so a file full of
+    @your-org/* placeholders is a governance false-green."""
+    p=_codeowners_path()
+    if p is None: return []
+    bad=set()
+    try:
+        for line in p.read_text(encoding='utf-8',errors='replace').splitlines():
+            line=line.split('#',1)[0].strip()
+            if not line: continue
+            for tok in line.split()[1:]:  # owners follow the pattern
+                if _PLACEHOLDER_OWNER.search(tok): bad.add(tok)
+    except Exception: return []
+    return sorted(bad)
+def _codeowners_warn():
+    gh=ROOT/'.github'
+    if (gh/'CODEOWNERS.suggested').exists() and not _codeowners_active():
+        return 'CODEOWNERS.suggested present but no active .github/CODEOWNERS (fill in real teams, then rename)'
+    return None
+# Strict CODEOWNERS coverage derives from the CANONICAL surface inventory
+# (_substrate_surfaces.py), shared with the harness scanner and the
+# agent-config-audit trigger so the three cannot drift.
+try:
+    sys.path.insert(0, str((ROOT/'scripts')))
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from _substrate_surfaces import (OWNED_DIRS as _SENSITIVE_DIRS,
+        OWNED_FILES as _SENSITIVE_FILES, OPTIONAL_FILES as _SENSITIVE_OPTIONAL_FILES,
+        OPTIONAL_DIRS as _SENSITIVE_OPTIONAL_DIRS, COVERAGE_SKIP_PARTS as _COVERAGE_SKIP_PARTS)
+except Exception:  # pragma: no cover - fall back if inventory unreadable
+    _SENSITIVE_DIRS=['scripts','tests','.claude','.codex','.agents','docs/knowledge','docs/decisions','docs/blind-spot-checklists','docs/templates','.github/hooks','.github/instructions','.github/workflows']
+    _SENSITIVE_FILES=['AGENTS.md','CLAUDE.md','manage.sh','pytest.ini','.pre-commit-config.yaml','.gitattributes','.gitignore','.github/copilot-instructions.md','.github/dependabot.yml','.substrate/config','docs/HISTORY.md','docs/ARCHITECTURE.md','docs/INTENT.md']
+    _SENSITIVE_OPTIONAL_FILES=['.mcp.json']
+    _SENSITIVE_OPTIONAL_DIRS=['.github/skills','docs/postmortems']
+    _COVERAGE_SKIP_PARTS={'__pycache__','venv','node_modules','.pytest_cache','.ruff_cache','.mypy_cache'}
+def _sensitive_files_on_disk():
+    """Enumerate the actual privileged files that must be owned, plus the
+    ACTIVE CODEOWNERS file itself (wherever GitHub loads it from)."""
+    out=[]
+    for f in _SENSITIVE_FILES+_SENSITIVE_OPTIONAL_FILES:
+        if (ROOT/f).is_file(): out.append(f)
+    # The active CODEOWNERS file must own itself — and it may live at
+    # .github/, repo root, or docs/ (GitHub searches those in order).
+    co=_codeowners_path()
+    if co is not None: out.append(co.relative_to(ROOT).as_posix())
+    for d in _SENSITIVE_DIRS+_SENSITIVE_OPTIONAL_DIRS:
+        base=ROOT/d
+        if not base.is_dir(): continue
+        for p in base.rglob('*'):
+            if not p.is_file(): continue
+            rel=p.relative_to(ROOT)
+            if any(part in _COVERAGE_SKIP_PARTS for part in rel.parts): continue
+            out.append(rel.as_posix())
+    return sorted(set(out))
+# A "real" owner is a syntactically valid GitHub handle/team or email —
+# `@` alone or `x@` (no domain) is not a valid owner GitHub would honor.
+_VALID_OWNER=_re_co.compile(
+    r'^(?:@[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:/[A-Za-z0-9._-]+)?'
+    r'|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})$'
+)
+def _is_real_owner(tok):
+    return bool(_VALID_OWNER.match(tok)) and not _PLACEHOLDER_OWNER.search(tok)
+CODEOWNERS_MAX_BYTES=3_000_000  # GitHub will not load a CODEOWNERS file over 3 MB
+def _codeowners_too_large():
+    p=_codeowners_path()
+    try:
+        return p is not None and p.stat().st_size>CODEOWNERS_MAX_BYTES
+    except Exception:
+        return False
+def _co_pattern_to_regex(pat):
+    """Translate a CODEOWNERS pattern to a regex over a posix repo path,
+    matching GitHub's documented semantics:
+      - `*` matches a single path segment (does NOT cross `/`). So
+        `docs/*` covers `docs/a.md` but NOT `docs/sub/b.md`.
+      - a pattern ending in `/` covers that directory RECURSIVELY.
+      - `**` matches across `/` (recursive).
+      - a non-recursive pattern matches the file EXACTLY (no implicit
+        descendant coverage) — the conservative choice for a governance
+        gate (a false-red is safe; a false-green is not)."""
+    anchored=pat.startswith('/'); p=pat.lstrip('/'); dir_only=p.endswith('/'); p=p.rstrip('/')
+    out=[]; i=0
+    while i<len(p):
+        if p[i:i+2]=='**': out.append('.*'); i+=2; continue
+        c=p[i]
+        if c=='*': out.append('[^/]*')
+        elif c=='?': out.append('[^/]')
+        else: out.append(_re_co.escape(c))
+        i+=1
+    body=''.join(out)+('/.*' if dir_only else '')  # only `/`-terminated patterns recurse
+    rx=('^'+body+'$') if (anchored or '/' in p) else ('(^|.*/)'+body+'$')
+    try: return _re_co.compile(rx)
+    except Exception: return None
+def _codeowners_all_rules():
+    """[(pattern, [owners])] in file order — owners may be empty or placeholder."""
+    p=_codeowners_path()
+    if p is None: return []
+    rules=[]
+    for line in p.read_text(encoding='utf-8',errors='replace').splitlines():
+        line=line.split('#',1)[0].strip()
+        if not line: continue
+        parts=line.split()
+        if len(parts)<1: continue
+        rules.append((parts[0],parts[1:]))
+    return rules
+def _codeowners_owner_for(path, rules):
+    """GitHub last-match semantics: the LAST matching rule wins, even if
+    it has no owners (which leaves the path unowned)."""
+    last=None
+    for pat,owners in rules:
+        rx=_co_pattern_to_regex(pat)
+        if rx and rx.match(path): last=owners
+    return last  # None=no match | []=matched ownerless | [owners]
+def _codeowners_coverage_gaps():
+    """ACTUAL privileged files whose LAST matching rule has no real owner.
+    An owner is real if it is a GitHub handle (@user/@org/team) or an
+    email address, and not a placeholder."""
+    files=_sensitive_files_on_disk()
+    rules=_codeowners_all_rules()
+    if not rules: return files
+    gaps=[]
+    for s in files:
+        owners=_codeowners_owner_for(s,rules)
+        real=[o for o in (owners or []) if _is_real_owner(o)]
+        if not real: gaps.append(s)
+    # Cap the reported list; the count is what matters.
+    return gaps
+def _config_tool_warns():
+    cfg=ROOT/'.substrate/config'
+    if not cfg.exists(): return []
+    vals={}
+    for line in cfg.read_text(encoding='utf-8').splitlines():
+        line=line.split('#',1)[0].strip()
+        if '=' in line:
+            k,v=line.split('=',1); vals[k.strip()]=v.strip().strip('"\'')
+    w=[]
+    for key in ('LINT_CMD','TYPECHECK_CMD','TEST_CMD'):
+        cmd=vals.get(key,'')
+        if not cmd: continue
+        tool=cmd.replace('npx --no-install ','').split()[0]
+        if tool and tool not in ('uv','python','python3') and not shutil.which(tool):
+            w.append(f'{key} references "{tool}" which is not on PATH')
+    return w
+def run(cmd):
+    try:
+        p=subprocess.run(cmd,cwd=ROOT,capture_output=True,text=True,timeout=60); return p.returncode,(p.stdout+p.stderr).strip()
+    except Exception as e: return 1,str(e)
+def _operational_findings():
+    """Can the substrate actually RUN? Returns (blocks, warns)."""
+    b=[]; w=[]
+    subpy=ROOT/'.substrate/venv/bin/python'
+    if not subpy.exists():
+        b.append('.substrate/venv missing — run `./manage.sh setup` (validators cannot run without it)')
+        return (b,w)
+    rc,out=run([str(subpy),'-c','import yaml'])
+    if rc: b.append('substrate venv cannot import PyYAML (validators will fail): '+out[:120])
+    if not (ROOT/'.substrate/venv/bin/pre-commit').exists():
+        b.append('pre-commit not installed in substrate venv — run `./manage.sh setup`')
+    # Configured language commands must resolve (empty is fine = gate skipped).
+    cfg=ROOT/'.substrate/config'; vals={}
+    if cfg.exists():
+        for line in cfg.read_text(encoding='utf-8').splitlines():
+            line=line.split('#',1)[0].strip()
+            if '=' in line:
+                k,v=line.split('=',1); vals[k.strip()]=v.strip().strip('"\'')
+    for key in ('LINT_CMD','TYPECHECK_CMD','TEST_CMD'):
+        cmd=vals.get(key,'')
+        if not cmd: continue
+        first=cmd.split()[0]
+        # adapter scripts and shell builtins are fine; check real binaries
+        if first in ('bash','sh','npm','npx','go','uv','python','python3'): continue
+        if not shutil.which(first) and not (ROOT/first).exists():
+            b.append(f'{key} entrypoint "{first}" not runnable')
+    # Explicit runner must be available (no silent fallback to a
+    # different env than setup used — the v3.2.1 runner-mismatch finding).
+    runner=vals.get('SUBSTRATE_RUNNER','auto')
+    if runner=='uv' and not shutil.which('uv'):
+        b.append('SUBSTRATE_RUNNER=uv but uv is not on PATH')
+    if runner=='poetry' and not shutil.which('poetry'):
+        b.append('SUBSTRATE_RUNNER=poetry but poetry is not on PATH')
+    # Durable memory chain integrity (if a log exists).
+    if (ROOT/'.substrate/memory/events.jsonl').exists():
+        rc,out=run([str(subpy),'scripts/memory_log.py','verify'])
+        if rc: b.append('memory chain broken: '+out.strip()[:160])
+    return (b,w)
+def _go_live(blocks, warns, as_json=False):
+    """Aggregate GO-LIVE readiness: repo-local PASS/FAIL + a production-hardening
+    posture (sandbox, governance, anchor) a repo CANNOT prove on its own.
+    Anti-overclaim: never reports production-hardened while the sandbox tier is
+    absent. `as_json` emits a STABLE machine-readable contract — the single
+    integration point future layers (sandbox, governance, installers, agents)
+    add rows to (v3.3.12)."""
+    repo_ok = not blocks
+    eval_ok = None
+    ev = ROOT / 'scripts' / 'run_substrate_evals.py'
+    if ev.is_file():
+        rc, _ = run([sys.executable, '-I', str(ev), '--fast', '--no-trace'])
+        eval_ok = (rc == 0)
+    tb = (ROOT / '.github' / 'workflows' / 'trusted-base-audit.yml').exists()
+    anchored = False
+    try:
+        sys.path.insert(0, str(ROOT / 'scripts'))
+        import memory_log
+        anchored = memory_log._anchored_head() is not None
+    except Exception:
+        anchored = False
+    checks = [{'id': 'validators', 'status': 'pass' if repo_ok else 'fail',
+               'reason': '' if repo_ok else f'{len(blocks)} repo-local blocker(s)'}]
+    if eval_ok is not None:
+        checks.append({'id': 'evals', 'status': 'pass' if eval_ok else 'fail',
+                       'reason': '' if eval_ok else 'fast eval suite failed'})
+    checks.append({'id': 'trusted_base_workflow', 'status': 'pass' if tb else 'warn',
+                   'reason': '' if tb else 'not present (strict-only; bootstrap --profile strict)'})
+    checks.append({'id': 'github_governance', 'status': 'warn',
+                   'reason': 'cannot verify from repo files; run check_github_governance.py --require in CI'})
+    checks.append({'id': 'sandbox', 'status': 'warn',
+                   'reason': 'not enabled — strict exfil is a tripwire, not containment (DESIGN.md sandbox tier)'})
+    checks.append({'id': 'memory_anchor', 'status': 'pass' if anchored else 'warn',
+                   'reason': '' if anchored else 'not anchored — run `./manage.sh memory anchor` + push to a protected remote'})
+    repo_pass = repo_ok and eval_ok is not False
+    hardened = repo_pass and all(c['status'] == 'pass' for c in checks)
+    if as_json:
+        print(json.dumps({'repo_local': 'pass' if repo_pass else 'fail',
+                          'production_hardened': hardened,
+                          'checks': checks, 'blockers': blocks}, indent=2))
+        return 0 if repo_pass else 1
+    print('GO-LIVE REPORT'); print('=' * 48)
+    for c in checks:
+        tag = {'pass': 'PASS ', 'fail': 'FAIL ', 'warn': 'WARN '}[c['status']]
+        print(tag + c['id'] + ('' if not c['reason'] else ' — ' + c['reason']))
+    if blocks:
+        print('\nrepo-local BLOCKERS:')
+        for b in blocks:
+            print('  - ' + b)
+    if not repo_pass:
+        print('\ngo-live: NOT READY — repo-local checks are failing'); return 1
+    if hardened:
+        print('\ngo-live: PASS (production-hardened)'); return 0
+    print('\ngo-live: PASS (repo-local) / NOT PRODUCTION-HARDENED — sandbox + '
+          'enforced GitHub governance still required before high-stakes use')
+    return 0
+
+
+def main():
+    ap=argparse.ArgumentParser(); ap.add_argument('--quick',action='store_true'); ap.add_argument('--security',action='store_true'); ap.add_argument('--operational',action='store_true'); ap.add_argument('--strict',action='store_true'); ap.add_argument('--strict-governance',dest='strict_governance',action='store_true'); ap.add_argument('--go-live',dest='go_live',action='store_true'); ap.add_argument('--json',action='store_true'); a=ap.parse_args()
+    # --strict = operational + security + governance (the coherent
+    # high-stakes contract). full (no flag) = everything.
+    # --strict-governance = the STATIC strict checks ONLY (CODEOWNERS coverage,
+    #   placeholders, 3MB, owner syntax, policy integrity) WITHOUT the
+    #   operational venv checks — for the trusted-base CI job, which has no
+    #   .substrate/venv. It enforces strict governance regardless of profile.
+    if a.strict: a.operational=True; a.security=True
+    if a.strict_governance: a.security=True
+    full=not (a.quick or a.security or a.operational or a.strict or a.strict_governance)
+    blocks=[]; warns=[]
+    for r in REQ:
+        if not (ROOT/r).exists(): blocks.append(f'missing required file: {r}')
+    for r in WARN:
+        if not (ROOT/r).exists(): warns.append(f'optional/recommended file missing: {r}')
+    if (ROOT/'CLAUDE.md').exists() and '@AGENTS.md' not in (ROOT/'CLAUDE.md').read_text(encoding='utf-8',errors='replace'): blocks.append('CLAUDE.md does not import AGENTS.md')
+    cfg=_settings()
+    if not _hooks_wired(cfg): blocks.append('.claude/settings.json missing lifecycle hooks (PreToolUse/PreCompact/SessionStart/PostToolUse)')
+    if a.security or full:
+        hb,hw=_hook_findings(cfg); blocks+=hb; warns+=hw
+        co=_codeowners_warn()
+        strict_gov = (_profile()=='strict' or a.strict or a.strict_governance)
+        if co:
+            # strict profile OR --strict mode requires an ACTIVE CODEOWNERS.
+            (blocks if strict_gov else warns).append(co)
+        # An ACTIVE CODEOWNERS full of placeholder owners is a false-green:
+        # GitHub assigns no owner for nonexistent teams.
+        ph=_codeowners_placeholder_owners()
+        if ph:
+            msg=f'CODEOWNERS has placeholder owners GitHub will ignore: {", ".join(ph[:5])}'
+            (blocks if strict_gov else warns).append(msg)
+        # GitHub will not load a CODEOWNERS file over 3 MB — owners go
+        # unrequested. A large file is a governance false-green.
+        if _codeowners_too_large():
+            (blocks if strict_gov else warns).append('CODEOWNERS exceeds GitHub 3 MB load limit (file would not be honored)')
+        # Strict requires real-owner COVERAGE of the ACTUAL privileged files,
+        # not merely "a non-placeholder file exists".
+        if strict_gov and _codeowners_active():
+            gaps=_codeowners_coverage_gaps()
+            if gaps:
+                blocks.append(f'CODEOWNERS leaves {len(gaps)} privileged file(s) unowned: {", ".join(gaps[:6])}'+(' …' if len(gaps)>6 else ''))
+        warns+=_config_tool_warns()
+        if not _codex_hooks_use_canonical_flag(): warns.append('.codex/config.toml uses deprecated codex_hooks flag (use `hooks = true`)')
+        # Safety-policy integrity: governed Python must compile (a broken
+        # security hook fails-open as rc1, not blocking rc2), and the
+        # harness pattern DATA must be intact (weakening it disables the
+        # harness AND the config command check at once).
+        for script,msg in [('scripts/check_import_shadowing.py','a repo-local file shadows a stdlib module (can subvert the hash validators)'),
+                           ('scripts/check_python_syntax.py','governed Python failed to compile (a broken security hook would fail-open, not block)'),
+                           ('scripts/check_harness_patterns.py','harness safety-policy data invalid or weakened'),
+                           ('scripts/check_policy_code_integrity.py','policy/scanner logic altered/redefined (AST pin mismatch)'),
+                           ('scripts/check_harness_smoke.py','agent-harness scanner does not block injected context (stubbed?)'),
+                           ('scripts/check_hook_smoke.py','a security hook is not enforcing (compile-clean but neutered)')]:
+            if (ROOT/script).exists():
+                rc,out=run([sys.executable,'-I',script])  # isolated: no repo-local stdlib shadow
+                if rc: blocks.append(msg); warns.append(out)
+    if a.operational or full:
+        ob,ow=_operational_findings(); blocks+=ob; warns+=ow
+    if full:
+        for cmd,msg in [([sys.executable,'scripts/update_manifest.py','--check'],'manifest stale'),([sys.executable,'scripts/check_agent_harness.py'],'agent harness failed')]:
+            rc,out=run(cmd)
+            if rc: blocks.append(msg); warns.append(out)
+    if a.go_live:
+        return _go_live(blocks, warns, as_json=a.json)
+    if blocks:
+        print('substrate-doctor: BLOCK'); [print('  - '+b) for b in blocks]
+        if warns: print('\nwarnings/details:'); [print('  - '+w) for w in warns if w]
+        return 1
+    if warns:
+        print('substrate-doctor: PASS with warnings'); [print('  - '+w) for w in warns if w]
+    else: print('substrate-doctor: PASS')
+    return 0
+if __name__=='__main__': sys.exit(main())

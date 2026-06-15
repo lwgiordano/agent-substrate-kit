@@ -1,0 +1,24 @@
+{
+  "_doc": "Danger/secret/injection regexes for check_agent_harness.py, held as DATA so the scanner's own .py contains no pattern source and can be scanned normally (no bypassable line-allowlist). This file is scanned secrets-only; weakening it is governed by CODEOWNERS + the validator tests.",
+  "secret": [
+    ["OpenAI-style API key", "\\bsk-[A-Za-z0-9][A-Za-z0-9_-]{20,}\\b"],
+    ["GitHub token", "\\bgh[pousr]_[A-Za-z0-9_]{20,}\\b"],
+    ["AWS access key", "\\bAKIA[0-9A-Z]{16}\\b"],
+    ["private key header", "-----BEGIN (RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----"],
+    ["inline API key assignment", "(?i)\\b(api[_-]?key|secret|token)\\s*=\\s*['\\\"][^'\\\"]{12,}['\\\"]"]
+  ],
+  "shell_danger": [
+    ["permission bypass", "--dangerously-skip-permissions"],
+    ["hook-trust bypass", "--dangerously-bypass-hook-trust"],
+    ["secret-cmd override in config", "SUBSTRATE_ALLOW_SECRET_CMD\\s*=\\s*['\\\"]?(?:1|true|yes)"],
+    ["curl pipe shell", "curl\\s+[^\\n|]+\\|\\s*(sh|bash)"],
+    ["wget pipe shell", "wget\\s+[^\\n|]+\\|\\s*(sh|bash)"],
+    ["destructive rm", "rm\\s+-rf\\s+/(\\s|$)"],
+    ["world-writable chmod", "chmod\\s+-R\\s+777"]
+  ],
+  "injection": [
+    ["prompt injection phrase", "(?i)\\b(?:ignore|disregard|forget|override)\\b(?:\\s+\\w+){0,4}\\s+(?:instructions|rules|guardrails|prompt)\\b"],
+    ["prompt injection role-reset", "(?i)\\b(?:you\\s+are\\s+now|from\\s+now\\s+on|new\\s+instructions?:|system\\s+override)\\b"],
+    ["hidden prompt exfiltration", "(?i)(reveal|print|dump|show|repeat)\\s+(the\\s+)?(hidden|system|developer|initial)\\s+(prompt|message|instructions)"]
+  ]
+}

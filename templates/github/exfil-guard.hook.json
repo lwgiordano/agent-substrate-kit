@@ -1,0 +1,27 @@
+{
+  "_doc": "GitHub Copilot coding-agent hook. Schema: https://docs.github.com/en/copilot/reference/hooks-configuration . The Copilot cloud coding agent runs on Linux and honors bash only, so this file wires bash commands (no powershell entry by design). preToolUse denies a tool call by emitting a permissionDecision; copilot_hook_adapter.py parses the documented toolName/toolArgs (and VS Code tool_name/tool_input) shapes. Commands resolve repo root via git for subdirectory launches.",
+  "version": 1,
+  "hooks": {
+    "preToolUse": [
+      {
+        "type": "command",
+        "bash": "python3 \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)/scripts/copilot_hook_adapter.py\"",
+        "timeoutSec": 10
+      }
+    ],
+    "sessionStart": [
+      {
+        "type": "command",
+        "bash": "python3 \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)/scripts/session_handoff.py\" restore",
+        "timeoutSec": 10
+      }
+    ],
+    "sessionEnd": [
+      {
+        "type": "command",
+        "bash": "python3 \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)/scripts/session_handoff.py\" capture",
+        "timeoutSec": 15
+      }
+    ]
+  }
+}

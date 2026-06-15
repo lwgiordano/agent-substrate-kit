@@ -1,0 +1,11 @@
+approval_policy = "on-request"
+sandbox_mode = "workspace-write"
+
+[features]
+# Canonical key (was `codex_hooks`, now a deprecated alias). Enables the
+# deterministic lifecycle hooks defined in .codex/hooks.json.
+hooks = true
+
+[agents]
+max_threads = 6
+max_depth = 1

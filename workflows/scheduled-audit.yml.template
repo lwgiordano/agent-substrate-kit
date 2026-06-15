@@ -1,0 +1,52 @@
+name: Scheduled audit
+on:
+  schedule:
+    - cron: "0 9 * * 1"
+  workflow_dispatch:
+jobs:
+  scheduled-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 0}
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      - name: Bootstrap toolchain
+        run: |
+          set -euo pipefail
+          if [ -f pyproject.toml ]; then
+            pipx install uv
+            uv sync --group dev
+          else
+            python -m pip install --upgrade pip PyYAML pre-commit
+          fi
+      - name: Substrate setup (so audit uses .substrate/venv tools, not ambient)
+        run: ./manage.sh setup
+      - name: Write substrate audit report
+        id: audit
+        run: ./manage.sh full-audit
+      # Preserve the report — an ephemeral runner discards ai/audits/
+      # otherwise. always() so a failing audit still uploads evidence.
+      - name: Upload audit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: substrate-audit-report
+          path: ai/audits/**
+          retention-days: 30
+          if-no-files-found: warn
+      # Strict installs: surface a failed scheduled audit as an issue
+      # instead of a silently-red cron run.
+      - name: Open issue on audit failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `Scheduled substrate audit failed (${context.sha.slice(0,7)})`,
+              body: `The scheduled substrate audit failed on ${new Date().toISOString()}.\nRun: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}\nDownload the \`substrate-audit-report\` artifact for the full report.`,
+              labels: ['substrate-audit']
+            })

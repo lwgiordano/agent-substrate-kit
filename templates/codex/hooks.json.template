@@ -1,0 +1,28 @@
+{
+  "_doc": "Codex deterministic lifecycle hooks. Schema: https://developers.openai.com/codex/hooks (events: SessionStart, PreToolUse, PostToolUse, Stop). Codex requires you to review and TRUST this file's hash before the command hooks run (see docs/OPERATOR_ENABLEMENT.md). Commands resolve the repo root via git so they work when Codex is launched from a subdirectory. PreToolUse exit code 2 blocks the tool call.",
+  "_note_lint": "Per-edit lint-on-write is intentionally NOT wired for Codex: Codex edits arrive via apply_patch, not a file_path the linter can read. Run `./manage.sh check` to lint changed files under Codex. lint-on-write is Claude-only (see CHANGES_V3 support matrix).",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "python3 \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)/scripts/session_handoff.py\" restore", "timeout": 10 }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          { "type": "command", "command": "python3 \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)/scripts/check_exfil_guard.py\"", "timeout": 10 }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "python3 \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)/scripts/session_handoff.py\" capture", "timeout": 15 }
+        ]
+      }
+    ]
+  }
+}

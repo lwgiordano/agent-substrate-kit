@@ -1,0 +1,9 @@
+# Written by bootstrap.sh; parsed as DATA by scripts/_substrate_config.sh.
+# Do NOT source this file as shell.
+SUBSTRATE_PROFILE="standard"
+SUBSTRATE_LANG="python"
+SUBSTRATE_RUNNER="auto"
+LINT_CMD=""        # ruff runs via pre-commit
+TYPECHECK_CMD=""   # e.g. "uv run mypy src/"
+TEST_CMD=""        # pytest runs via pre-commit
+# SUBSTRATE_CODE_SUFFIXES=".rs,.kt"   # extend doc-drift code suffixes

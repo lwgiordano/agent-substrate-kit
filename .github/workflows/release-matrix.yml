@@ -1,0 +1,73 @@
+name: Release matrix
+# Kit-self CI (NOT installed into generated repos): proves bootstrap + the
+# validator chain work across the profile × language combinations the kit
+# advertises. Bootstraps a fresh temp repo per combo and runs the static
+# chain (fast, no venv); a subset also runs full setup+check.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  matrix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [starter, standard, strict]
+        lang: [python, node, go, none]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      - name: Bootstrap ${{ matrix.profile }}/${{ matrix.lang }}
+        run: |
+          set -euo pipefail
+          repo="$(mktemp -d)"
+          ( cd "$repo" && git init -q \
+              && bash "$GITHUB_WORKSPACE/bootstrap.sh" --profile "${{ matrix.profile }}" --lang "${{ matrix.lang }}" --no-doctor )
+          echo "REPO=$repo" >> "$GITHUB_ENV"
+      - name: Static validator chain (no venv) + profile lock
+        run: |
+          set -euo pipefail
+          cd "$REPO"
+          for v in check_import_shadowing check_python_syntax check_harness_patterns \
+                   check_policy_code_integrity check_agent_harness check_substrate_config; do
+            python3 -I "scripts/$v.py"
+          done
+          # required_profile must match the bootstrap profile and lock downgrades
+          test "$(cat .substrate/required_profile)" = "${{ matrix.profile }}"
+          if [ "${{ matrix.profile }}" = "strict" ]; then
+            printf 'SUBSTRATE_PROFILE="starter"\n' > .substrate/config
+            ! python3 -I scripts/check_substrate_config.py
+          fi
+  full-setup:
+    # One representative full setup+check per language (slower path).
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {profile: standard, lang: python}
+          - {profile: standard, lang: node}
+          - {profile: strict,   lang: none}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      - uses: actions/setup-node@v4
+        if: ${{ matrix.lang == 'node' }}
+        with: {node-version: "20"}
+      - name: Bootstrap + setup + check
+        run: |
+          set -euo pipefail
+          repo="$(mktemp -d)"
+          cd "$repo" && git init -q
+          bash "$GITHUB_WORKSPACE/bootstrap.sh" --profile "${{ matrix.profile }}" --lang "${{ matrix.lang }}" --no-doctor
+          [ "${{ matrix.lang }}" = "node" ] && printf '{"name":"x","version":"1.0.0"}\n' > package.json || true
+          ./manage.sh setup
+          ./manage.sh check

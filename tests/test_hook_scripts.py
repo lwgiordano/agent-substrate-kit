@@ -1978,6 +1978,66 @@ def test_go_live_json_does_not_create_project_venv() -> None:
             shutil.rmtree(ROOT / ".venv", ignore_errors=True)
 
 
+def test_sandbox_exec_probe_and_usage() -> None:
+    """v3.4.0: sandbox_exec.sh probes cleanly and refuses with usage on no args."""
+    sx = SCRIPTS / "sandbox_exec.sh"
+    if not sx.exists():
+        return
+    av = subprocess.run(["bash", str(sx), "--available"], capture_output=True, text=True, timeout=15)
+    assert av.returncode in (0, 3)  # available, or honest "no OS sandbox" (fail-closed)
+    usage = subprocess.run(["bash", str(sx)], capture_output=True, text=True, timeout=15)
+    assert usage.returncode == 2  # no command -> usage, never a silent unsandboxed run
+
+
+def test_sandbox_exec_runs_nonnetwork_command() -> None:
+    """Where an OS sandbox exists, the wrapper must still ALLOW non-network work."""
+    sx = SCRIPTS / "sandbox_exec.sh"
+    if not sx.exists():
+        return
+    if subprocess.run(["bash", str(sx), "--available"], capture_output=True).returncode != 0:
+        return  # no OS sandbox here
+    r = subprocess.run(["bash", str(sx), "true"], capture_output=True, timeout=15)
+    assert r.returncode == 0, "sandbox must allow non-network commands"
+
+
+def test_sandbox_contains_network_macos() -> None:
+    """The seatbelt deny-network profile must ACTIVELY DENY a socket op the kernel
+    otherwise allows (PermissionError) — containment, not detection. macOS-gated:
+    that's where the EPERM signal is unambiguous (Linux uses bwrap --unshare-net)."""
+    import platform
+    sx = SCRIPTS / "sandbox_exec.sh"
+    if not sx.exists() or platform.system() != "Darwin":
+        return
+    if subprocess.run(["bash", str(sx), "--available"], capture_output=True).returncode != 0:
+        return
+    snip = ("import socket,sys\n"
+            "s=socket.socket(); s.settimeout(3)\n"
+            "try:\n"
+            "    s.connect(('127.0.0.1',9)); sys.exit(0)\n"
+            "except PermissionError: sys.exit(7)\n"
+            "except OSError: sys.exit(1)\n")
+    base = subprocess.run([sys.executable, "-c", snip], capture_output=True, timeout=20)
+    assert base.returncode != 7, "baseline socket op should not be sandbox-denied"
+    sand = subprocess.run(["bash", str(sx), sys.executable, "-c", snip], capture_output=True, timeout=20)
+    assert sand.returncode == 7, f"sandbox did NOT contain network (rc={sand.returncode}) — containment failed"
+
+
+def test_config_accepts_and_validates_sandbox_flag(tmp_path) -> None:
+    """SUBSTRATE_SANDBOX is data, validated to {0,1} (v3.4.0)."""
+    if not (SCRIPTS / "check_substrate_config.py").exists():
+        return
+    (tmp_path / ".substrate").mkdir()
+    cfg = tmp_path / ".substrate" / "config"
+    cfg.write_text('SUBSTRATE_PROFILE="standard"\nSUBSTRATE_SANDBOX="1"\n', encoding="utf-8")
+    ok = subprocess.run([sys.executable, "-I", str(SCRIPTS / "check_substrate_config.py")],
+                        cwd=str(tmp_path), capture_output=True, text=True, timeout=30)
+    assert ok.returncode == 0, ok.stdout + ok.stderr
+    cfg.write_text('SUBSTRATE_SANDBOX="maybe"\n', encoding="utf-8")
+    bad = subprocess.run([sys.executable, "-I", str(SCRIPTS / "check_substrate_config.py")],
+                         cwd=str(tmp_path), capture_output=True, text=True, timeout=30)
+    assert bad.returncode == 2, "invalid SUBSTRATE_SANDBOX must be rejected"
+
+
 def test_release_matrix_workflow_present() -> None:
     wf = ROOT / ".github" / "workflows" / "release-matrix.yml"
     if not wf.exists():

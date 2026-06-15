@@ -273,6 +273,22 @@ def _go_live(blocks, warns, as_json=False):
         anchored = memory_log._anchored_head() is not None
     except Exception:
         anchored = False
+    # sandbox tier (egress containment): enabled in config AND an OS sandbox present.
+    sb_cfg = ''
+    cfgp = ROOT / '.substrate' / 'config'
+    if cfgp.exists():
+        for ln in cfgp.read_text(encoding='utf-8', errors='replace').splitlines():
+            ln = ln.split('#', 1)[0].strip()
+            if ln.startswith('SUBSTRATE_SANDBOX='):
+                sb_cfg = ln.split('=', 1)[1].strip().strip('"\'')
+    sbx = ROOT / 'scripts' / 'sandbox_exec.sh'
+    sb_avail = sbx.exists() and run(['bash', str(sbx), '--available'])[0] == 0
+    if sb_cfg == '1' and sb_avail:
+        sb_status, sb_reason = 'pass', ''
+    elif sb_cfg == '1':
+        sb_status, sb_reason = 'warn', 'SUBSTRATE_SANDBOX=1 but no OS sandbox here (need macOS sandbox-exec or Linux bwrap)'
+    else:
+        sb_status, sb_reason = 'warn', 'not enabled — set SUBSTRATE_SANDBOX=1 to contain egress via sandbox_exec.sh (else exfil stays a tripwire)'
     checks = [{'id': 'validators', 'status': 'pass' if repo_ok else 'fail',
                'reason': '' if repo_ok else f'{len(blocks)} repo-local blocker(s)'}]
     if eval_ok is not None:
@@ -282,8 +298,7 @@ def _go_live(blocks, warns, as_json=False):
                    'reason': '' if tb else 'not present (strict-only; bootstrap --profile strict)'})
     checks.append({'id': 'github_governance', 'status': 'warn',
                    'reason': 'cannot verify from repo files; run check_github_governance.py --require in CI'})
-    checks.append({'id': 'sandbox', 'status': 'warn',
-                   'reason': 'not enabled — strict exfil is a tripwire, not containment (DESIGN.md sandbox tier)'})
+    checks.append({'id': 'sandbox', 'status': sb_status, 'reason': sb_reason})
     checks.append({'id': 'memory_anchor', 'status': 'pass' if anchored else 'warn',
                    'reason': '' if anchored else 'not anchored — run `./manage.sh memory anchor` + push to a protected remote'})
     repo_pass = repo_ok and eval_ok is not False

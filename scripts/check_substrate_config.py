@@ -42,11 +42,14 @@ except Exception as _e:  # pragma: no cover - exercised via staged broken module
             f"command_policy.py failed to import: {_POLICY_IMPORT_ERROR}")
 
 _ALLOWED_KEYS = {"SUBSTRATE_PROFILE", "SUBSTRATE_LANG", "SUBSTRATE_RUNNER",
-                 "LINT_CMD", "TYPECHECK_CMD", "TEST_CMD", "SUBSTRATE_CODE_SUFFIXES"}
+                 "LINT_CMD", "TYPECHECK_CMD", "TEST_CMD", "SUBSTRATE_CODE_SUFFIXES",
+                 "SUBSTRATE_SANDBOX"}
 _ENUMS = {
     "SUBSTRATE_PROFILE": {"starter", "standard", "strict"},
     "SUBSTRATE_LANG": {"python", "node", "go", "none"},
     "SUBSTRATE_RUNNER": {"auto", "uv", "python", "poetry"},
+    # SUBSTRATE_SANDBOX=1 opts into the egress-containment tier (sandbox_exec.sh).
+    "SUBSTRATE_SANDBOX": {"0", "1"},
 }
 
 

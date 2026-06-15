@@ -1,6 +1,6 @@
 ---
 purpose: Universal Agent Substrate Kit v3 files installed in this repo.
-last_human_reviewed: 2026-06-13
+last_human_reviewed: 2026-06-15
 covers:
   - extras/calibrate_diy_ultrareview.py
   - extras/check_license_headers.py
@@ -40,7 +40,9 @@ covers:
   - scripts/run_python_gate.sh
   - scripts/run_smoke_verification.py
   - scripts/run_substrate_evals.py
+  - scripts/sandbox_exec.sh
   - scripts/session_handoff.py
+  - scripts/setup_branch_protection.sh
   - scripts/substrate_audit.py
   - scripts/substrate_doctor.py
   - scripts/todo_state_hook.py

@@ -69,6 +69,7 @@ if [ ! -e .substrate/config ] || [ "$FORCE" == "yes" ]; then
     echo "SUBSTRATE_PROFILE=\"$PROFILE\""
     echo "SUBSTRATE_LANG=\"$LANG_PRIMARY\""
     echo "SUBSTRATE_RUNNER=\"$RUNNER\""
+    echo 'SUBSTRATE_SANDBOX="0"   # 1 = contain agent egress via scripts/sandbox_exec.sh (macOS sandbox-exec / Linux bwrap)'
     case "$LANG_PRIMARY" in
       python) echo 'LINT_CMD=""        # ruff runs via pre-commit'; echo 'TYPECHECK_CMD=""   # e.g. "uv run mypy src/"'; echo 'TEST_CMD=""        # pytest runs via pre-commit';;
       node|go) # gates run through the adapter, which detects opt-in and skips cleanly.

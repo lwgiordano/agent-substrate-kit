@@ -41,7 +41,7 @@ bash /path/to/agent_substrate_kit_v3/bootstrap.sh --profile standard --lang auto
 | 4-field bug-fix commit protocol + postmortem-per-bugfix hooks | — | — | yes |
 | Extras (calibration, stale-phrases, license headers) | — | — | yes |
 
-## Current status (v3.3.13)
+## Current status (v3.4.0)
 
 Credible for controlled trial in **standard mode** across Python, Node,
 Go, and no-language repos. **Strict mode** enforces CODEOWNERS coverage
@@ -117,8 +117,13 @@ runtime hook (`command_policy.profile()`) clamps UP to it, so a downgraded
 Known limitations, by design:
 - The exfil guard is a **tripwire, not a sandbox** — pattern matching,
   not shell parsing. It covers the common upload/transfer forms but a
-  determined attacker can mutate command shape; strict containment needs
-  a sandboxed runtime with no secret access and egress control.
+  determined attacker can mutate command shape. For real **containment**,
+  v3.4.0 adds an opt-in tier: set `SUBSTRATE_SANDBOX=1` and run agent
+  commands through `scripts/sandbox_exec.sh`, which composes the OS sandbox
+  (macOS `sandbox-exec` / Linux `bwrap`) to **deny network egress at the
+  kernel** (fail-closed — refuses if no OS sandbox is present). `./manage.sh
+  go-live` reports whether the sandbox tier is active. Filesystem write-scoping
+  and allowlisted (vs default-deny) egress are later tiers.
 - The CODEOWNERS validator implements the main `*`/`**`/trailing-slash/
   ownerless/last-match behaviors and the 3 MB load limit offline, but it
   is **not a full GitHub CODEOWNERS validator** — it cannot prove owner
@@ -129,7 +134,7 @@ Known limitations, by design:
   / FP-rate over staged states), NOT a hosted longitudinal observability or
   trend-reporting system — pair with one for long-running high-stakes agents.
 
-See `CHANGES_V3.md` for the full per-version remediation history (v3.2.0–v3.3.13).
+See `CHANGES_V3.md` for the full per-version remediation history (v3.2.0–v3.4.0).
 
 ## What is new in v3.2 / v3.2.1
 

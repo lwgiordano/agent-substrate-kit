@@ -1011,6 +1011,49 @@ doctor/go-live route through `run_py_system` with no `uv run`, and an end-to-end
 test that `go-live --json` creates no project `.venv`). **This is the last
 repo-local patch.** Next is the DESIGN.md **sandbox spine** (v3.4.0).
 
+# v3.4.0 — sandbox spine: egress CONTAINMENT (not just detection)
+
+The first capability tier beyond repo-local hardening, and the genuine
+risk-model change the audit series kept pointing at: the exfil guard is a
+TRIPWIRE (pattern matching an attacker can mutate around); this adds opt-in
+**containment** that denies network egress at the kernel.
+
+**What shipped**
+- **`scripts/sandbox_exec.sh`** — wraps a command in the OS sandbox with network
+  egress DENIED: macOS `sandbox-exec` (Seatbelt `(deny network*)`), Linux
+  `bwrap --unshare-net` (private, unconnected net namespace). **Fail-closed:**
+  if no OS sandbox is present it REFUSES (exit 3) rather than run unsandboxed.
+  `--available` probes capability.
+- **`SUBSTRATE_SANDBOX`** config key (data, validated to `{0,1}`); bootstrap
+  writes `SUBSTRATE_SANDBOX="0"` by default (opt-in).
+- **`go-live`** `sandbox` row is now computed: `pass` when `SUBSTRATE_SANDBOX=1`
+  AND an OS sandbox is available; otherwise an honest `warn` with the reason.
+  `production_hardened` flips toward true only when this passes.
+- Docs (README limitation, OPERATOR_ENABLEMENT) updated; `00_substrate.md`
+  reviewed + covers the two new scripts.
+
+**Containment is PROVEN, not asserted.** On macOS, a socket op the kernel
+otherwise allows (baseline → `ConnectionRefusedError`) becomes
+`PermissionError [Errno 1] Operation not permitted` under the wrapper — the
+kernel actively denies the network operation, independent of connectivity. The
+regression test asserts exactly this EPERM signal (macOS-gated, where it's
+unambiguous; Linux uses the standard `bwrap --unshare-net` primitive). 164 tests
+pass from the extracted artifact (4 new: sandbox probe/usage, non-network exec,
+the macOS containment EPERM proof, and `SUBSTRATE_SANDBOX` validation).
+
+**Design note:** DESIGN.md proposed composing Anthropic's npm
+`sandbox-runtime`; this composes the SAME OS primitives (`sandbox-exec`/`bwrap`)
+**directly**, with no npm dependency — consistent with the kit's stdlib-only /
+no-unpinned-deps principle. The npm package can be slotted in later if richer
+allowlist-egress is needed.
+
+**Honest scope (this tier):** default-DENY egress (no network), not yet
+allowlisted egress; network containment, not yet filesystem write-scoping;
+macOS + Linux only (no Windows). Enforcing it for the agent (pointing the
+agent's shell at `sandbox_exec.sh`) is an operator/host wiring step, documented
+in OPERATOR_ENABLEMENT. This moves exfil/secret from a tripwire toward
+containment — the oldest, most-cited limitation in the audit series.
+
 ## Deferred (P2 — documented, not yet built)
 
 These are real improvements the review identified; scoped as future

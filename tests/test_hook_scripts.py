@@ -2253,6 +2253,76 @@ def test_go_live_consumes_sandbox_warnings() -> None:
     assert "sb_warns" in t and "not fully enforceable" in t, "go-live must consume detector warnings"
 
 
+def test_sandbox_env_is_secretless(tmp_path) -> None:
+    """v3.5.2: a sandboxed command runs under a SCRUBBED env — secrets stripped,
+    SUBSTRATE_SANDBOXED marker set. Skips where no backend is available."""
+    import os
+    sx = SCRIPTS / "sandbox_exec.sh"
+    if not sx.exists():
+        return
+    if subprocess.run(["bash", str(sx), "--available"], capture_output=True).returncode != 0:
+        return
+    env = dict(os.environ, MY_FAKE_TOKEN="leak", AWS_SECRET_KEY="x")
+    r = subprocess.run(["bash", str(sx), "env"], capture_output=True, text=True, timeout=20, env=env)
+    assert "MY_FAKE_TOKEN" not in r.stdout and "AWS_SECRET_KEY" not in r.stdout, "secrets must be scrubbed"
+    assert "SUBSTRATE_SANDBOXED=1" in r.stdout, "sandbox marker must be set"
+
+
+def test_sandbox_emit_env_names_respects_policy(tmp_path) -> None:
+    """--emit-env-names honors allowlist + deny_patterns, and returns the inherit
+    sentinel when scrubbing is opted out."""
+    import os
+    det = SCRIPTS / "sandbox_detect.py"
+    if not det.exists():
+        return
+    sub = tmp_path / ".substrate"; sub.mkdir()
+    (sub / "sandbox.json").write_text(
+        '{"env":{"mode":"allowlist","allow":["PATH","MY_OK"],"deny_patterns":["*TOKEN*"]}}', encoding="utf-8")
+    env = dict(os.environ, MY_OK="1", MY_TOKEN="secret")
+    r = subprocess.run([sys.executable, "-I", str(det), "--root", str(tmp_path), "--emit-env-names"],
+                       capture_output=True, text=True, timeout=20, env=env)
+    names = r.stdout.split()
+    assert "MY_OK" in names and "PATH" in names
+    assert "MY_TOKEN" not in names, "deny_patterns must drop *TOKEN* even if allow-listed"
+    (sub / "sandbox.json").write_text('{"env":{"mode":"inherit"}}', encoding="utf-8")
+    r2 = subprocess.run([sys.executable, "-I", str(det), "--root", str(tmp_path), "--emit-env-names"],
+                        capture_output=True, text=True, timeout=20, env=env)
+    assert r2.stdout.strip() == "__INHERIT__", "inherit mode must emit the no-scrub sentinel"
+
+
+def test_gates_route_through_sandbox_when_enabled() -> None:
+    """v3.5.2: lang_gate + run_python_gate run their native/test commands through
+    sandbox_exec.sh when SUBSTRATE_SANDBOX=1 (containment for project execution)."""
+    lg = (SCRIPTS / "lang_gate.sh").read_text(encoding="utf-8")
+    rp = (SCRIPTS / "run_python_gate.sh").read_text(encoding="utf-8")
+    assert "maybe_sandbox" in lg and "sandbox_exec.sh" in lg, "lang_gate must route through sandbox"
+    assert 'SUBSTRATE_SANDBOX:-0}" = "1"' in rp and "sandbox_exec.sh" in rp, "run_python_gate must route through sandbox"
+
+
+def test_sandbox_exec_error_reports_real_rc(tmp_path) -> None:
+    """v3.5.1-audit P2: the refuse message must report the resolver's REAL rc
+    (2=invalid policy), not 0 (the exit status of `!` in an `if ! cmd` block)."""
+    import shutil
+    sx = SCRIPTS / "sandbox_exec.sh"; det = SCRIPTS / "sandbox_detect.py"
+    if not sx.exists() or not det.exists():
+        return
+    (tmp_path / "scripts").mkdir(); (tmp_path / ".substrate").mkdir()
+    shutil.copy(sx, tmp_path / "scripts" / "sandbox_exec.sh")
+    shutil.copy(det, tmp_path / "scripts" / "sandbox_detect.py")
+    (tmp_path / ".substrate" / "sandbox.json").write_text('{"backend":"nope"}', encoding="utf-8")
+    r = subprocess.run(["bash", str(tmp_path / "scripts" / "sandbox_exec.sh"), "true"],
+                       capture_output=True, text=True, timeout=20)
+    assert r.returncode == 3, "invalid policy must fail closed (exit 3)"
+    assert "rc=2" in r.stderr, f"message must report real rc=2, got: {r.stderr!r}"
+
+
+def test_eval_suite_includes_containment_task() -> None:
+    """v3.5.2: the eval suite must prove CONTAINMENT (not just detection) — a network
+    exfil attempt run through the sandbox is contained at the kernel."""
+    rs = (SCRIPTS / "run_substrate_evals.py").read_text(encoding="utf-8")
+    assert "sandbox_exfil_contained" in rs, "eval suite must include the containment proof task"
+
+
 def test_config_key_allowlists_agree() -> None:
     """The shell loader (_substrate_config.sh, sourced by manage.sh on every
     call) and the Python validator (check_substrate_config.py) must accept the
@@ -2318,7 +2388,7 @@ def test_evals_pass_on_shipped_kit() -> None:
     p = subprocess.run([sys.executable, "-I", str(SCRIPTS / "run_substrate_evals.py"), "--no-trace"],
                        capture_output=True, text=True, timeout=120)
     assert p.returncode == 0, p.stdout + p.stderr
-    assert "malicious 15/15 blocked" in p.stdout
+    assert "malicious 16/16 blocked" in p.stdout
     assert "benign FP 0/7" in p.stdout
 
 

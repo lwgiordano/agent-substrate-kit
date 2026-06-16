@@ -1191,6 +1191,27 @@ validation**. v3.5.2 completes **enforcement routing** (secret-scrubbing env in
 agent-Bash fail-closed-when-required) + the `sandbox_exfil_contained` eval — after
 which it can be called a complete `strict+sandbox` containment tier.
 
+## v3.5.2 — sandbox ENFORCEMENT ROUTING + secretless env + containment proof
+
+v3.5.0–v3.5.1 gave the backend abstraction + authority + validation. v3.5.2 starts
+the runtime risk-model change the v3.5.1 audit scoped: commands actually run
+*contained*, and the eval suite *proves* it.
+
+| Audit item | Fix |
+|---|---|
+| **P2** `sandbox_exec.sh` reported `rc=0` on backend failure | `if ! cmd; then rc=$?` recorded `!`'s status (0); replaced with `cmd \|\| rc=$?` so the message reports the resolver's **real** rc (2=invalid policy, 3=no backend). Regression-tested. |
+| **env not secretless** | `sandbox_exec.sh` now runs the command under `env -i` with only the allow-listed vars from a new `env` policy in `.substrate/sandbox.json` (`mode: allowlist` default, `deny_patterns` for `*TOKEN*`/`*SECRET*`/`*KEY*`/`AWS_*`/…). A network-denied command can no longer read tokens/keys from the ambient env. The command is also marked `SUBSTRATE_SANDBOXED=1`. |
+| **gates not routed through sandbox** | `lang_gate.sh` (node/go native lint/test) and `run_python_gate.sh` (ruff/mypy/pytest) now run their project/test execution through `sandbox_exec.sh` when `SUBSTRATE_SANDBOX=1` — fail-closed (exit 3) if a backend is required but absent. |
+| **eval proved detection, not containment** | New `sandbox_exfil_contained` eval task: a raw socket connect run *through* `sandbox_exec.sh` must fail (EPERM/unreachable) — proving kernel-level containment of an exfil shape the regex tripwire might miss. Skips-as-pass (with a recorded reason) where no backend exists. **Verified on macOS: `contained rc=7`; malicious 16/16.** |
+
+**Still deferred to v3.5.3 (honest scope):** interactive **agent-Bash auto-containment**
+(item 4 — fail-closed unsandboxed Bash when `required_sandbox=1` unless a host-native
+sandbox is verified). It touches *every* agent Bash call (highest blast radius) and
+needs host-native-sandbox detection verified first; the `SUBSTRATE_SANDBOXED` marker
+added here is its groundwork. After v3.5.3, the tier is complete `strict+sandbox`
+containment — then the self-published benchmark (v3.5.4) can claim "contains, not
+just detects."
+
 ## Deferred (P2 — documented, not yet built)
 
 These are real improvements the review identified; scoped as future

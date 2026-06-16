@@ -30,7 +30,9 @@ Exit: 0 ok | 2 invalid sandbox.json (fail-closed) | 3 requested backend unavaila
 """
 from __future__ import annotations
 
+import fnmatch
 import json
+import os
 import platform
 import shutil
 import sys
@@ -48,12 +50,26 @@ _CAPS = {
     "none":          {"network": False, "egress_allowlist": False, "fs_write_scope": False, "read_deny": False},
 }
 
+# Secretless-by-default env policy (v3.5.2): when sandbox is enabled, commands run
+# under a SCRUBBED environment (env -i) so a network-denied command still cannot read
+# tokens/keys from the ambient env and write them into allowed repo files. mode:
+#   allowlist → ONLY `allow` names survive (strictest, the default)
+#   inherit   → pass the full env (no scrub) — opt-out for trusted local use
+# deny_patterns drop any name matching even if allow-listed (belt-and-suspenders).
+_DEFAULT_ENV = {
+    "mode": "allowlist",
+    "allow": ["PATH", "HOME", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "LC_CTYPE",
+              "TERM", "USER", "LOGNAME", "SHELL", "TZ", "VIRTUAL_ENV"],
+    "deny_patterns": ["*TOKEN*", "*SECRET*", "*KEY*", "*PASSWORD*", "*PASSWD*",
+                      "AWS_*", "GITHUB_TOKEN", "GH_TOKEN", "*_API_*", "*CREDENTIAL*"],
+}
 _DEFAULTS = {
     "backend": "auto",
     "network": "deny",
     "allowed_domains": [],
     "write_scope": "repo",
     "deny_read": ["~/.ssh", "~/.aws", "~/.config/gh", ".env"],
+    "env": _DEFAULT_ENV,
 }
 
 
@@ -90,7 +106,36 @@ def _load_config(root: Path) -> dict:
     for key in ("allowed_domains", "deny_read"):
         if not isinstance(cfg[key], list) or not all(isinstance(x, str) for x in cfg[key]):
             raise ValueError(f"sandbox.json: {key} must be a list of strings")
+    # env policy: merge a partial override onto the secretless defaults, then validate.
+    env = cfg["env"] if isinstance(cfg["env"], dict) else None
+    if cfg["env"] is not None and env is None:
+        raise ValueError("sandbox.json: env must be an object")
+    cfg["env"] = {**_DEFAULT_ENV, **(env or {})}
+    if cfg["env"]["mode"] not in {"allowlist", "inherit"}:
+        raise ValueError("sandbox.json: env.mode must be 'allowlist' or 'inherit'")
+    for k2 in ("allow", "deny_patterns"):
+        if not isinstance(cfg["env"][k2], list) or not all(isinstance(x, str) for x in cfg["env"][k2]):
+            raise ValueError(f"sandbox.json: env.{k2} must be a list of strings")
     return cfg
+
+
+def _env_names(cfg: dict):
+    """Names from the CURRENT environment that survive the env policy. Returns
+    None when mode='inherit' (no scrub). Used to build an `env -i` allowlist so a
+    sandboxed command runs SECRETLESS (can't read tokens/keys from the ambient env)."""
+    env = cfg.get("env", _DEFAULT_ENV)
+    if env.get("mode", "allowlist") == "inherit":
+        return None
+    allow = set(env.get("allow", _DEFAULT_ENV["allow"]))
+    denies = env.get("deny_patterns", _DEFAULT_ENV["deny_patterns"])
+    out = []
+    for name in os.environ:
+        if name not in allow:
+            continue
+        if any(fnmatch.fnmatch(name.upper(), pat.upper()) for pat in denies):
+            continue
+        out.append(name)
+    return sorted(out)
 
 
 def _available() -> dict:
@@ -169,6 +214,10 @@ def main(argv: list[str]) -> int:
         if "--emit-srt-settings" in argv:
             out = Path(argv[argv.index("--emit-srt-settings") + 1])
             _emit_srt_settings(root, out)
+            return 0
+        if "--emit-env-names" in argv:
+            names = _env_names(_load_config(root))  # _load_config raises → exit 2 on invalid
+            print("__INHERIT__" if names is None else " ".join(names))
             return 0
         res = _resolution(root)
     except ValueError as e:

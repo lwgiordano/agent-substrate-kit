@@ -32,14 +32,25 @@ resolve() {
 }
 PREFIX="$(resolve)"
 # VENV: prefer project .venv, then substrate venv, then ambient.
+_SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 run_tool() {
   local tool="$1"; shift || true
+  local -a cmd
   if [ "$PREFIX" = "VENV" ]; then
-    if [ -x ".venv/bin/$tool" ]; then ".venv/bin/$tool" "$@"
-    elif [ -x ".substrate/venv/bin/$tool" ]; then ".substrate/venv/bin/$tool" "$@"
-    else "$tool" "$@"; fi
+    if [ -x ".venv/bin/$tool" ]; then cmd=(".venv/bin/$tool")
+    elif [ -x ".substrate/venv/bin/$tool" ]; then cmd=(".substrate/venv/bin/$tool")
+    else cmd=("$tool"); fi
   else
-    $PREFIX "$tool" "$@"
+    # shellcheck disable=SC2206
+    cmd=($PREFIX "$tool")
+  fi
+  # Contain test/lint execution when the sandbox tier is enabled (v3.5.2): ruff/mypy/
+  # pytest run project + test code. Fails closed (exit 3) if a backend is required but
+  # absent. (run_tool here only ever runs ruff/mypy/pytest — never pre-commit itself.)
+  if [ "${SUBSTRATE_SANDBOX:-0}" = "1" ] && [ -x "$_SCRIPTS_DIR/sandbox_exec.sh" ]; then
+    "$_SCRIPTS_DIR/sandbox_exec.sh" "${cmd[@]}" "$@"
+  else
+    "${cmd[@]}" "$@"
   fi
 }
 case "$gate" in

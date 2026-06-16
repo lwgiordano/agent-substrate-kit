@@ -61,3 +61,10 @@ resolves a backend (`anthropic-srt` / `bubblewrap` / `seatbelt` / `none`) from
 containment is a frozen minimum: `check_substrate_config.py` blocks disabling it,
 the sandbox policy is validated by the normal gate, and the trusted-base audit
 freezes the flag — mirroring the profile-authority model.
+
+v3.5.2 adds runtime ENFORCEMENT: `sandbox_exec.sh` runs commands under a secretless
+`env -i` (allow-listed vars only, from the `env` policy) marked `SUBSTRATE_SANDBOXED=1`;
+the language/python gates (`lang_gate.sh`, `run_python_gate.sh`) route project/test
+execution through the sandbox when `SUBSTRATE_SANDBOX=1`; and `run_substrate_evals.py`
+adds `sandbox_exfil_contained`, proving a network exfil attempt is contained at the
+kernel (not merely detected). Interactive agent-Bash auto-containment is the next tier.

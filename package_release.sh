@@ -46,20 +46,25 @@ find "$KITROOT" \( -name '__pycache__' -o -name '.pytest_cache' -o -name '.ruff_
   -o -name '.mypy_cache' \) -type d -prune -exec rm -rf {} + 2>/dev/null || true
 find "$KITROOT" -name '*.pyc' -delete 2>/dev/null || true
 find "$KITROOT" -name '.DS_Store' -delete 2>/dev/null || true
-# Disposable runtime state + local toolchain roots must not ship. The find above
-# prunes the cache DIRS; .venv / .substrate/venv / node_modules are NOT in that
-# find, so remove them explicitly — a dirty source root must not contaminate the
-# artifact OR the source-tree hash (v3.3.9 reviewer).
-rm -rf "$KITROOT/.substrate/traces" "$KITROOT/.substrate/memory/tasks" \
-       "$KITROOT/.venv" "$KITROOT/.substrate/venv" "$KITROOT/node_modules" 2>/dev/null || true
+# Disposable runtime state + local toolchain roots (.venv, .substrate/venv,
+# node_modules, .substrate/traces, .substrate/memory/tasks) must not ship — but
+# they are EXCLUDED from both the source-tree hash (find ! -path, below) and the
+# artifact (zip -x, below) and re-checked by the hygiene gate, so they never need
+# to be deleted from the working tree. package_release is NON-DESTRUCTIVE to the
+# source root: deleting $KITROOT/.venv + $KITROOT/.substrate/venv in place used to
+# wipe an ACTIVE dev/CI toolchain mid-run (v3.4.3 — surfaced as flaky
+# FileNotFoundError under pytest-randomly when a packaging test ran before the
+# venv-dependent eval/smoke tests). Cache dirs/.DS_Store are pruned above only
+# because they regenerate for free; no toolchain or runtime state is removed.
 
 # Source-tree hash: stable hash of all tracked source files (order-independent).
 echo "==> Hashing source tree"
 SRC_HASH="$(cd "$KITROOT" && find . -type f \
     ! -path './.git/*' ! -path './dist/*' ! -path '*/__pycache__/*' \
     ! -path './.venv/*' ! -path '*/.substrate/venv/*' ! -path './node_modules/*' \
+    ! -path '*/.substrate/traces/*' ! -path '*/.substrate/memory/tasks/*' \
     ! -path '*/.pytest_cache/*' ! -path '*/.ruff_cache/*' ! -path '*/.mypy_cache/*' \
-    ! -name '*.pyc' \
+    ! -name '*.pyc' ! -name '.DS_Store' \
     -exec shasum -a 256 {} + | awk '{print $1}' | sort | shasum -a 256 | awk '{print $1}')"
 GIT_COMMIT="$(cd "$KITROOT" && git rev-parse --short HEAD 2>/dev/null || echo 'none')"
 

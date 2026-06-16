@@ -1323,17 +1323,20 @@ def test_policy_code_integrity_passes_shipped() -> None:
     assert _run("check_policy_code_integrity.py", [], "").returncode == 0
 
 
-def test_policy_code_ast_pins_match_shipped() -> None:
-    """MODULE_AST_SHA256 must match the shipped command_policy.py AND
-    check_agent_harness.py — a drift means a forgotten pin update."""
+def test_policy_code_source_pins_match_shipped() -> None:
+    """MODULE_SOURCE_SHA256 must equal the raw-byte SHA-256 of the shipped
+    command_policy.py AND check_agent_harness.py — a drift means a forgotten
+    pin update. Raw bytes (not ast.unparse) so the pin is identical on every
+    CPython; see check_policy_code_integrity.py docstring (the v3.4.3 fix)."""
     import importlib.util, hashlib
     spec = importlib.util.spec_from_file_location(
         "cpci", str(SCRIPTS / "check_policy_code_integrity.py"))
     m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
-    for rel, want in m.MODULE_AST_SHA256.items():
-        got = hashlib.sha256(
-            m._norm_module((SCRIPTS / rel).read_text(encoding="utf-8")).encode("utf-8")).hexdigest()
-        assert got == want, f"MODULE_AST_SHA256[{rel}] stale"
+    assert not hasattr(m, "MODULE_AST_SHA256"), "stale AST-based pin must be gone"
+    assert not hasattr(m, "_norm_module"), "version-unstable ast.unparse normalizer must be gone"
+    for rel, want in m.MODULE_SOURCE_SHA256.items():
+        got = hashlib.sha256((SCRIPTS / rel).read_bytes()).hexdigest()
+        assert got == want, f"MODULE_SOURCE_SHA256[{rel}] stale"
 
 
 def _stage_policy(tmp_path):
@@ -1351,7 +1354,7 @@ def test_policy_code_integrity_blocks_decision_redefinition(tmp_path) -> None:
         f.write("\ndef looks_dangerous_command(cmd, profile_name=None):\n    return None\n")
     p = _run_staged(tmp_path, "check_policy_code_integrity.py")
     assert p.returncode == 1
-    assert "command_policy.py: module AST hash mismatch" in (p.stdout + p.stderr)
+    assert "command_policy.py: source hash mismatch" in (p.stdout + p.stderr)
 
 
 def test_policy_code_integrity_blocks_helper_regex_reassign(tmp_path) -> None:
@@ -1363,7 +1366,7 @@ def test_policy_code_integrity_blocks_helper_regex_reassign(tmp_path) -> None:
         f.write("\n_NET_UPLOAD_FILE = re.compile(r'^onlythis$', re.I)\n")
     p = _run_staged(tmp_path, "check_policy_code_integrity.py")
     assert p.returncode == 1
-    assert "module AST hash mismatch" in (p.stdout + p.stderr)
+    assert "source hash mismatch" in (p.stdout + p.stderr)
 
 
 def test_policy_code_integrity_blocks_global_mutation_fake_regex(tmp_path) -> None:
@@ -1379,7 +1382,7 @@ def test_policy_code_integrity_blocks_global_mutation_fake_regex(tmp_path) -> No
                 "globals()['_NET_UPLOAD_FILE'] = _Fake()\n")
     p = _run_staged(tmp_path, "check_policy_code_integrity.py")
     assert p.returncode == 1
-    assert "command_policy.py: module AST hash mismatch" in (p.stdout + p.stderr)
+    assert "command_policy.py: source hash mismatch" in (p.stdout + p.stderr)
 
 
 def test_policy_code_integrity_blocks_injection_list_reassign(tmp_path) -> None:
@@ -1392,12 +1395,12 @@ def test_policy_code_integrity_blocks_injection_list_reassign(tmp_path) -> None:
         f.write("\nINJECTION = [('prompt injection phrase', None)]\n")
     p = _run_staged(tmp_path, "check_policy_code_integrity.py")
     assert p.returncode == 1
-    assert "check_agent_harness.py: module AST hash mismatch" in (p.stdout + p.stderr)
+    assert "check_agent_harness.py: source hash mismatch" in (p.stdout + p.stderr)
 
 
 def test_policy_code_integrity_blocks_scanner_overfit(tmp_path) -> None:
     """A check_agent_harness.py replaced with an overfit/stub scanner must
-    BLOCK (whole-module AST mismatch)."""
+    BLOCK (whole-source hash mismatch)."""
     if not (SCRIPTS / "check_policy_code_integrity.py").exists():
         return
     _stage_policy(tmp_path)
@@ -1405,7 +1408,23 @@ def test_policy_code_integrity_blocks_scanner_overfit(tmp_path) -> None:
         "#!/usr/bin/env python3\nprint('agent-harness: ok')\nraise SystemExit(0)\n", encoding="utf-8")
     p = _run_staged(tmp_path, "check_policy_code_integrity.py")
     assert p.returncode == 1
-    assert "check_agent_harness.py: module AST hash mismatch" in (p.stdout + p.stderr)
+    assert "check_agent_harness.py: source hash mismatch" in (p.stdout + p.stderr)
+
+
+def test_policy_code_integrity_blocks_comment_only_edit(tmp_path) -> None:
+    """v3.4.3: the pin hashes RAW SOURCE BYTES, not the ast.unparse normal form,
+    so it is identical on every CPython (no false BLOCK across 3.11/3.13). By
+    design, even a comment-only edit to a pinned file moves the hash and BLOCKS
+    — this proves the hash is byte-exact (a version-unstable ast.unparse pin
+    would IGNORE this edit, letting a comment-channel change pass)."""
+    if not (SCRIPTS / "check_policy_code_integrity.py").exists():
+        return
+    _stage_policy(tmp_path)
+    with (tmp_path / "scripts" / "command_policy.py").open("a", encoding="utf-8") as f:
+        f.write("\n# benign-looking trailing comment\n")
+    p = _run_staged(tmp_path, "check_policy_code_integrity.py")
+    assert p.returncode == 1
+    assert "command_policy.py: source hash mismatch" in (p.stdout + p.stderr)
 
 
 def test_hook_smoke_rejects_fake_regex_object(tmp_path) -> None:
@@ -1853,10 +1872,14 @@ def test_package_release_excludes_local_venv_end_to_end() -> None:
     if not pr.exists():
         return
     pre_existing = (ROOT / ".venv").exists()
-    vbin = ROOT / ".venv" / "bin"
+    # Prove .venv exclusion with a sentinel file INSIDE .venv — NEVER clobber the
+    # real interpreter. Writing a fake `.venv/bin/python` corrupts an active dev/CI
+    # toolchain; package_release is now non-destructive (v3.4.3), so the real .venv
+    # (if any) is untouched and we only add/remove our sentinel.
+    sentinel = ROOT / ".venv" / "__pkgtest_stray__.txt"
     try:
-        vbin.mkdir(parents=True, exist_ok=True)
-        (vbin / "python").write_text("fake", encoding="utf-8")
+        sentinel.parent.mkdir(parents=True, exist_ok=True)
+        sentinel.write_text("stray — must be excluded from the artifact", encoding="utf-8")
         p = subprocess.run(["bash", "package_release.sh", "--smoke"],
                            cwd=str(ROOT), text=True, capture_output=True, timeout=180)
         if p.returncode != 0:
@@ -1886,8 +1909,27 @@ def test_package_release_excludes_local_venv_end_to_end() -> None:
             finally:
                 shutil.rmtree(ex, ignore_errors=True)
     finally:
+        sentinel.unlink(missing_ok=True)
         if not pre_existing:
             shutil.rmtree(ROOT / ".venv", ignore_errors=True)
+
+
+def test_package_release_is_non_destructive_to_source_tree() -> None:
+    """v3.4.3: package_release must NOT `rm -rf` the toolchain/runtime dirs from
+    the kit root in place — that wiped an active dev/CI .venv + .substrate/venv
+    mid-run, which surfaced as flaky FileNotFoundError under pytest-randomly when
+    a packaging test ran before the venv-dependent eval/smoke tests. The artifact
+    stays clean via the zip -x + source-hash find ! -path exclusions instead."""
+    pr = ROOT / "package_release.sh"
+    if not pr.exists():
+        return
+    text = pr.read_text(encoding="utf-8")
+    for bad in ('"$KITROOT/.venv"', '"$KITROOT/.substrate/venv"', '"$KITROOT/node_modules"'):
+        assert bad not in text, f"package_release deletes {bad} in place (destructive to the source tree)"
+    # exclusions that keep the artifact + hash clean WITHOUT mutating the tree:
+    assert "! -path './.venv/*'" in text, "source-tree hash must exclude .venv"
+    assert "! -path '*/.substrate/venv/*'" in text, "source-tree hash must exclude .substrate/venv"
+    assert '"$NAME/.venv/*"' in text, "zip must exclude .venv from the artifact"
 
 
 def test_design_md_is_governed_surface() -> None:

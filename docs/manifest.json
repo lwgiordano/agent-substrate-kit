@@ -49,7 +49,7 @@
         "scripts/todo_state_hook.py",
         "scripts/update_manifest.py"
       ],
-      "last_human_reviewed": "2026-06-15",
+      "last_human_reviewed": "2026-06-16",
       "path": "docs/knowledge/00_substrate.md",
       "purpose": "Universal Agent Substrate Kit v3 files installed in this repo."
     }

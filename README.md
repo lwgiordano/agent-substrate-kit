@@ -41,7 +41,7 @@ bash /path/to/agent_substrate_kit_v3/bootstrap.sh --profile standard --lang auto
 | 4-field bug-fix commit protocol + postmortem-per-bugfix hooks | — | — | yes |
 | Extras (calibration, stale-phrases, license headers) | — | — | yes |
 
-## Current status (v3.4.2)
+## Current status (v3.4.3)
 
 Credible for controlled trial in **standard mode** across Python, Node,
 Go, and no-language repos. **Strict mode** enforces CODEOWNERS coverage
@@ -57,9 +57,9 @@ hook boundary). The substrate **pins three layers**, so a weakening at any
 of them BLOCKS the gate and requires an explicit, reviewed, CODEOWNED pin
 update: pattern **DATA** (`REQUIRED_PATTERN_SHA256` / `INTEGRITY_SHA256`
 regex hashes), policy + scanner **LOGIC** (`check_policy_code_integrity.py`
-pins the **whole normalized-module AST** of `command_policy.py` and
-`check_agent_harness.py` — any added top-level code, reassignment, fake
-object, or in-place edit changes the hash and BLOCKS), and scanner/hook
+pins the **whole source** of `command_policy.py` and `check_agent_harness.py`
+with a version-portable raw-byte SHA-256 — any edit, added top-level code,
+reassignment, or fake object changes the hash and BLOCKS), and scanner/hook
 **BEHAVIOR** (`check_harness_smoke.py` + `check_hook_smoke.py` run the real
 scanner/hooks against randomized multi-family payloads, with live-regex
 hash + real-`re.Pattern`-type checks). The kit source tree is self-governed
@@ -134,7 +134,7 @@ Known limitations, by design:
   / FP-rate over staged states), NOT a hosted longitudinal observability or
   trend-reporting system — pair with one for long-running high-stakes agents.
 
-See `CHANGES_V3.md` for the full per-version remediation history (v3.2.0–v3.4.2).
+See `CHANGES_V3.md` for the full per-version remediation history (v3.2.0–v3.4.3).
 
 ## What is new in v3.2 / v3.2.1
 

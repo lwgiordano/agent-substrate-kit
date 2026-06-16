@@ -24,6 +24,14 @@ dev = [
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+# Substrate-owned dirs are governed by the substrate's OWN chain (check_python_syntax,
+# check_policy_code_integrity, harness/hook smoke, pytest) and use a deliberate, compact,
+# integrity-PINNED style. Ruff's job here is to lint YOUR project's code, not the vendored
+# substrate (scripts/, the kit's shipped tests/) — so those dirs are excluded; put your own
+# project code (and tests you want linted) outside them. (mypy already excludes scripts/.)
+# `--force-exclude` in run_python_gate.sh makes this bind even when pre-commit passes the
+# filenames explicitly.
+extend-exclude = ["scripts", "extras", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "SIM", "C4"]

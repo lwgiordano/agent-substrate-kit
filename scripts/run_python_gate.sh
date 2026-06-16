@@ -43,8 +43,11 @@ run_tool() {
   fi
 }
 case "$gate" in
-  format)    run_tool ruff format "$@";;
-  lint)      run_tool ruff check --fix "$@";;
+  # --force-exclude: honor [tool.ruff] extend-exclude (substrate-owned dirs) even
+  # though pre-commit passes filenames explicitly on the command line; without it,
+  # ruff lints/formats explicitly-passed paths regardless of the exclude list.
+  format)    run_tool ruff format --force-exclude "$@";;
+  lint)      run_tool ruff check --fix --force-exclude "$@";;
   typecheck) run_tool mypy "$@";;
   test)      run_tool pytest tests/ -q "$@";;
   *) echo "run_python_gate: unknown gate '$gate'" >&2; exit 2;;

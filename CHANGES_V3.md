@@ -1097,6 +1097,25 @@ clean through `manage.sh` (no unknown-key). 167 tests pass.
 All three CI failure classes (doc-drift frozen-date staleness, strict CODEOWNERS
 in a throwaway repo, two-validator config drift) are now fixed AND gated.
 
+## v3.4.3 — CI green: the kit passes its OWN pre-commit (two more classes)
+
+The kit's own `CI / checks` job (`manage.sh check` = the real pre-commit) failed
+for the first time once it ran on GitHub. Two distinct classes, both fixed
+structurally — and a process fix so a green local run now PROVES a green CI run.
+
+| Failing hook | Root cause | Class-fix |
+|---|---|---|
+| `check-policy-code-integrity` BLOCK (`command_policy.py: module AST hash mismatch`) — yet the file was never touched | The pin normalized via `ast.unparse`, whose **formatting is not stable across CPython minor versions**. The pin was generated on the maintainer's 3.13; CI runs 3.11; identical source → different `ast.unparse` output → different hash → **false** "module changed". The "version-stable across 3.11+" claim was wrong. This would have FALSELY tripped for **every user on a Python ≠ the pin-gen version**. | Hash the **raw UTF-8 source bytes** instead (`MODULE_SOURCE_SHA256`): byte-identical on every interpreter (portable by construction), and *stricter* — a comment/whitespace-channel weakening can no longer slip past `ast.unparse`'s normalization. Cost (a comment edit now needs a reviewed re-pin) is the correct posture for these CODEOWNED files, and strict trusted-base already freezes all of `scripts/`. New `test_policy_code_integrity_blocks_comment_only_edit` locks the byte-exact contract; the drift-guard test asserts the old `ast.unparse` normalizer is gone. |
+| `ruff-format` + `ruff-check` fail (E501×169, E702×116, E701×98, E401, I001 across 41 files, incl. the integrity-pinned files) | Ruff's style/format rules fundamentally conflict with the substrate's **deliberate compact, integrity-PINNED** code style. Worse: bootstrap ships `scripts/` + `tests/` into consuming repos, so the kit's *own* vendored code would fail a **user's** pre-commit on install. | Ruff's job in a substrate repo is to lint the **project's** code, not the vendored substrate (governed by its own chain: syntax/integrity/harness/hook smoke/pytest). `[tool.ruff] extend-exclude = ["scripts","extras","tests"]` in both `pyproject.toml` and the template — mirroring the pre-existing `mypy` `scripts/` exclude — and `--force-exclude` in `run_python_gate.sh` so the exclude binds even though pre-commit passes filenames explicitly. Fixes the kit's CI *and* the latent user-repo-install failure. |
+
+Process fix (the "make sure these don't happen again" the user asked for): the
+prior misses share one cause — local `package_release --full` runs validators
+from a non-git extracted artifact and never executes the kit's *own* pre-commit,
+so doc-drift git-dates, config drift, AST-version drift, and ruff never appeared
+locally. v3.4.3 closes the gap by running the kit's actual `manage.sh setup &&
+manage.sh check` (real pre-commit, real git state) locally as the release gate
+before pushing — so a green local check now means a green CI check.
+
 ## Deferred (P2 — documented, not yet built)
 
 These are real improvements the review identified; scoped as future

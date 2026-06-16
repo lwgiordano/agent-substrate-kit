@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pin the ENTIRE policy/scanner module — not just selected definitions.
+"""Pin the ENTIRE policy/scanner module SOURCE — not just selected definitions.
 
 Pinning named functions and regex assignments was still bypassable: an
 attacker can append arbitrary top-level code AFTER the pinned nodes that
@@ -8,19 +8,25 @@ fake preserves `.pattern` (so the hash check passes) but overfits `.search()`,
 or `INJECTION = [(label, <fake>)]` reassigning the scanner's pattern list
 (the v3.2.18 findings). Per-node pins don't see the extra top-level code.
 
-So this validator pins the WHOLE normalized-module AST of the security-
-critical policy code:
-  - command_policy.py     (the shared command-danger detection)
+So this validator pins the WHOLE SOURCE of the security-critical policy code:
+  - command_policy.py      (the shared command-danger detection)
   - check_agent_harness.py (the agent-context scanner)
 
-ANY change — a new statement, a reassignment, a fake object, a reordering —
-changes the module AST hash and BLOCKS. There is no top-level code these
-files can carry that the pin doesn't cover. Weakening requires an explicit,
-reviewed pin update in this CODEOWNED file.
+ANY byte change — a new statement, a reassignment, a fake object, a reordering,
+even a comment or whitespace edit — moves the hash and BLOCKS. There is no
+top-level code (nor a hidden-in-a-comment trick) these files can carry that the
+pin does not cover. Weakening requires an explicit, reviewed pin update in this
+CODEOWNED file.
 
-Normalization: ast.unparse of the module with the module docstring stripped.
-Version-stable across 3.11+ (unlike ast.dump); comments and whitespace don't
-affect it, so only real code/string changes move the hash.
+Hash: SHA-256 of the raw UTF-8 source bytes. This is VERSION-PORTABLE — the
+same on every CPython — which the prior `ast.unparse` normalization was NOT:
+`ast.unparse` formatting differs across minor versions (e.g. 3.11 vs 3.13), so
+a pin generated on one interpreter FALSELY BLOCKED on another (CI runs 3.11
+against a 3.13-generated pin → spurious "module changed"; the v3.4.3 fix).
+Hashing raw bytes is also STRICTER (a comment-channel weakening cannot slip
+through); the only cost — a comment/whitespace edit now needs a reviewed
+re-pin — is the intended posture for these CODEOWNED files, and the strict
+trusted-base audit already freezes all of `scripts/` against the base branch.
 
 --root DIR: validate the policy code under DIR/scripts instead of this
 script's own directory. PINS always come from THIS (trusted) file, so a CI
@@ -31,18 +37,19 @@ Exit: 0 ok | 1 module changed / unreadable. Stdlib only.
 """
 from __future__ import annotations
 
-import ast
-import copy
 import hashlib
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-# Canonical normalized whole-module SHA-256 of the shipped policy code.
-MODULE_AST_SHA256 = {
-    "command_policy.py": "ee33e0464427ae74631f2d4f9bbcfb623745c3c189524bd7ad38996daa81582f",
-    "check_agent_harness.py": "02c4acffd73ea399c6de18742bd12d0162dc060aa8684c1ead8655bc86927aff",
+# Canonical SHA-256 of the raw UTF-8 source bytes of the shipped policy code.
+# Regenerate with:
+#   shasum -a 256 scripts/command_policy.py scripts/check_agent_harness.py
+# (identical on every Python — see the module docstring on why raw bytes, not AST).
+MODULE_SOURCE_SHA256 = {
+    "command_policy.py": "b7fdfb1d45284d8fc354acc9e1f5db1f0be4e91a7f53f3facb3c20a99302cb4b",
+    "check_agent_harness.py": "de54ebbd60f33dec211dcd2c4e1c090e53a8ee6fab33a063fe59560ccebed1bb",
 }
 
 
@@ -52,30 +59,21 @@ def _target_scripts(argv: list[str]) -> Path:
     return Path(__file__).resolve().parent
 
 
-def _norm_module(src: str) -> str:
-    tree = copy.deepcopy(ast.parse(src))
-    if (tree.body and isinstance(tree.body[0], ast.Expr)
-            and isinstance(getattr(tree.body[0], "value", None), ast.Constant)
-            and isinstance(tree.body[0].value.value, str)):
-        tree.body = tree.body[1:]  # drop module docstring
-    return ast.unparse(tree)
-
-
 def main(argv: list[str]) -> int:
     scripts = _target_scripts(argv)
     failures = []
-    for rel, want in MODULE_AST_SHA256.items():
+    for rel, want in MODULE_SOURCE_SHA256.items():
         src = scripts / rel
         try:
-            got = hashlib.sha256(_norm_module(src.read_text(encoding="utf-8")).encode("utf-8")).hexdigest()
+            got = hashlib.sha256(src.read_bytes()).hexdigest()
         except Exception as e:
             print(f"check-policy-code-integrity: BLOCK: {rel}: {e}", file=sys.stderr)
             return 1
         if got != want:
             failures.append(
-                f"{rel}: module AST hash mismatch — the policy/scanner code changed "
-                f"(any added top-level code, reassignment, or logic edit; update "
-                f"MODULE_AST_SHA256 in check_policy_code_integrity.py if intended)")
+                f"{rel}: source hash mismatch — the policy/scanner code changed "
+                f"(any edit to this CODEOWNED file, including comments/whitespace; "
+                f"update MODULE_SOURCE_SHA256 in check_policy_code_integrity.py if intended)")
     if failures:
         print("check-policy-code-integrity: BLOCK", file=sys.stderr)
         for f in failures:

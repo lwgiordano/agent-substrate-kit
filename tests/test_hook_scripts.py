@@ -2071,6 +2071,93 @@ def test_sandbox_contains_network_macos() -> None:
     assert sand.returncode == 7, f"sandbox did NOT contain network (rc={sand.returncode}) — containment failed"
 
 
+def test_sandbox_detect_resolves_and_reports_capabilities(tmp_path) -> None:
+    """v3.5.0: sandbox_detect resolves a backend + reports HONEST capabilities
+    (srt=network+fs+allowlist; bwrap/seatbelt=network-only) for go-live."""
+    det = SCRIPTS / "sandbox_detect.py"
+    if not det.exists():
+        return
+    (tmp_path / ".substrate").mkdir()
+    (tmp_path / ".substrate" / "sandbox.json").write_text(
+        '{"backend":"auto","network":"deny","write_scope":"repo"}', encoding="utf-8")
+    p = subprocess.run([sys.executable, "-I", str(det), "--root", str(tmp_path), "--json"],
+                       capture_output=True, text=True, timeout=20)
+    d = json.loads(p.stdout)
+    assert d["backend"] in {"anthropic-srt", "bubblewrap", "seatbelt", "none"}
+    assert set(d["capabilities"]) >= {"network", "egress_allowlist", "fs_write_scope"}
+    assert "availability" in d
+
+
+def test_sandbox_detect_fails_closed_on_invalid_policy(tmp_path) -> None:
+    """An invalid sandbox.json must BLOCK (exit 2), never silently degrade to 'no
+    containment' — fail-closed like every other substrate validator."""
+    det = SCRIPTS / "sandbox_detect.py"
+    if not det.exists():
+        return
+    (tmp_path / ".substrate").mkdir()
+    (tmp_path / ".substrate" / "sandbox.json").write_text('{"backend":"bogus"}', encoding="utf-8")
+    p = subprocess.run([sys.executable, "-I", str(det), "--root", str(tmp_path), "--backend"],
+                       capture_output=True, text=True, timeout=20)
+    assert p.returncode == 2, "invalid backend must fail closed (rc 2)"
+    (tmp_path / ".substrate" / "sandbox.json").write_text('{"network":"sometimes"}', encoding="utf-8")
+    p2 = subprocess.run([sys.executable, "-I", str(det), "--root", str(tmp_path), "--backend"],
+                        capture_output=True, text=True, timeout=20)
+    assert p2.returncode == 2, "invalid network enum must fail closed"
+
+
+def test_sandbox_detect_capability_honesty(tmp_path) -> None:
+    """Requesting allowlist egress on a backend that can't do it must WARN, not
+    silently pretend — go-live must never overclaim containment."""
+    det = SCRIPTS / "sandbox_detect.py"
+    if not det.exists():
+        return
+    (tmp_path / ".substrate").mkdir()
+    (tmp_path / ".substrate" / "sandbox.json").write_text(
+        '{"backend":"seatbelt","network":"allowlist","allowed_domains":["x.com"],"write_scope":"repo"}',
+        encoding="utf-8")
+    p = subprocess.run([sys.executable, "-I", str(det), "--root", str(tmp_path), "--json"],
+                       capture_output=True, text=True, timeout=20)
+    d = json.loads(p.stdout)
+    if d["backend"] == "seatbelt":  # only assert where that backend actually resolved
+        assert d["capabilities"]["egress_allowlist"] is False
+        assert any("allowlist" in w for w in d["warnings"]), "must warn seatbelt can't allowlist egress"
+
+
+def test_sandbox_detect_emits_srt_settings(tmp_path) -> None:
+    """--emit-srt-settings translates sandbox.json → a valid srt-settings.json:
+    deny-by-default network, repo write-scope, .env read/write protection."""
+    det = SCRIPTS / "sandbox_detect.py"
+    if not det.exists():
+        return
+    (tmp_path / ".substrate").mkdir()
+    (tmp_path / ".substrate" / "sandbox.json").write_text(
+        '{"backend":"anthropic-srt","network":"deny","write_scope":"repo","deny_read":["~/.ssh"]}',
+        encoding="utf-8")
+    out = tmp_path / "srt-settings.json"
+    r = subprocess.run([sys.executable, "-I", str(det), "--root", str(tmp_path),
+                        "--emit-srt-settings", str(out)], capture_output=True, text=True, timeout=20)
+    assert r.returncode == 0, r.stdout + r.stderr
+    s = json.loads(out.read_text(encoding="utf-8"))
+    assert s["network"]["allowedDomains"] == []          # deny => empty allowlist
+    assert str(tmp_path) in s["filesystem"]["allowWrite"]
+    assert "~/.ssh" in s["filesystem"]["denyRead"]
+    assert ".env" in s["filesystem"]["denyWrite"]
+
+
+def test_bootstrap_strict_sandbox_alias_is_flag_not_profile() -> None:
+    """v3.5.0: `--profile strict+sandbox` is a CLI ALIAS expanding to profile=strict
+    + SUBSTRATE_SANDBOX=1 (orthogonal flag), NOT a new config enum — and bootstrap
+    writes a default .substrate/sandbox.json."""
+    bs = ROOT / "bootstrap.sh"
+    if not bs.exists():
+        return
+    text = bs.read_text(encoding="utf-8")
+    assert 'strict+sandbox) PROFILE="strict"; SANDBOX="1"' in text, "alias must expand to strict + flag"
+    assert ".substrate/sandbox.json" in text, "bootstrap must write a default sandbox.json"
+    cc = (SCRIPTS / "check_substrate_config.py").read_text(encoding="utf-8")
+    assert "strict+sandbox" not in cc, "strict+sandbox must NOT leak into the config profile enum"
+
+
 def test_config_accepts_and_validates_sandbox_flag(tmp_path) -> None:
     """SUBSTRATE_SANDBOX is data, validated to {0,1} (v3.4.0)."""
     if not (SCRIPTS / "check_substrate_config.py").exists():

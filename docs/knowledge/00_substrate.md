@@ -40,6 +40,7 @@ covers:
   - scripts/run_python_gate.sh
   - scripts/run_smoke_verification.py
   - scripts/run_substrate_evals.py
+  - scripts/sandbox_detect.py
   - scripts/sandbox_exec.sh
   - scripts/session_handoff.py
   - scripts/setup_branch_protection.sh

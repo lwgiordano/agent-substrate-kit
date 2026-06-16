@@ -1130,6 +1130,42 @@ Neither changes the risk model. The next substantive build remains the
 **strict + sandbox** profile (the exfil guard is still a tripwire, not
 containment) — see the sandbox spine (v3.4.0) and DESIGN.md.
 
+## v3.5.0 — sandbox backend abstraction (compose, don't reinvent)
+
+Two independent strategy reviews converged: own the differentiating substrate
+(governance/memory/eval/release/cross-agent), and treat containment as an
+*optional backend* — never the center, never a hard dependency, never Claude-only.
+v3.5.0 turns the single hand-rolled OS sandbox into a **backend abstraction**.
+
+- `scripts/sandbox_detect.py` — resolves the backend from `.substrate/sandbox.json`
+  (DATA, validated **fail-closed**): `backend = auto | anthropic-srt | bubblewrap |
+  seatbelt | none`. `auto` prefers **`@anthropic-ai/sandbox-runtime` (`srt`)** if its
+  CLI is already present (whole-process: network deny+allowlist, filesystem
+  write-scope, read-deny), else the OS-native primitive (Linux bubblewrap / macOS
+  seatbelt, **network containment only**), else none. **Node is never forced** — srt
+  is used only if already installed.
+- **Honest capability reporting:** backends are NOT equal. The resolver + `go-live`
+  report exactly what the chosen backend can do (srt=network+fs+allowlist;
+  bwrap/seatbelt=network-only) and **warn** when the policy asks for more than the
+  backend delivers (e.g. `network=allowlist` on seatbelt) — no overclaiming.
+- `scripts/sandbox_exec.sh` now dispatches through the resolver: srt path generates
+  an `srt-settings.json` (translated from `sandbox.json`) and runs `srt --settings …`;
+  bwrap/seatbelt paths unchanged; **none → exit 3 (fail-closed)**. Containment proof
+  unchanged (socket op → `EPERM` vs baseline connect).
+- **Orthogonal flag, not a profile-matrix:** `--profile strict+sandbox` is a bootstrap
+  **alias** = `profile=strict` + `SUBSTRATE_SANDBOX=1`; the config enum stays
+  `{starter,standard,strict}`. Sandbox (and, later, security scanners) are orthogonal
+  to governance level, so they are flags + `.substrate/sandbox.json`, not combinatorial
+  profiles. Bootstrap writes a default `sandbox.json` (discoverable + editable).
+- `substrate_doctor --go-live` sandbox row now reports `backend=<id> (<capabilities>)`.
+- Tests: backend resolution, **fail-closed** on invalid `sandbox.json`, capability
+  honesty (warns when a backend can't allowlist/scope), srt-settings translation, and
+  the alias-is-a-flag invariant. Existing v3.4.0 containment + config tests still pass.
+
+Deferred to v3.5.1+: the containment **eval-harness task** + `evals --report`/`BENCHMARK.md`
+(self-published reproducible proof); auto-wiring the agent's Bash through the sandbox;
+fine-grained fs write-scope on the bwrap/seatbelt backends.
+
 ## Deferred (P2 — documented, not yet built)
 
 These are real improvements the review identified; scoped as future

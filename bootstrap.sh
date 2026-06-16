@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 KIT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TARGET="$(pwd)"; RUNNER="auto"; WORKFLOW="superpowers"; UI_ENABLED="no"; PROFILE="standard"; LANG_PRIMARY="auto"; FORCE="no"; INSTALL_TOOLS="no"; RUN_DOCTOR="yes"
+TARGET="$(pwd)"; RUNNER="auto"; WORKFLOW="superpowers"; UI_ENABLED="no"; PROFILE="standard"; LANG_PRIMARY="auto"; FORCE="no"; INSTALL_TOOLS="no"; RUN_DOCTOR="yes"; SANDBOX="0"
 usage(){ cat <<'HELP'
 Agent Substrate Kit v3 bootstrap
 Options:
@@ -9,7 +9,7 @@ Options:
   --runner auto|uv|python|poetry
   --workflow superpowers|gsd|none
   --ui yes|no
-  --profile starter|standard|strict
+  --profile starter|standard|strict|strict+sandbox   (strict+sandbox = strict + egress containment)
   --lang auto|python|node|go|none
   --force
   --install-tools
@@ -19,7 +19,15 @@ HELP
 while [[ $# -gt 0 ]]; do case "$1" in --target) TARGET="$2"; shift 2;; --runner) RUNNER="$2"; shift 2;; --workflow) WORKFLOW="$2"; shift 2;; --ui) UI_ENABLED="$2"; shift 2;; --profile) PROFILE="$2"; shift 2;; --lang) LANG_PRIMARY="$2"; shift 2;; --force) FORCE="yes"; shift;; --install-tools) INSTALL_TOOLS="yes"; shift;; --no-doctor) RUN_DOCTOR="no"; shift;; -h|--help) usage; exit 0;; *) echo "Unknown option $1"; usage; exit 1;; esac; done
 case "$RUNNER" in auto|uv|python|poetry) ;; *) echo "invalid runner"; exit 1;; esac
 case "$WORKFLOW" in superpowers|gsd|none) ;; *) echo "invalid workflow"; exit 1;; esac
-case "$PROFILE" in starter|standard|strict) ;; *) echo "invalid profile"; exit 1;; esac
+# `strict+sandbox` is a CLI ALIAS, not a new config enum: it expands to the strict
+# governance profile PLUS the orthogonal SUBSTRATE_SANDBOX=1 flag. Sandbox (and,
+# later, security scanners) are orthogonal to the governance level, so they are
+# flags + .substrate/sandbox.json — NOT a combinatorial profile matrix.
+case "$PROFILE" in
+  strict+sandbox) PROFILE="strict"; SANDBOX="1";;
+  starter|standard|strict) ;;
+  *) echo "invalid profile"; exit 1;;
+esac
 case "$LANG_PRIMARY" in auto|python|node|go|none) ;; *) echo "invalid lang"; exit 1;; esac
 case "$UI_ENABLED" in yes|no|true|false|ui|no-ui) ;; *) echo "invalid ui"; exit 1;; esac
 [[ "$UI_ENABLED" == "true" || "$UI_ENABLED" == "ui" ]] && UI_ENABLED="yes"; [[ "$UI_ENABLED" == "false" || "$UI_ENABLED" == "no-ui" ]] && UI_ENABLED="no"
@@ -69,7 +77,7 @@ if [ ! -e .substrate/config ] || [ "$FORCE" == "yes" ]; then
     echo "SUBSTRATE_PROFILE=\"$PROFILE\""
     echo "SUBSTRATE_LANG=\"$LANG_PRIMARY\""
     echo "SUBSTRATE_RUNNER=\"$RUNNER\""
-    echo 'SUBSTRATE_SANDBOX="0"   # 1 = contain agent egress via scripts/sandbox_exec.sh (macOS sandbox-exec / Linux bwrap)'
+    echo "SUBSTRATE_SANDBOX=\"$SANDBOX\"   # 1 = contain agent egress via scripts/sandbox_exec.sh (backend resolved from .substrate/sandbox.json)"
     case "$LANG_PRIMARY" in
       python) echo 'LINT_CMD=""        # ruff runs via pre-commit'; echo 'TYPECHECK_CMD=""   # e.g. "uv run mypy src/"'; echo 'TEST_CMD=""        # pytest runs via pre-commit';;
       node|go) # gates run through the adapter, which detects opt-in and skips cleanly.
@@ -84,6 +92,20 @@ fi
 # to disable strict-only behavior. CODEOWNED + frozen by the trusted-base guard;
 # lowering it is a deliberate, reviewed act. (Re)written to match the install.
 echo "$PROFILE" > .substrate/required_profile; echo "    +    .substrate/required_profile"
+# Sandbox backend policy (DATA, validated fail-closed by scripts/sandbox_detect.py).
+# Written always so it's discoverable + editable; only ENFORCED when SUBSTRATE_SANDBOX=1.
+# backend=auto prefers @anthropic-ai/sandbox-runtime (srt) if present, else the OS-native
+# primitive (Linux bubblewrap / macOS seatbelt), else none (fail-closed in strict+sandbox).
+if [ ! -e .substrate/sandbox.json ] || [ "$FORCE" == "yes" ]; then
+  { echo '{'
+    echo '  "backend": "auto",'
+    echo '  "network": "deny",'
+    echo '  "allowed_domains": [],'
+    echo '  "write_scope": "repo",'
+    echo '  "deny_read": ["~/.ssh", "~/.aws", "~/.config/gh", ".env"]'
+    echo '}'
+  } > .substrate/sandbox.json; echo "    +    .substrate/sandbox.json"
+fi
 render "$KIT_DIR/templates/AGENTS.md" AGENTS.md; render "$KIT_DIR/templates/CLAUDE.md" CLAUDE.md
 if [[ "$LANG_PRIMARY" == "python" ]]; then render "$KIT_DIR/templates/pyproject.toml.template" pyproject.toml; fi
 render_precommit "$KIT_DIR/templates/pre-commit-config.yaml.template" .pre-commit-config.yaml

@@ -281,14 +281,30 @@ def _go_live(blocks, warns, as_json=False):
             ln = ln.split('#', 1)[0].strip()
             if ln.startswith('SUBSTRATE_SANDBOX='):
                 sb_cfg = ln.split('=', 1)[1].strip().strip('"\'')
+    # Resolve the backend + its HONEST capabilities (srt = network+fs+allowlist;
+    # bwrap/seatbelt = network containment only) so go-live never overclaims.
+    det = ROOT / 'scripts' / 'sandbox_detect.py'
     sbx = ROOT / 'scripts' / 'sandbox_exec.sh'
-    sb_avail = sbx.exists() and run(['bash', str(sbx), '--available'])[0] == 0
+    sb_backend, sb_caps, sb_avail = 'none', {}, False
+    if det.exists():
+        try:
+            import json as _json
+            import subprocess as _sp
+            import sys as _sys
+            p = _sp.run([_sys.executable, '-I', str(det), '--root', str(ROOT), '--json'],
+                        capture_output=True, text=True, timeout=20)
+            d = _json.loads(p.stdout)
+            sb_backend, sb_caps, sb_avail = d.get('backend', 'none'), d.get('capabilities', {}), bool(d.get('available'))
+        except Exception:
+            sb_avail = sbx.exists() and run(['bash', str(sbx), '--available'])[0] == 0
+    _cap = ('network+fs+egress-allowlist' if sb_caps.get('egress_allowlist')
+            else 'network containment only' if sb_caps.get('network') else 'no containment')
     if sb_cfg == '1' and sb_avail:
-        sb_status, sb_reason = 'pass', ''
+        sb_status, sb_reason = 'pass', f'backend={sb_backend} ({_cap})'
     elif sb_cfg == '1':
-        sb_status, sb_reason = 'warn', 'SUBSTRATE_SANDBOX=1 but no OS sandbox here (need macOS sandbox-exec or Linux bwrap)'
+        sb_status, sb_reason = 'warn', 'SUBSTRATE_SANDBOX=1 but no backend available (install @anthropic-ai/sandbox-runtime, or bubblewrap on Linux / sandbox-exec on macOS)'
     else:
-        sb_status, sb_reason = 'warn', 'not enabled — set SUBSTRATE_SANDBOX=1 to contain egress via sandbox_exec.sh (else exfil stays a tripwire)'
+        sb_status, sb_reason = 'warn', f'not enabled — set SUBSTRATE_SANDBOX=1 to contain egress (resolved backend={sb_backend}); else exfil stays a tripwire'
     checks = [{'id': 'validators', 'status': 'pass' if repo_ok else 'fail',
                'reason': '' if repo_ok else f'{len(blocks)} repo-local blocker(s)'}]
     if eval_ok is not None:

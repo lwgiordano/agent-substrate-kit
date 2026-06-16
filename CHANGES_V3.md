@@ -1071,6 +1071,32 @@ and the matrix's fresh-strict-bootstrap path isn't in the unit suite. The two
 class-fixes remove both failure modes structurally; the regression tests lock
 them. 166 tests pass.
 
+## v3.4.2 — CI green: the THIRD class (two-validator config drift)
+
+v3.4.1 fixed two of three classes; the matrix `full-setup` jobs still failed —
+this fixes the third, found by CI. v3.4.0 added `SUBSTRATE_SANDBOX` to the
+Python validator (`check_substrate_config.py`), to `bootstrap` (which writes
+`SUBSTRATE_SANDBOX="0"`), and to `go-live` — but **NOT to the shell config
+loader** (`scripts/_substrate_config.sh`) that `manage.sh` sources on every
+call. So a freshly-bootstrapped repo's config tripped `manage.sh setup` with
+`substrate-config: unknown key: SUBSTRATE_SANDBOX` (exit 2) before any work ran.
+The kit's OWN config predates the key, so local `manage.sh` never hit it — only
+a fresh bootstrap does, which is exactly what the release-matrix exercises.
+
+This is the substrate's own thesis turned on itself: a config key added to one
+of two validators but not the other (the class `check_validator_input_coverage`
+guards for *test* coverage, here for the *two config validators*).
+
+Fix: `_substrate_config.sh` now mirrors `check_substrate_config.py` for
+`SUBSTRATE_SANDBOX` — default, key allowlist, and `{0,1}` enum. New
+`test_config_key_allowlists_agree` asserts every `_ALLOWED_KEYS` entry is also
+accepted by the shell loader, so the two-validator drift class can't recur.
+Verified through the real path: a fresh strict bootstrap's config now loads
+clean through `manage.sh` (no unknown-key). 167 tests pass.
+
+All three CI failure classes (doc-drift frozen-date staleness, strict CODEOWNERS
+in a throwaway repo, two-validator config drift) are now fixed AND gated.
+
 ## Deferred (P2 — documented, not yet built)
 
 These are real improvements the review identified; scoped as future

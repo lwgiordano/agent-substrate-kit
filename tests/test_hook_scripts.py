@@ -2038,6 +2038,20 @@ def test_config_accepts_and_validates_sandbox_flag(tmp_path) -> None:
     assert bad.returncode == 2, "invalid SUBSTRATE_SANDBOX must be rejected"
 
 
+def test_config_key_allowlists_agree() -> None:
+    """The shell loader (_substrate_config.sh, sourced by manage.sh on every
+    call) and the Python validator (check_substrate_config.py) must accept the
+    SAME config keys. v3.4.2: SUBSTRATE_SANDBOX was added to the Python side and
+    bootstrap but NOT the shell loader, so a fresh bootstrap's config broke
+    `manage.sh setup` with 'unknown key'. Gate the two-validator drift class."""
+    import importlib
+    sys.path.insert(0, str(SCRIPTS))
+    cc = importlib.import_module("check_substrate_config")
+    shell = (SCRIPTS / "_substrate_config.sh").read_text(encoding="utf-8")
+    for key in cc._ALLOWED_KEYS:
+        assert key in shell, f"{key} accepted by check_substrate_config.py but missing from _substrate_config.sh"
+
+
 def test_doc_drift_doc_committed_with_code_is_not_stale(monkeypatch) -> None:
     """v3.4.1: a covered file committed in the SAME commit as its knowledge doc
     must NOT be flagged stale — a frozen review date otherwise drifts stale on

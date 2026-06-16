@@ -1233,6 +1233,24 @@ agent-Bash fail-closed** (v3.5.4, pending host-native-sandbox-marker verificatio
 then the self-published benchmark (v3.5.5), which can now honestly say: contains exfil
 when a sandbox is available, skips/fails honestly when not, never counts a skip as a block.
 
+## v3.5.4 — eval `--run-one` skip semantics (v3.5.3-audit P2)
+
+The v3.5.3 audit confirmed both prior P1s closed and full-mode skip accounting honest,
+and found one polish gap: `--run-one sandbox_exfil_contained` still returned `ok: true`
+when the task was *skipped* (no backend) — full-mode metrics were correct, but the
+single-task diagnostic could be misread as "containment proven."
+
+Fix: `--run-one` now uses the same skip semantics as full mode — a `skipped:` result
+reports `status: "skipped"`, `ok: null` (never `true`), exits 0 by default, and exits
+**1** under `--require-sandbox-evals` (or when containment is otherwise required). So
+no run mode can present an untested containment as a pass. Verified: backend present →
+`ok:true` (tested); forced no-backend → `status=skipped, ok=null, rc 0`; + required → rc 1.
+Regression-tested both directions.
+
+This closes the last eval-UX issue before the benchmark. Remaining: **v3.5.5 —
+interactive agent-Bash fail-closed** (pending host-native-sandbox-marker verification),
+then **v3.5.6 — self-published benchmark**.
+
 ## Deferred (P2 — documented, not yet built)
 
 These are real improvements the review identified; scoped as future

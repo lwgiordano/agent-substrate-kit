@@ -466,6 +466,14 @@ def main(argv) -> int:
             return 2
         _id, kind, expect, fn, heavy = match[0]
         rec = (_timed if heavy else _timed_inproc)(_id, kind, expect, fn)
+        # A skipped task (e.g. the containment eval with no backend) is NOT a pass:
+        # represent it explicitly (status=skipped, ok=null) so a diagnostic --run-one
+        # cannot be misread as "containment proven". It fails only when containment is
+        # required (--require-sandbox-evals / SUBSTRATE_SANDBOX=1 / required_sandbox=1).
+        if str(rec.get("detail", "")).startswith("skipped:"):
+            rec["status"], rec["ok"] = "skipped", None
+            print(json.dumps(rec))
+            return 1 if _sandbox_required(argv) else 0
         print(json.dumps(rec))
         return 0 if rec["ok"] else 1
 

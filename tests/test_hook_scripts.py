@@ -2373,6 +2373,37 @@ def test_sandbox_eval_skip_fails_when_containment_required() -> None:
     assert "REQUIRED but a sandbox eval was SKIPPED" in (p.stdout + p.stderr)
 
 
+def test_run_one_sandbox_skip_is_not_ok() -> None:
+    """v3.5.3-audit P2: `--run-one` of a skipped containment eval (no backend) must
+    report status=skipped / ok=null — a diagnostic single-task run must not be
+    misread as "containment proven". (Asserts only where it actually skips.)"""
+    rs = SCRIPTS / "run_substrate_evals.py"
+    if not rs.exists():
+        return
+    p = subprocess.run([sys.executable, "-I", str(rs), "--run-one", "sandbox_exfil_contained"],
+                       capture_output=True, text=True, timeout=60)
+    d = json.loads(p.stdout)
+    if str(d.get("detail", "")).startswith("skipped:"):
+        assert d.get("status") == "skipped" and d.get("ok") is None, d
+    else:
+        assert d.get("ok") is True, d  # backend present → containment actually tested
+
+
+def test_run_one_sandbox_skip_fails_when_required() -> None:
+    """v3.5.3-audit P2: `--run-one ... --require-sandbox-evals` on a skipped
+    containment eval must FAIL (rc 1). Only applies where it actually skips."""
+    rs = SCRIPTS / "run_substrate_evals.py"
+    if not rs.exists():
+        return
+    base = subprocess.run([sys.executable, "-I", str(rs), "--run-one", "sandbox_exfil_contained"],
+                          capture_output=True, text=True, timeout=60)
+    if not str(json.loads(base.stdout).get("detail", "")).startswith("skipped:"):
+        return  # backend present → tested, not applicable
+    p = subprocess.run([sys.executable, "-I", str(rs), "--run-one", "sandbox_exfil_contained",
+                        "--require-sandbox-evals"], capture_output=True, text=True, timeout=60)
+    assert p.returncode == 1, "skipped --run-one must FAIL under --require-sandbox-evals"
+
+
 def test_config_key_allowlists_agree() -> None:
     """The shell loader (_substrate_config.sh, sourced by manage.sh on every
     call) and the Python validator (check_substrate_config.py) must accept the

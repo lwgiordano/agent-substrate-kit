@@ -72,5 +72,7 @@ configured `LINT_CMD`/`TYPECHECK_CMD`/`TEST_CMD` and the release-gate pytest pat
 also run through the sandbox (`manage.sh`/`release_gate.sh` `run_lang`/`run_tool`,
 not pre-commit itself) — and fixes the eval accounting so a SKIPPED containment eval
 (no backend) is surfaced and excluded from the block total, and FAILS under
-`--require-sandbox-evals` / when containment is required. Interactive agent-Bash
-auto-containment is the next tier.
+`--require-sandbox-evals` / when containment is required. v3.5.4 extends the same
+skip semantics to the `--run-one` diagnostic (a skipped containment eval reports
+`status=skipped`/`ok=null`, never `ok=true`, and fails under `--require-sandbox-evals`).
+Interactive agent-Bash auto-containment is the next tier.

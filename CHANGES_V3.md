@@ -1116,6 +1116,20 @@ locally. v3.4.3 closes the gap by running the kit's actual `manage.sh setup &&
 manage.sh check` (real pre-commit, real git state) locally as the release gate
 before pushing — so a green local check now means a green CI check.
 
+## v3.4.4 — release-artifact provenance + minimality (two P2s from the v3.4.3 audit)
+
+The v3.4.3 audit confirmed no security/policy-core blocker and cleared the CI
+classes; it raised two P2 artifact observations, both fixed here.
+
+| P2 | Root cause | Fix |
+|---|---|---|
+| Review-bundle manifest said `verification_mode: smoke` while the release notes claimed full verification | `manage.sh release` (→ `release_gate.sh`) is a GATE that never packages; the dist artifacts were left behind by the `package_release.sh --smoke` call inside `test_package_release_excludes_local_venv_end_to_end`. Shipping `dist/*` therefore shipped a TEST's smoke bundle, not a full-verified one. | Ship discipline: the release artifact MUST be built by `package_release.sh --full` (it already defaults to `--full`; it runs the complete pytest suite FROM the artifact and stamps `verification_mode: full`). v3.4.4 is packaged that way and the shipped manifest is verified to read `full`. |
+| `.substrate/memory/events.jsonl` (+ `.lock`) shipped as ~91KB of maintainer runtime state | The zip + source-hash exclusions covered `.substrate/memory/tasks/` but not the event log / lock. | Exclude the whole `.substrate/memory/` runtime dir from both the artifact (`zip -x`) and the source-tree hash (`find ! -path`), and add it to the zip-hygiene `_JUNK_RE` so a leak BLOCKS. Consuming repos get a fresh chain from bootstrap, so nothing of value is lost. Regression-tested (static + end-to-end listing check). |
+
+Neither changes the risk model. The next substantive build remains the
+**strict + sandbox** profile (the exfil guard is still a tripwire, not
+containment) — see the sandbox spine (v3.4.0) and DESIGN.md.
+
 ## Deferred (P2 — documented, not yet built)
 
 These are real improvements the review identified; scoped as future

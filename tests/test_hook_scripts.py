@@ -1842,6 +1842,12 @@ def test_package_release_hygiene_is_pipefail_safe_and_excludes_venv() -> None:
     text = pr.read_text(encoding="utf-8")
     assert '"$NAME/.venv/*"' in text, "zip must exclude .venv"
     assert "./.venv/*" in text, "source-tree hash must exclude .venv"
+    # v3.4.4: the maintainer's runtime memory log (.substrate/memory/) is bloat,
+    # not a seed — exclude the whole dir from the zip + source hash, and the
+    # hygiene gate must BLOCK if it leaks. (Consuming repos get a fresh chain.)
+    assert '"*/.substrate/memory/*"' in text, "zip must exclude .substrate/memory"
+    assert "! -path '*/.substrate/memory/*'" in text, "source-tree hash must exclude .substrate/memory"
+    assert "/\\.substrate/memory/" in text, "hygiene gate must flag .substrate/memory leaks"
     assert 'unzip -l "$ZIP_VER") | grep -Eq' not in text, "SIGPIPE-prone hygiene pipe still present"
     assert "mktemp" in text, "hygiene must read a listing file so grep status is authoritative"
     # review bundle must have a ._*/.DS_Store metadata hygiene gate
@@ -1890,6 +1896,7 @@ def test_package_release_excludes_local_venv_end_to_end() -> None:
             return
         listing = subprocess.check_output(["unzip", "-l", str(zp)], text=True)
         assert "/.venv/" not in listing, "artifact shipped .venv/ from a dirty source root"
+        assert "/.substrate/memory/" not in listing, "artifact shipped .substrate/memory/ runtime state (bloat)"
         # review bundle must carry no macOS AppleDouble (._*) / .DS_Store metadata
         bundle = ROOT / "dist" / f"agent_substrate_kit_v3-{version}-review-bundle.tar.gz"
         if bundle.exists():

@@ -47,7 +47,9 @@ find "$KITROOT" \( -name '__pycache__' -o -name '.pytest_cache' -o -name '.ruff_
 find "$KITROOT" -name '*.pyc' -delete 2>/dev/null || true
 find "$KITROOT" -name '.DS_Store' -delete 2>/dev/null || true
 # Disposable runtime state + local toolchain roots (.venv, .substrate/venv,
-# node_modules, .substrate/traces, .substrate/memory/tasks) must not ship — but
+# node_modules, .substrate/traces, .substrate/memory — the maintainer's own
+# event log + lock are runtime state; consuming repos get a fresh chain) must
+# not ship — but
 # they are EXCLUDED from both the source-tree hash (find ! -path, below) and the
 # artifact (zip -x, below) and re-checked by the hygiene gate, so they never need
 # to be deleted from the working tree. package_release is NON-DESTRUCTIVE to the
@@ -62,7 +64,7 @@ echo "==> Hashing source tree"
 SRC_HASH="$(cd "$KITROOT" && find . -type f \
     ! -path './.git/*' ! -path './dist/*' ! -path '*/__pycache__/*' \
     ! -path './.venv/*' ! -path '*/.substrate/venv/*' ! -path './node_modules/*' \
-    ! -path '*/.substrate/traces/*' ! -path '*/.substrate/memory/tasks/*' \
+    ! -path '*/.substrate/traces/*' ! -path '*/.substrate/memory/*' \
     ! -path '*/.pytest_cache/*' ! -path '*/.ruff_cache/*' ! -path '*/.mypy_cache/*' \
     ! -name '*.pyc' ! -name '.DS_Store' \
     -exec shasum -a 256 {} + | awk '{print $1}' | sort | shasum -a 256 | awk '{print $1}')"
@@ -74,7 +76,7 @@ rm -f "$ZIP_VER" "$ZIP_PLAIN"
 ( cd "$PARENT" && zip -rq "$ZIP_VER" "$NAME" \
     -x "$NAME/.git/*" "$NAME/dist/*" "$NAME/.venv/*" "$NAME/node_modules/*" \
        "*/__pycache__/*" "*/.pytest_cache/*" "*/.ruff_cache/*" "*/.mypy_cache/*" \
-       "*/.substrate/venv/*" "*/.substrate/traces/*" "*/.substrate/memory/tasks/*" )
+       "*/.substrate/venv/*" "*/.substrate/traces/*" "*/.substrate/memory/*" )
 cp "$ZIP_VER" "$ZIP_PLAIN"
 NFILES="$(cd "$PARENT" && unzip -l "$ZIP_VER" | tail -1 | awk '{print $2}')"
 ART_SHA="$(shasum -a 256 "$ZIP_VER" | awk '{print $1}')"
@@ -90,7 +92,7 @@ echo "    $NFILES files, sha256 ${ART_SHA:0:16}…"
 echo "==> Zip hygiene"
 _LISTING="$(mktemp)"
 ( cd "$PARENT" && unzip -l "$ZIP_VER" ) > "$_LISTING"
-_JUNK_RE='(/\.venv/|/\.substrate/venv/|/__pycache__/|/\.pytest_cache/|/\.ruff_cache/|/\.mypy_cache/|/node_modules/|\.DS_Store|\.pyc$)'
+_JUNK_RE='(/\.venv/|/\.substrate/venv/|/\.substrate/traces/|/\.substrate/memory/|/__pycache__/|/\.pytest_cache/|/\.ruff_cache/|/\.mypy_cache/|/node_modules/|\.DS_Store|\.pyc$)'
 if grep -Eq "$_JUNK_RE" "$_LISTING"; then
   echo "release: BLOCK — packaging junk in artifact:" >&2
   grep -E "$_JUNK_RE" "$_LISTING" | head -30 >&2

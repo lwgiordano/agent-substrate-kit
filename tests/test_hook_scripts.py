@@ -2323,6 +2323,56 @@ def test_eval_suite_includes_containment_task() -> None:
     assert "sandbox_exfil_contained" in rs, "eval suite must include the containment proof task"
 
 
+def test_config_commands_route_through_sandbox() -> None:
+    """v3.5.3 (audit P1): manage.sh + release_gate.sh run configured LINT/TYPECHECK/
+    TEST commands through sandbox_exec.sh when SUBSTRATE_SANDBOX=1 — config commands
+    are executable project code, so containment must cover them too."""
+    for rel in ("manage.sh", "templates/manage.sh.template", "scripts/release_gate.sh"):
+        p = ROOT / rel
+        if not p.exists():
+            continue
+        assert 'scripts/sandbox_exec.sh bash -c "$cmd"' in p.read_text(encoding="utf-8"), \
+            f"{rel} run_lang must route config commands through the sandbox"
+    rg = (SCRIPTS / "release_gate.sh").read_text(encoding="utf-8")
+    assert '!= "pre-commit"' in rg and "sandbox_exec.sh" in rg, \
+        "release_gate run_tool must route pytest (but NOT pre-commit) through the sandbox"
+
+
+def test_sandbox_eval_skip_is_not_counted_as_blocked() -> None:
+    """v3.5.2-audit P1: a SKIPPED containment eval (no backend) must NOT count as a
+    block. block-rate is over TESTED tasks only; the skipped task is surfaced and
+    excluded from the malicious total. Host-agnostic invariant."""
+    rs = SCRIPTS / "run_substrate_evals.py"
+    if not rs.exists():
+        return
+    p = subprocess.run([sys.executable, "-I", str(rs), "--json", "--no-trace"],
+                       capture_output=True, text=True, timeout=120)
+    m = json.loads(p.stdout)["metrics"]
+    assert m["malicious_block_rate"] == 1.0, m
+    skipped_ids = {s["id"] for s in m.get("skipped", [])}
+    if "sandbox_exfil_contained" in skipped_ids:
+        assert m["malicious_skipped"] >= 1 and m["malicious_total"] == 15, m
+    else:
+        assert m["malicious_total"] == 16, m  # backend present → containment eval tested
+
+
+def test_sandbox_eval_skip_fails_when_containment_required() -> None:
+    """v3.5.2-audit P1: when containment is REQUIRED (--require-sandbox-evals), a
+    SKIPPED containment eval must FAIL — you required the sandbox but couldn't prove
+    it. Only applies where the eval actually skips (no backend on this host)."""
+    rs = SCRIPTS / "run_substrate_evals.py"
+    if not rs.exists():
+        return
+    one = subprocess.run([sys.executable, "-I", str(rs), "--run-one", "sandbox_exfil_contained"],
+                         capture_output=True, text=True, timeout=60)
+    if not str(json.loads(one.stdout).get("detail", "")).startswith("skipped:"):
+        return  # a backend exists here → containment eval is tested, not skipped
+    p = subprocess.run([sys.executable, "-I", str(rs), "--no-trace", "--require-sandbox-evals"],
+                       capture_output=True, text=True, timeout=120)
+    assert p.returncode == 1, "skipped containment eval must FAIL under --require-sandbox-evals"
+    assert "REQUIRED but a sandbox eval was SKIPPED" in (p.stdout + p.stderr)
+
+
 def test_config_key_allowlists_agree() -> None:
     """The shell loader (_substrate_config.sh, sourced by manage.sh on every
     call) and the Python validator (check_substrate_config.py) must accept the
@@ -2388,8 +2438,11 @@ def test_evals_pass_on_shipped_kit() -> None:
     p = subprocess.run([sys.executable, "-I", str(SCRIPTS / "run_substrate_evals.py"), "--no-trace"],
                        capture_output=True, text=True, timeout=120)
     assert p.returncode == 0, p.stdout + p.stderr
-    assert "malicious 16/16 blocked" in p.stdout
-    assert "benign FP 0/7" in p.stdout
+    # Backend-agnostic: with a sandbox backend present the containment eval is tested
+    # (16/16); without one it is honestly SKIPPED (15/15 blocked, 1 skipped). Either
+    # way the block-rate is 1.00 and there are zero benign false-positives.
+    assert "(rate 1.00), benign FP 0/7" in p.stdout, p.stdout
+    assert ("malicious 16/16 blocked" in p.stdout) or ("1 skipped" in p.stdout), p.stdout
 
 
 def test_evals_fail_on_neutered_policy(tmp_path) -> None:

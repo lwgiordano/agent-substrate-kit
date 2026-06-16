@@ -426,6 +426,30 @@ TASKS = [
 ]
 
 
+def _sandbox_required(argv) -> bool:
+    """Containment is REQUIRED — so a SKIPPED containment eval is a FAILURE, not a
+    free pass — when forced by --require-sandbox-evals, by SUBSTRATE_SANDBOX=1, or by
+    .substrate/required_sandbox=1 / SUBSTRATE_SANDBOX="1" in .substrate/config."""
+    if "--require-sandbox-evals" in argv:
+        return True
+    if os.environ.get("SUBSTRATE_SANDBOX") == "1":
+        return True
+    root = SCRIPTS.parent
+    try:
+        rs = root / ".substrate" / "required_sandbox"
+        if rs.is_file() and rs.read_text(encoding="utf-8").strip() == "1":
+            return True
+        cfg = root / ".substrate" / "config"
+        if cfg.is_file():
+            for ln in cfg.read_text(encoding="utf-8", errors="replace").splitlines():
+                ln = ln.split("#", 1)[0].strip()
+                if ln.startswith("SUBSTRATE_SANDBOX=") and ln.split("=", 1)[1].strip().strip("\"'") == "1":
+                    return True
+    except Exception:
+        pass
+    return False
+
+
 def main(argv) -> int:
     as_json = "--json" in argv
     no_trace = "--no-trace" in argv
@@ -489,16 +513,26 @@ def main(argv) -> int:
 
     mal = [r for r in results if r["kind"] == "malicious"]
     ben = [r for r in results if r["kind"] == "benign"]
-    mal_block = sum(1 for r in mal if r["ok"])
+    # A task whose detail starts "skipped:" was NOT actually tested (e.g. a
+    # containment eval on a host with no sandbox backend). A SKIP IS NOT A BLOCK —
+    # counting it as one would overstate containment (v3.5.2-audit P1). Exclude it
+    # from the tested totals + block-rate, surface it, and FAIL if containment is
+    # required (you required the sandbox but couldn't prove it).
+    mal_skipped = [r for r in mal if str(r.get("detail", "")).startswith("skipped:")]
+    mal_tested = [r for r in mal if r not in mal_skipped]
+    mal_block = sum(1 for r in mal_tested if r["ok"])
     ben_ok = sum(1 for r in ben if r["ok"])
-    block_rate = mal_block / len(mal) if mal else 1.0
+    block_rate = mal_block / len(mal_tested) if mal_tested else 1.0
     fp_rate = (len(ben) - ben_ok) / len(ben) if ben else 0.0
+    skip_is_failure = bool(mal_skipped) and _sandbox_required(argv)
     total_s = round(sum(r["seconds"] for r in results), 2)
     slowest = sorted(results, key=lambda r: r["seconds"], reverse=True)[:3]
     metrics = {
         "mode": mode,
-        "malicious_total": len(mal), "malicious_blocked": mal_block,
+        "malicious_total": len(mal_tested), "malicious_blocked": mal_block,
         "malicious_block_rate": round(block_rate, 4),
+        "malicious_skipped": len(mal_skipped),
+        "skipped": [{"id": r["id"], "reason": r["detail"]} for r in mal_skipped],
         "benign_total": len(ben), "benign_false_positives": len(ben) - ben_ok,
         "benign_fp_rate": round(fp_rate, 4),
         # total_seconds = sum of per-task time; wall_seconds = actual elapsed
@@ -506,7 +540,8 @@ def main(argv) -> int:
         "total_seconds": total_s, "wall_seconds": wall_s,
         "heavy_workers": _HEAVY_WORKERS, "subprocess_timeout": _SUBPROCESS_TIMEOUT,
         "slowest": [{"id": r["id"], "seconds": r["seconds"]} for r in slowest],
-        "passed": block_rate >= 1.0 and fp_rate <= 0.0,
+        "sandbox_required": _sandbox_required(argv),
+        "passed": block_rate >= 1.0 and fp_rate <= 0.0 and not skip_is_failure,
     }
     trace = {"ran_at_utc": datetime.now(UTC).replace(microsecond=0).isoformat(),
              "metrics": metrics, "results": results}
@@ -531,12 +566,15 @@ def main(argv) -> int:
             mark = "ok " if r["ok"] else "FAIL"
             print(f"  [{mark}] {r['kind']:9} {r['id']:26} {r['seconds']:5.2f}s  {r['detail']}")
         slow = ", ".join("{}={}s".format(s["id"], s["seconds"]) for s in metrics["slowest"])
-        print(f"substrate-evals[{mode}]: malicious {mal_block}/{len(mal)} blocked "
+        skip_note = f", {len(mal_skipped)} skipped" if mal_skipped else ""
+        print(f"substrate-evals[{mode}]: malicious {mal_block}/{len(mal_tested)} blocked{skip_note} "
               f"(rate {block_rate:.2f}), benign FP {len(ben)-ben_ok}/{len(ben)} "
               f"(rate {fp_rate:.2f}); wall {wall_s}s (sum {total_s}s), slowest {slow}")
     if not metrics["passed"]:
-        print("substrate-evals: BLOCK — a malicious task slipped or a benign task false-positived",
-              file=sys.stderr)
+        reason = ("containment is REQUIRED but a sandbox eval was SKIPPED (no backend) — "
+                  "a skip is not a block" if skip_is_failure
+                  else "a malicious task slipped or a benign task false-positived")
+        print(f"substrate-evals: BLOCK — {reason}", file=sys.stderr)
         return 1
     print("substrate-evals: ok", file=pstream)
     return 0

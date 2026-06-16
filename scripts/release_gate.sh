@@ -15,8 +15,15 @@ run_py(){ if [ -x "$SUBVENV/bin/python" ]; then "$SUBVENV/bin/python" -I "$@"; e
 # Substrate tools (pre-commit) ALWAYS come from the substrate venv —
 # never ambient PATH (the v3.2 release-gate `pre-commit: command not
 # found` bug in node/go repos).
-run_tool(){ local t="$1"; shift || true; if [ -x "$SUBVENV/bin/$t" ]; then "$SUBVENV/bin/$t" "$@"; else "${RUN[@]}" "$t" "$@"; fi; }
-run_lang(){ local label="$1" cmd="$2"; [ -z "$cmd" ] && return 0; echo "==> $label: $cmd"; bash -c "$cmd"; }
+# Route project/test execution (pytest etc.) through the sandbox when the tier is
+# enabled (v3.5.3) — but NOT pre-commit itself (it orchestrates hooks that route their
+# own leaves via run_python_gate/lang_gate, and may need fs/net for some hooks).
+run_tool(){ local t="$1"; shift || true; local -a c
+  if [ -x "$SUBVENV/bin/$t" ]; then c=("$SUBVENV/bin/$t"); else c=("${RUN[@]}" "$t"); fi
+  if [ "${SUBSTRATE_SANDBOX:-0}" = "1" ] && [ "$t" != "pre-commit" ]; then scripts/sandbox_exec.sh "${c[@]}" "$@"; else "${c[@]}" "$@"; fi; }
+# Configured LINT_CMD/TYPECHECK_CMD/TEST_CMD are executable PROJECT code → contained too.
+run_lang(){ local label="$1" cmd="$2"; [ -z "$cmd" ] && return 0; echo "==> $label: $cmd"
+  if [ "${SUBSTRATE_SANDBOX:-0}" = "1" ]; then scripts/sandbox_exec.sh bash -c "$cmd"; else bash -c "$cmd"; fi; }
 echo "==> Import shadowing"; run_py scripts/check_import_shadowing.py  # no repo-local stdlib shadow can subvert hash validators
 echo "==> Doctor"; run_py scripts/substrate_doctor.py
 echo "==> Manifest"; run_py scripts/update_manifest.py --check

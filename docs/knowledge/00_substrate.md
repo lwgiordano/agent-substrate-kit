@@ -67,4 +67,10 @@ v3.5.2 adds runtime ENFORCEMENT: `sandbox_exec.sh` runs commands under a secretl
 the language/python gates (`lang_gate.sh`, `run_python_gate.sh`) route project/test
 execution through the sandbox when `SUBSTRATE_SANDBOX=1`; and `run_substrate_evals.py`
 adds `sandbox_exfil_contained`, proving a network exfil attempt is contained at the
-kernel (not merely detected). Interactive agent-Bash auto-containment is the next tier.
+kernel (not merely detected). v3.5.3 completes non-interactive routing — the
+configured `LINT_CMD`/`TYPECHECK_CMD`/`TEST_CMD` and the release-gate pytest path
+also run through the sandbox (`manage.sh`/`release_gate.sh` `run_lang`/`run_tool`,
+not pre-commit itself) — and fixes the eval accounting so a SKIPPED containment eval
+(no backend) is surfaced and excluded from the block total, and FAILS under
+`--require-sandbox-evals` / when containment is required. Interactive agent-Bash
+auto-containment is the next tier.

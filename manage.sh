@@ -29,7 +29,11 @@ run_py(){ if [ -x "$SUBPY" ]; then "$SUBPY" -I "$@"; elif $have_uv; then uv run 
 run_py_system(){ if [ -x "$SUBPY" ]; then "$SUBPY" -I "$@"; else python3 -I "$@"; fi; }
 # Run a substrate TOOL (pre-commit). Always the substrate venv.
 subtool(){ local t="$1"; shift || true; if [ -x "$SUBVENV/bin/$t" ]; then "$SUBVENV/bin/$t" "$@"; elif $have_uv; then uv run "$t" "$@"; else "$t" "$@"; fi; }
-run_lang(){ local label="$1" cmd="$2"; [ -z "$cmd" ] && return 0; echo "==> $label: $cmd"; bash -c "$cmd"; }
+# Route configured LINT_CMD/TYPECHECK_CMD/TEST_CMD through the sandbox when the tier
+# is enabled (v3.5.3): these are executable PROJECT code, so containment must cover
+# them too — fail-closed (exit 3) if a required backend is absent.
+run_lang(){ local label="$1" cmd="$2"; [ -z "$cmd" ] && return 0; echo "==> $label: $cmd"
+  if [ "${SUBSTRATE_SANDBOX:-0}" = "1" ]; then scripts/sandbox_exec.sh bash -c "$cmd"; else bash -c "$cmd"; fi; }
 
 setup(){
   # 1. Substrate validator venv (all languages). pytest is included for

@@ -1212,6 +1212,27 @@ added here is its groundwork. After v3.5.3, the tier is complete `strict+sandbox
 containment — then the self-published benchmark (v3.5.4) can claim "contains, not
 just detects."
 
+## v3.5.3 — complete non-interactive sandbox routing + honest eval-skip accounting
+
+The v3.5.2 audit confirmed the secretless env + native-gate routing + rc fix, and
+flagged two concrete gaps. Both fixed.
+
+| Audit finding | Fix |
+|---|---|
+| **P1** configured `LINT_CMD`/`TYPECHECK_CMD`/`TEST_CMD` (and the release-gate pytest path) still ran via direct `bash -c` *outside* the sandbox — v3.5.2 routed only the native adapters + python pre-commit gates | `run_lang` in `manage.sh` + `templates/manage.sh.template` + `release_gate.sh` now run the configured command via `scripts/sandbox_exec.sh bash -c "$cmd"` when `SUBSTRATE_SANDBOX=1`; `release_gate.sh`'s `run_tool` routes pytest (and any tool **except pre-commit**) through the sandbox. Config commands are executable project code, so containment now covers them — fail-closed if a required backend is absent. |
+| **P1/P2** `sandbox_exfil_contained` skip (no backend) was **counted as a block** → "malicious 16/16 blocked" overstated containment | A `skipped:` result is now EXCLUDED from the malicious total + block-rate, surfaced in `metrics.malicious_skipped` + `metrics.skipped[]`, and the summary reads `15/15 blocked, 1 skipped`. When containment is **required** (`--require-sandbox-evals`, `SUBSTRATE_SANDBOX=1`, or `required_sandbox=1`) a skipped containment eval is a **FAILURE** (you required the sandbox but couldn't prove it). Verified both directions. |
+
+Regression-tested: config commands route through sandbox (manage/template/release-gate),
+release-gate routes pytest-not-pre-commit, skip-is-not-blocked invariant (host-agnostic),
+skip-fails-when-required. `test_evals_pass_on_shipped_kit` is now backend-agnostic
+(16/16 with a backend, 15/15 + 1 skipped without — both rate 1.00, 0 FP).
+
+**Scope now:** non-interactive sandbox command routing is **complete**; the eval no
+longer counts untested containment as blocked. The last piece — **interactive
+agent-Bash fail-closed** (v3.5.4, pending host-native-sandbox-marker verification) —
+then the self-published benchmark (v3.5.5), which can now honestly say: contains exfil
+when a sandbox is available, skips/fails honestly when not, never counts a skip as a block.
+
 ## Deferred (P2 — documented, not yet built)
 
 These are real improvements the review identified; scoped as future

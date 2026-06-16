@@ -69,5 +69,13 @@ jobs:
           cd "$repo" && git init -q
           bash "$GITHUB_WORKSPACE/bootstrap.sh" --profile "${{ matrix.profile }}" --lang "${{ matrix.lang }}" --no-doctor
           [ "${{ matrix.lang }}" = "node" ] && printf '{"name":"x","version":"1.0.0"}\n' > package.json || true
+          # strict `check` runs `doctor --strict`, which requires an ACTIVE CODEOWNERS
+          # with a REAL owner covering the privileged files. A throwaway CI repo has
+          # none (only CODEOWNERS.suggested), so synthesize a minimal valid one (the
+          # repo owner) — this tests that strict governance PASSES when configured.
+          if [ "${{ matrix.profile }}" = "strict" ]; then
+            mkdir -p .github
+            printf '* @%s\n' "${{ github.repository_owner }}" > .github/CODEOWNERS
+          fi
           ./manage.sh setup
           ./manage.sh check

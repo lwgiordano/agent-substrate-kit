@@ -2038,6 +2038,37 @@ def test_config_accepts_and_validates_sandbox_flag(tmp_path) -> None:
     assert bad.returncode == 2, "invalid SUBSTRATE_SANDBOX must be rejected"
 
 
+def test_doc_drift_doc_committed_with_code_is_not_stale(monkeypatch) -> None:
+    """v3.4.1: a covered file committed in the SAME commit as its knowledge doc
+    must NOT be flagged stale — a frozen review date otherwise drifts stale on
+    every whole-tree commit / fresh clone (the published-repo CI failure).
+    Protection preserved: code changed in a LATER commit than its doc still flags."""
+    import importlib
+    import datetime as _dt
+    sys.path.insert(0, str(SCRIPTS))
+    dd = importlib.import_module("check_doc_drift")
+    doc = {"path": "docs/knowledge/x.md", "covers": ["scripts/y.py"],
+           "last_human_reviewed": "2026-06-13"}
+    # doc + code both last committed the same day (whole-tree commit) -> not stale
+    monkeypatch.setattr(dd, "git_file_last_modified", lambda p, cwd=None: _dt.date(2026, 6, 15))
+    assert dd._doc_stale(doc, "scripts/y.py", Path(".")) is None
+    # code committed AFTER the doc -> still stale (user-repo protection kept)
+    monkeypatch.setattr(dd, "git_file_last_modified",
+                        lambda p, cwd=None: _dt.date(2026, 6, 16) if "y.py" in str(p) else _dt.date(2026, 6, 15))
+    assert dd._doc_stale(doc, "scripts/y.py", Path(".")) is not None
+
+
+def test_release_matrix_strict_provides_codeowners() -> None:
+    """v3.4.1: the strict full-setup matrix job must synthesize a valid active
+    CODEOWNERS — a fresh CI repo can't have real teams, so `doctor --strict`
+    would otherwise BLOCK `check`."""
+    wf = ROOT / ".github" / "workflows" / "release-matrix.yml"
+    if not wf.exists():
+        return
+    text = wf.read_text(encoding="utf-8")
+    assert ".github/CODEOWNERS" in text and "github.repository_owner" in text
+
+
 def test_release_matrix_workflow_present() -> None:
     wf = ROOT / ".github" / "workflows" / "release-matrix.yml"
     if not wf.exists():

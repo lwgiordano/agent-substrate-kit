@@ -1054,6 +1054,23 @@ agent's shell at `sandbox_exec.sh`) is an operator/host wiring step, documented
 in OPERATOR_ENABLEMENT. This moves exfil/secret from a tripwire toward
 containment — the oldest, most-cited limitation in the audit series.
 
+## v3.4.1 — CI green: two failure CLASSES fixed (not just symptoms)
+
+Publishing to GitHub turned the kit into a real git repo and surfaced two CI
+failures that local packaging never hit. Both are fixed at the class level with
+regression tests, per "make sure these don't happen again":
+
+| Failing job | Root cause | Class-fix |
+|---|---|---|
+| `CI / checks` (`manage.sh check` → doc-drift) | `last_human_reviewed` is a FROZEN date; a whole-tree commit / fresh clone stamps every covered script with a later git date → STALE on every commit, forever. Local never saw it (not a committed git repo until publish). | `check_doc_drift._doc_stale`: a covered file is stale only if committed AFTER its doc's review date **AND after the doc's own last commit**. Committing the doc *with* the code IS the review, so whole-tree commits and clones never falsely flag. User-repo protection preserved (code changed in a later commit than its doc still flags). Unit-tested both directions. |
+| `Release matrix / full-setup (strict, none)` | strict `check` runs `doctor --strict`, which requires an ACTIVE CODEOWNERS with a real owner — a throwaway CI repo has only `CODEOWNERS.suggested` → BLOCK. | The strict matrix job now synthesizes `.github/CODEOWNERS` = `* @${{ github.repository_owner }}` before `check`, so it tests that strict governance PASSES when configured. Verified locally: `doctor --strict-governance` BLOCKs without it, PASSes with it. Static-tested. |
+
+Why local passed but CI didn't: `package_release --full` runs the validators
+from an extracted (non-git) artifact, so the git-date staleness couldn't appear;
+and the matrix's fresh-strict-bootstrap path isn't in the unit suite. The two
+class-fixes remove both failure modes structurally; the regression tests lock
+them. 166 tests pass.
+
 ## Deferred (P2 — documented, not yet built)
 
 These are real improvements the review identified; scoped as future

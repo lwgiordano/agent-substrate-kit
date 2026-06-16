@@ -34,6 +34,24 @@ def _manifest_paths(root):
 def _date(s):
     try: return date.fromisoformat(str(s))
     except Exception: return None
+def _doc_stale(doc, cov, root):
+    """A covered file makes the doc stale ONLY if it was committed AFTER the doc's
+    last_human_reviewed date AND after the doc's OWN last commit. Committing the
+    doc together with (or after) the code IS the review — so an all-in-one commit
+    (and the kit's own source, where docs ride with code) is never falsely stale.
+    Without this, a frozen review date drifted stale on EVERY later whole-tree
+    commit / fresh clone (CI failed on the published repo). User-repo protection
+    is preserved: a script changed in a LATER commit than its doc still flags."""
+    rv = _date(doc.get('last_human_reviewed', ''))
+    if rv is None:
+        return None
+    fd = git_file_last_modified(Path(cov), cwd=root)
+    if not fd or fd <= rv:
+        return None
+    dd = git_file_last_modified(Path(doc['path']), cwd=root)
+    if dd is not None and fd <= dd:
+        return None  # doc committed with/after the code -> reviewed in that change
+    return (doc['path'], cov, fd.isoformat(), rv.isoformat())
 def detect(root:Path):
     docs=_load_docs(root); cov_to_docs={}
     for doc in docs:
@@ -51,7 +69,7 @@ def detect(root:Path):
       'staged_coverage_gap':sorted(p for p in _staged_code(root) if p not in cov_to_docs),
       'pending_stale_doc':pending,
       'phantom_doc':[(d['path'],c) for d in docs for c in d['covers'] if not (root/c).exists()],
-      'stale_doc':[(d['path'],c,fd.isoformat(),rv.isoformat()) for d in docs for c in d['covers'] for rv in [_date(d['last_human_reviewed'])] if rv is not None for fd in [git_file_last_modified(Path(c), cwd=root)] if fd and fd>rv],
+      'stale_doc':[r for d in docs for c in d['covers'] if (r:=_doc_stale(d,c,root)) is not None],
       'orphan_doc':sorted(on_disk-(manifest or set())),
       'missing_manifest':manifest is None,
     }

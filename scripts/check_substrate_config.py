@@ -104,6 +104,20 @@ def _required_profile():
     return val if val in {"starter", "standard", "strict"} else None
 
 
+def _required_sandbox():
+    """The pinned sandbox requirement (.substrate/required_sandbox): '0'/'1' or None.
+    Written by bootstrap when the sandbox tier is selected (→ '1'); frozen by the
+    trusted-base guard + CODEOWNERS, exactly like .substrate/required_profile."""
+    p = ROOT / ".substrate" / "required_sandbox"
+    if not p.is_file():
+        return None
+    try:
+        val = p.read_text(encoding="utf-8").strip()
+    except Exception:
+        return None
+    return val if val in {"0", "1"} else None
+
+
 def _strip_quotes_checked(raw: str, key: str):
     """Returns (value, error). Rejects unbalanced quotes."""
     v = raw.strip()
@@ -166,6 +180,33 @@ def main() -> int:
         if order.get(profile, 0) < order.get(req, 0):
             print(f"check-substrate-config: SUBSTRATE_PROFILE={profile!r} is below the "
                   f"required minimum profile {req!r} (.substrate/required_profile)", file=sys.stderr)
+            return 2
+    # SANDBOX LOCK + POLICY (v3.5.1 — closes the v3.5.0-audit P1s). Mirror the
+    # profile lock for the egress-containment tier. `.substrate/required_sandbox=1`
+    # (written by bootstrap when the sandbox tier is selected, CODEOWNED + trusted-
+    # base frozen) makes containment a REQUIRED minimum — a PR cannot flip
+    # SUBSTRATE_SANDBOX to 0. And the sandbox POLICY (.substrate/sandbox.json) is
+    # SECURITY data, so a malformed policy must FAIL THE GATE here — not only when
+    # something happens to invoke the sandbox at runtime.
+    req_sb = _required_sandbox()
+    sandbox_on = vals.get("SUBSTRATE_SANDBOX", "0")
+    if req_sb == "1" and sandbox_on != "1":
+        print('check-substrate-config: SUBSTRATE_SANDBOX must be "1" — containment is a '
+              "required minimum (.substrate/required_sandbox=1); a PR may not disable it",
+              file=sys.stderr)
+        return 2
+    sbx_det = Path(__file__).resolve().parent / "sandbox_detect.py"
+    if sbx_det.is_file() and ((ROOT / ".substrate" / "sandbox.json").is_file() or req_sb == "1"):
+        import subprocess
+        r = subprocess.run([sys.executable, "-I", str(sbx_det), "--root", str(ROOT), "--json"],
+                           capture_output=True, text=True, timeout=15)
+        if r.returncode == 2:  # invalid sandbox.json (bad enum / shape / not JSON)
+            print(f"check-substrate-config: invalid sandbox policy — {r.stderr.strip()}", file=sys.stderr)
+            return 2
+        if req_sb == "1" and r.returncode == 3:  # containment required but no backend present
+            print("check-substrate-config: SUBSTRATE_SANDBOX required but no sandbox backend is "
+                  "available (install @anthropic-ai/sandbox-runtime, or bubblewrap / sandbox-exec)",
+                  file=sys.stderr)
             return 2
     findings = []
     shell_danger = None

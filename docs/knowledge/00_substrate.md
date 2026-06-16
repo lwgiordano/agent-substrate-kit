@@ -53,3 +53,11 @@ covers:
 # Substrate
 
 This document covers the installed AI/self-audit substrate scripts.
+
+The egress-containment tier (v3.5.x) is a backend abstraction: `sandbox_detect.py`
+resolves a backend (`anthropic-srt` / `bubblewrap` / `seatbelt` / `none`) from
+`.substrate/sandbox.json` and `sandbox_exec.sh` dispatches through it. When
+`.substrate/required_sandbox=1` (set by `bootstrap --profile strict+sandbox`),
+containment is a frozen minimum: `check_substrate_config.py` blocks disabling it,
+the sandbox policy is validated by the normal gate, and the trusted-base audit
+freezes the flag — mirroring the profile-authority model.

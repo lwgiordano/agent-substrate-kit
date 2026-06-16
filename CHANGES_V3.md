@@ -1166,6 +1166,31 @@ Deferred to v3.5.1+: the containment **eval-harness task** + `evals --report`/`B
 (self-published reproducible proof); auto-wiring the agent's Bash through the sandbox;
 fine-grained fs write-scope on the bwrap/seatbelt backends.
 
+## v3.5.1 — sandbox AUTHORITY + validation + honesty (closes the v3.5.0-audit P1s)
+
+The v3.5.0 audit confirmed the backend abstraction is well-shaped but flagged that
+`strict+sandbox` was **not yet an enforced containment tier** — the flag was
+unlocked, the policy wasn't gated, and go-live discarded the detector's warnings.
+v3.5.1 closes the authority/validation/honesty gaps (enforcement *routing* —
+env-scrub, lang-gates, agent-Bash — is the separate v3.5.2 pass).
+
+| Audit finding | Fix |
+|---|---|
+| **P1** `SUBSTRATE_SANDBOX` not locked like `SUBSTRATE_PROFILE` — a strict+sandbox PR could flip it to `0` | New `.substrate/required_sandbox` lock (written by bootstrap; `--profile strict+sandbox` → `1`). `check_substrate_config.py` BLOCKs `required_sandbox=1 + SUBSTRATE_SANDBOX!=1`; the trusted-base audit freezes both `SUBSTRATE_SANDBOX=` diffs and `.substrate/required_sandbox` — mirroring the profile-authority model exactly. |
+| **P1** sandbox policy not part of the normal gate — a malformed `sandbox.json` sat unflagged until something invoked the sandbox | `check_substrate_config.py` now validates `.substrate/sandbox.json` via `sandbox_detect` whenever it exists (or containment is required): invalid policy → BLOCK; `required_sandbox=1` + no backend available → BLOCK (fail-closed). Sandbox policy is security DATA, so it fails the gate, not runtime. |
+| **P1/P2** go-live overclaimed on partial backends — read capabilities but discarded `warnings` | `substrate_doctor --go-live` now consumes the detector's `warnings` and **degrades pass→warn** when the backend can't enforce the requested policy (e.g. allowlist/fs-scope on seatbelt). Reports `backend=<id> (<caps>); policy not fully enforceable here: …`. |
+
+Regression-tested: required_sandbox lock blocks disable, invalid `sandbox.json`
+blocks the config gate, bootstrap writes `required_sandbox`, trusted-base freezes
+the sandbox authority, go-live consumes warnings. Existing v3.4.0/v3.5.0 sandbox
+tests still pass.
+
+**Honest scope:** v3.5.0–v3.5.1 = sandbox **backend abstraction + authority +
+validation**. v3.5.2 completes **enforcement routing** (secret-scrubbing env in
+`sandbox_exec`, language/CI gates run through the sandbox when `SUBSTRATE_SANDBOX=1`,
+agent-Bash fail-closed-when-required) + the `sandbox_exfil_contained` eval — after
+which it can be called a complete `strict+sandbox` containment tier.
+
 ## Deferred (P2 — documented, not yet built)
 
 These are real improvements the review identified; scoped as future

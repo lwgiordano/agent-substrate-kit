@@ -2174,6 +2174,85 @@ def test_config_accepts_and_validates_sandbox_flag(tmp_path) -> None:
     assert bad.returncode == 2, "invalid SUBSTRATE_SANDBOX must be rejected"
 
 
+def test_required_sandbox_lock_blocks_disabling_containment(tmp_path) -> None:
+    """v3.5.1 (audit P1): when .substrate/required_sandbox=1, a config with
+    SUBSTRATE_SANDBOX=0 must BLOCK — containment is a frozen minimum, like the
+    profile lock. Closes the 'strict+sandbox silently disableable' hole."""
+    if not (SCRIPTS / "check_substrate_config.py").exists():
+        return
+    sub = tmp_path / ".substrate"; sub.mkdir()
+    (sub / "config").write_text('SUBSTRATE_PROFILE="strict"\nSUBSTRATE_SANDBOX="0"\n', encoding="utf-8")
+    (sub / "required_sandbox").write_text("1\n", encoding="utf-8")
+    p = subprocess.run([sys.executable, "-I", str(SCRIPTS / "check_substrate_config.py")],
+                       cwd=str(tmp_path), capture_output=True, text=True, timeout=30)
+    assert p.returncode == 2, "required_sandbox=1 + SUBSTRATE_SANDBOX=0 must BLOCK"
+    assert "required minimum" in (p.stdout + p.stderr)
+
+
+def test_sandbox_policy_validated_by_config_gate(tmp_path) -> None:
+    """v3.5.1 (audit P1): a malformed .substrate/sandbox.json is SECURITY data and
+    must fail the normal config gate — not only when something invokes the sandbox."""
+    if not (SCRIPTS / "check_substrate_config.py").exists() or not (SCRIPTS / "sandbox_detect.py").exists():
+        return
+    sub = tmp_path / ".substrate"; sub.mkdir()
+    (sub / "config").write_text('SUBSTRATE_PROFILE="standard"\n', encoding="utf-8")
+    (sub / "sandbox.json").write_text('{"backend":"evil"}', encoding="utf-8")
+    p = subprocess.run([sys.executable, "-I", str(SCRIPTS / "check_substrate_config.py")],
+                       cwd=str(tmp_path), capture_output=True, text=True, timeout=30)
+    assert p.returncode == 2, "invalid sandbox.json must BLOCK the config gate"
+    assert "sandbox policy" in (p.stdout + p.stderr)
+
+
+def test_required_sandbox_allows_when_enabled_and_backend_present(tmp_path) -> None:
+    """required_sandbox=1 + SUBSTRATE_SANDBOX=1 + valid policy passes the config gate
+    WHERE a backend exists (skip if none — e.g. Linux CI without bwrap, where the
+    gate would honestly BLOCK on 'no backend')."""
+    cc = SCRIPTS / "check_substrate_config.py"; det = SCRIPTS / "sandbox_detect.py"
+    if not cc.exists() or not det.exists():
+        return
+    sub = tmp_path / ".substrate"; sub.mkdir()
+    (sub / "sandbox.json").write_text('{"backend":"auto","network":"deny"}', encoding="utf-8")
+    avail = subprocess.run([sys.executable, "-I", str(det), "--root", str(tmp_path), "--backend"],
+                           capture_output=True, text=True, timeout=20)
+    if avail.returncode != 0:
+        return  # no backend here; the gate's fail-closed BLOCK is covered elsewhere
+    (sub / "config").write_text('SUBSTRATE_PROFILE="strict"\nSUBSTRATE_SANDBOX="1"\n', encoding="utf-8")
+    (sub / "required_sandbox").write_text("1\n", encoding="utf-8")
+    p = subprocess.run([sys.executable, "-I", str(cc)], cwd=str(tmp_path),
+                       capture_output=True, text=True, timeout=30)
+    assert p.returncode == 0, p.stdout + p.stderr
+
+
+def test_bootstrap_writes_required_sandbox_lock() -> None:
+    """v3.5.1: bootstrap writes .substrate/required_sandbox (=SANDBOX) so the
+    containment requirement is a pinned, frozen minimum like required_profile."""
+    bs = ROOT / "bootstrap.sh"
+    if not bs.exists():
+        return
+    assert "> .substrate/required_sandbox" in bs.read_text(encoding="utf-8")
+
+
+def test_trusted_base_freezes_sandbox_authority() -> None:
+    """v3.5.1: the trusted-base audit must freeze SUBSTRATE_SANDBOX diffs +
+    .substrate/required_sandbox, mirroring the profile freeze."""
+    tpl = ROOT / "workflows" / "trusted-base-audit.yml.template"
+    if not tpl.exists():
+        return
+    t = tpl.read_text(encoding="utf-8")
+    assert ".substrate/required_sandbox" in t, "required_sandbox must be in the frozen TRUSTED set"
+    assert "SUBSTRATE_SANDBOX=" in t, "trusted-base must guard SUBSTRATE_SANDBOX diffs"
+
+
+def test_go_live_consumes_sandbox_warnings() -> None:
+    """v3.5.1 (audit P1/P2): go-live must DEGRADE pass->warn when the detector
+    reports the backend can't enforce the requested policy — no overclaiming."""
+    sd = SCRIPTS / "substrate_doctor.py"
+    if not sd.exists():
+        return
+    t = sd.read_text(encoding="utf-8")
+    assert "sb_warns" in t and "not fully enforceable" in t, "go-live must consume detector warnings"
+
+
 def test_config_key_allowlists_agree() -> None:
     """The shell loader (_substrate_config.sh, sourced by manage.sh on every
     call) and the Python validator (check_substrate_config.py) must accept the

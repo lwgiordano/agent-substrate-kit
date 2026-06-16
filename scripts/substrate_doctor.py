@@ -285,7 +285,7 @@ def _go_live(blocks, warns, as_json=False):
     # bwrap/seatbelt = network containment only) so go-live never overclaims.
     det = ROOT / 'scripts' / 'sandbox_detect.py'
     sbx = ROOT / 'scripts' / 'sandbox_exec.sh'
-    sb_backend, sb_caps, sb_avail = 'none', {}, False
+    sb_backend, sb_caps, sb_avail, sb_warns = 'none', {}, False, []
     if det.exists():
         try:
             import json as _json
@@ -294,13 +294,19 @@ def _go_live(blocks, warns, as_json=False):
             p = _sp.run([_sys.executable, '-I', str(det), '--root', str(ROOT), '--json'],
                         capture_output=True, text=True, timeout=20)
             d = _json.loads(p.stdout)
-            sb_backend, sb_caps, sb_avail = d.get('backend', 'none'), d.get('capabilities', {}), bool(d.get('available'))
+            sb_backend, sb_caps = d.get('backend', 'none'), d.get('capabilities', {})
+            sb_avail, sb_warns = bool(d.get('available')), d.get('warnings', [])
         except Exception:
             sb_avail = sbx.exists() and run(['bash', str(sbx), '--available'])[0] == 0
     _cap = ('network+fs+egress-allowlist' if sb_caps.get('egress_allowlist')
             else 'network containment only' if sb_caps.get('network') else 'no containment')
-    if sb_cfg == '1' and sb_avail:
+    # CONSUME the detector's warnings (v3.5.1 audit fix): a backend that can't
+    # deliver the requested policy (e.g. allowlist/fs-scope on seatbelt) must
+    # DEGRADE pass->warn — go-live never claims more containment than the backend gives.
+    if sb_cfg == '1' and sb_avail and not sb_warns:
         sb_status, sb_reason = 'pass', f'backend={sb_backend} ({_cap})'
+    elif sb_cfg == '1' and sb_avail:
+        sb_status, sb_reason = 'warn', f'backend={sb_backend} ({_cap}); policy not fully enforceable here: {"; ".join(sb_warns)}'
     elif sb_cfg == '1':
         sb_status, sb_reason = 'warn', 'SUBSTRATE_SANDBOX=1 but no backend available (install @anthropic-ai/sandbox-runtime, or bubblewrap on Linux / sandbox-exec on macOS)'
     else:

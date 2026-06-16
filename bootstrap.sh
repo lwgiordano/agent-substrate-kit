@@ -92,6 +92,10 @@ fi
 # to disable strict-only behavior. CODEOWNED + frozen by the trusted-base guard;
 # lowering it is a deliberate, reviewed act. (Re)written to match the install.
 echo "$PROFILE" > .substrate/required_profile; echo "    +    .substrate/required_profile"
+# Sandbox LOCK: the minimum containment requirement, frozen like required_profile.
+# `--profile strict+sandbox` pins this to 1, so a PR can RAISE but never silently
+# DISABLE containment (check_substrate_config + trusted-base enforce it). v3.5.1.
+echo "$SANDBOX" > .substrate/required_sandbox; echo "    +    .substrate/required_sandbox"
 # Sandbox backend policy (DATA, validated fail-closed by scripts/sandbox_detect.py).
 # Written always so it's discoverable + editable; only ENFORCED when SUBSTRATE_SANDBOX=1.
 # backend=auto prefers @anthropic-ai/sandbox-runtime (srt) if present, else the OS-native

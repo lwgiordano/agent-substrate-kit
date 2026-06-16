@@ -42,7 +42,7 @@ jobs:
           # profile). NOT the audited DATA/content — harness_patterns.json is
           # .json (data) and AGENTS.md / docs / .substrate/config (command
           # values) may change. (v3.2.19/20 findings.)
-          TRUSTED="scripts manage.sh .pre-commit-config.yaml .github/workflows .substrate/required_profile"
+          TRUSTED="scripts manage.sh .pre-commit-config.yaml .github/workflows .substrate/required_profile .substrate/required_sandbox"
           # carve the one DATA file back out of scripts/ (PRs may extend it; the
           # frozen check_harness_patterns.py validates it against pinned hashes).
           changed="$(git diff --name-only "origin/${{ github.base_ref }}...HEAD" -- $TRUSTED \
@@ -65,7 +65,17 @@ jobs:
             echo "::error::Lowering it disables strict-only behavior — route through release."
             exit 1
           fi
-          echo "freeze-guard: ok — no frozen policy/validator/CI/profile change"
+          # Sandbox authority (v3.5.1): when containment is a required minimum
+          # (.substrate/required_sandbox=1), the SUBSTRATE_SANDBOX flag is frozen too
+          # — a PR must not disable egress containment while keeping strict governance.
+          if git diff "origin/${{ github.base_ref }}...HEAD" -- .substrate/config \
+               | grep -Eq '^[+-]\s*SUBSTRATE_SANDBOX='; then
+            echo "::error::This PR changes SUBSTRATE_SANDBOX in .substrate/config."
+            echo "::error::Sandbox enablement is frozen when .substrate/required_sandbox=1."
+            echo "::error::Disabling containment must route through the release process."
+            exit 1
+          fi
+          echo "freeze-guard: ok — no frozen policy/validator/CI/profile/sandbox change"
       - name: Run the (frozen) validators + strict governance against PR content
         run: |
           set -euo pipefail

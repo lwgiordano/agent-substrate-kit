@@ -13,7 +13,7 @@
       {
         "matcher": "Bash",
         "hooks": [
-          { "type": "command", "command": "python3 \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)/scripts/check_exfil_guard.py\"", "timeout": 10 }
+          { "type": "command", "command": "SUBSTRATE_HOOK_HOST=codex python3 \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)/scripts/check_exfil_guard.py\"", "timeout": 10 }
         ]
       }
     ],

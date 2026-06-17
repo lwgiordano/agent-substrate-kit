@@ -94,55 +94,72 @@ def _claude_strict_sandbox(root: Path) -> bool:
     return False
 
 
-def _provably_contained(root: Path) -> bool:
-    """A Bash command is provably contained ONLY via a signal we can verify — never
-    a guess. Routed through sandbox_exec.sh, Claude strict-sandbox configured, or an
-    explicit operator attestation of host containment."""
+def _hook_host() -> str:
+    """Which host invoked this hook — from SUBSTRATE_HOOK_HOST, set in the generated
+    Claude/Codex hook commands (and passed as "copilot" by the Copilot adapter).
+    Unknown/empty => host-BOUND proofs (Claude settings) do NOT apply (fail-closed)."""
+    return os.environ.get("SUBSTRATE_HOOK_HOST", "").strip().lower()
+
+
+def _provably_contained(root: Path, host: str) -> bool:
+    """Provable containment for THIS host — never a guess. Env-marker proofs are
+    host-independent (the command is actually routed/attested-contained); Claude's
+    settings.json proves containment ONLY for the Claude host — it says nothing about
+    a Codex / Copilot / unknown invocation (the v3.5.5-audit P1 proof-binding gap)."""
     if os.environ.get("SUBSTRATE_SANDBOXED") == "1":
-        return True   # ran through scripts/sandbox_exec.sh
+        return True   # ran through scripts/sandbox_exec.sh (any host)
     if os.environ.get("SUBSTRATE_HOST_SANDBOX") == "1":
-        return True   # operator attests host containment (srt-wrapped session, container, …)
-    return _claude_strict_sandbox(root)
+        return True   # operator attests host containment (srt-wrapped, container, …; any host)
+    if host == "claude" and _claude_strict_sandbox(root):
+        return True   # Claude strict-sandbox config binds to the Claude host ONLY
+    return False
 
 
 def main() -> int:
+    # Compute the containment requirement BEFORE parsing, so a malformed Bash
+    # payload fails CLOSED under required_sandbox (a hook that can't read the
+    # command can't prove containment) — v3.5.5-audit P2.
+    _r = _root()
+    required = _sandbox_required(_r)
+    host = _hook_host()
+
+    def _block_required(why: str) -> int:
+        print(f"exfil-guard: BLOCKED — containment is required ({why}).", file=sys.stderr)
+        return 2
+
     try:
         raw = sys.stdin.read()
         hook = json.loads(raw) if raw.strip() else {}
     except Exception:
-        return 0  # fail-open on malformed input; never wedge the agent
-    # Only guard the shell tool; non-Bash tools are handled by Read-deny
-    # rules and other hooks. None (absent) falls through to inspection.
+        return _block_required("hook input was malformed") if required else 0
+    # Only guard the shell tool; non-Bash tools are NOT shell execution (governed
+    # by Read/Edit permission rules). None (absent) falls through to inspection.
     if hook.get("tool_name") not in (None, "Bash"):
         return 0
     tool_input = hook.get("tool_input")
     if not isinstance(tool_input, dict):
-        return 0
+        return _block_required("the Bash payload was missing or malformed") if required else 0
     cmd = str(tool_input.get("command", ""))
     if not cmd:
-        return 0
-    # SANDBOX CONTAINMENT GATE (v3.5.5). When containment is REQUIRED
-    # (required_sandbox=1), an interactive Bash command that is NOT provably
-    # contained must be BLOCKED. The PreToolUse hook cannot read the host's runtime
-    # sandbox state, so we require PROOF (routed via sandbox_exec.sh, Claude
-    # strict-sandbox configured, or an operator attestation) — absent proof we
-    # refuse rather than fake it. NOT escapable by SUBSTRATE_ALLOW_SECRET_CMD: that
-    # is the exfil-tripwire override, not a containment override.
-    _r = _root()
-    if _sandbox_required(_r) and not _provably_contained(_r):
+        return _block_required("no command was provided") if required else 0
+    # SANDBOX CONTAINMENT GATE (v3.5.5/3.5.6, HOST-AWARE). When containment is
+    # REQUIRED, an interactive Bash command that is NOT provably contained FOR THIS
+    # HOST must be BLOCKED. The hook cannot read the host's runtime sandbox state,
+    # so we require PROOF — absent it we refuse rather than fake it. NOT escapable
+    # by SUBSTRATE_ALLOW_SECRET_CMD (the exfil-tripwire override, not a containment one).
+    if required and not _provably_contained(_r, host):
+        hint = "" if host in ("claude", "codex", "copilot") else " (host unknown — set SUBSTRATE_HOOK_HOST)"
         print(
             "exfil-guard: BLOCKED — containment is REQUIRED (.substrate/required_sandbox=1) "
-            "but this Bash command is not provably sandboxed.\n"
-            "Satisfy it by ONE of: run the agent via `scripts/sandbox_exec.sh` "
-            "(sets SUBSTRATE_SANDBOXED=1); enable Claude's strict sandbox "
-            "(settings.json sandbox.enabled=true + allowUnsandboxedCommands=false); "
-            "or, if the host already contains execution (`npx @anthropic-ai/sandbox-runtime "
-            "claude`, a container, …), set SUBSTRATE_HOST_SANDBOX=1.",
+            f"but this Bash command is not provably sandboxed{hint}.\n"
+            "Satisfy it by ONE of: run via `scripts/sandbox_exec.sh` (sets SUBSTRATE_SANDBOXED=1); "
+            "enable Claude strict sandbox (sandbox.enabled + allowUnsandboxedCommands=false) when "
+            "the host is Claude; or set SUBSTRATE_HOST_SANDBOX=1 if the host already contains "
+            "execution (`npx @anthropic-ai/sandbox-runtime claude`, a container, …).",
             file=sys.stderr,
         )
         return 2
-    # Audited override for legitimate one-offs (checked before profile so the
-    # explicit escape hatch always works).
+    # Audited override for legitimate one-offs (exfil tripwire only).
     if os.environ.get("SUBSTRATE_ALLOW_SECRET_CMD", "") in ("1", "true", "yes"):
         return 0
     # FAIL CLOSED: an invalid/unreadable profile must BLOCK, not downgrade.

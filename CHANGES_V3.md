@@ -1284,6 +1284,27 @@ the **`strict+sandbox` containment tier is complete**. Next: **v3.5.6 — self-p
 benchmark** (`evals --report`/`BENCHMARK.md`), which can now add an agent-Bash-blocked
 eval and honestly report end-to-end containment.
 
+## v3.5.6 — host-bound containment proof (closes the v3.5.5-audit P1s)
+
+The v3.5.5 audit confirmed the core gate but found the proof wasn't **host-bound**
+and the Copilot adapter didn't apply it at all.
+
+| Audit finding | Fix |
+|---|---|
+| **P1** Copilot adapter bypasses the containment gate (imported only `_looks_dangerous`/`_profile`) | `copilot_hook_adapter.py` now imports + applies the gate with `host="copilot"`: when `required_sandbox=1` and the Bash command isn't provably contained for Copilot, it emits `permissionDecision: deny`. |
+| **P1** Claude `settings.json` accepted as proof for ANY host (but `check_exfil_guard` is wired for Codex too) | `_provably_contained(root, host)` is now host-aware: Claude strict-sandbox config proves containment **only when `host=claude`**. The generated Claude/Codex hook commands set `SUBSTRATE_HOOK_HOST=claude`/`codex`; an unknown host can't be proven by a `.claude` file. Env markers (`SUBSTRATE_SANDBOXED`/`SUBSTRATE_HOST_SANDBOX`) stay host-independent. |
+| **P2** malformed/missing Bash payload failed OPEN under `required_sandbox=1` | The requirement is computed before parsing; a malformed/missing payload now **fails closed** (block) when containment is required — a hook that can't read the command can't prove containment. |
+
+Plus a new `agent_bash_uncontained_blocked` eval task (backend-independent → always
+tested) so the measured block-rate includes the interactive-Bash guard.
+Regression-tested: Claude/Codex/unknown host separation, Copilot deny + allow-via-markers,
+malformed-fails-closed, env-marker host-independence.
+
+With this, interactive Bash is fail-closed **across all supported host adapters**
+(Claude, Codex, Copilot) with host-bound proof — the `strict+sandbox` containment
+tier is complete and honest cross-host. Next: **v3.5.7 — self-published benchmark**
+(`evals --report`/`BENCHMARK.md`).
+
 ## Deferred (P2 — documented, not yet built)
 
 These are real improvements the review identified; scoped as future

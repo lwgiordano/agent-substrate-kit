@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/check_exfil_guard.py\"",
+            "command": "SUBSTRATE_HOOK_HOST=claude python3 \"$CLAUDE_PROJECT_DIR/scripts/check_exfil_guard.py\"",
             "timeout": 10
           }
         ]

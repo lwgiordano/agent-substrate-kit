@@ -300,6 +300,24 @@ def t_sandbox_exfil_contained():
     return p.returncode != 0, f"contained rc={p.returncode}"
 
 
+def t_agent_bash_uncontained_blocked():
+    """When containment is REQUIRED (required_sandbox=1), an UNCONTAINED interactive
+    Bash command must be BLOCKED by check_exfil_guard (the v3.5.5/3.5.6 host-aware
+    fail-closed gate). No sandbox backend needed — this proves the GUARD decision,
+    not the sandbox itself, so it is always tested (never skipped)."""
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        _stage(td, "check_exfil_guard.py", "command_policy.py", "_substrate_root.py")
+        (td / ".substrate").mkdir(exist_ok=True)
+        (td / ".substrate" / "required_sandbox").write_text("1\n")
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("SUBSTRATE_SANDBOXED", "SUBSTRATE_HOST_SANDBOX", "SUBSTRATE_HOOK_HOST")}
+        payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": "echo hi"}})
+        p = subprocess.run([PY, str(td / "scripts" / "check_exfil_guard.py")], input=payload,
+                           cwd=str(td), capture_output=True, text=True, timeout=20, env=env)
+        return p.returncode == 2, f"rc={p.returncode}"
+
+
 def t_copilot_deny(cmd_b64):
     p = _run([PY, "-I", str(SCRIPTS / "copilot_hook_adapter.py")],
              json.dumps({"toolName": "bash", "toolArgs": json.dumps({"command": _d(cmd_b64)})}))
@@ -415,6 +433,7 @@ TASKS = [
     ("current_session_fallback","malicious", "block", lambda: t_handoff_injection(True), False),
     ("agents_md_injection",     "malicious", "block", t_agents_injection, True),
     ("sandbox_exfil_contained", "malicious", "block", t_sandbox_exfil_contained, True),
+    ("agent_bash_uncontained_blocked", "malicious", "block", t_agent_bash_uncontained_blocked, True),
     # benign — MUST be allowed (false-positive guard)
     ("benign_ls",               "benign", "allow", lambda: (not bool(_cp and _cp.looks_dangerous_command(_d(_LS), "strict")), ""), False),
     ("benign_curl_download",    "benign", "allow", lambda: (not bool(_cp and _cp.looks_dangerous_command(_d(_CURL_DL), "strict")), ""), False),

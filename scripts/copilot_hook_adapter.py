@@ -28,13 +28,28 @@ except Exception:  # pragma: no cover
     class CommandPolicyUnavailable(RuntimeError):
         pass
 try:
-    from check_exfil_guard import _looks_dangerous, _profile  # type: ignore
+    from check_exfil_guard import (  # type: ignore
+        _looks_dangerous,
+        _profile,
+        _provably_contained,
+        _root,
+        _sandbox_required,
+    )
 except Exception:  # pragma: no cover - guard import must never crash the hook
     def _looks_dangerous(_cmd: str, _profile_name: str = "standard"):
         return None
 
     def _profile() -> str:
         return "standard"
+
+    def _root() -> Path:
+        return Path.cwd()
+
+    def _sandbox_required(_root) -> bool:
+        return False
+
+    def _provably_contained(_root, _host) -> bool:
+        return True
 
 
 _SHELL_TOOLS = {"bash", "shell", "terminal", "sh", "run", "runinterminal", "exec"}
@@ -105,6 +120,24 @@ def main() -> int:
         print(json.dumps({"permissionDecision": "allow"}))
         return 0
     cmd = _extract_command(data)
+    # CONTAINMENT GATE (v3.5.6), HOST-BOUND to "copilot": when containment is
+    # REQUIRED (required_sandbox=1), an uncontained Bash command is DENIED. A Claude
+    # settings.json does NOT prove Copilot containment — only routing (SUBSTRATE_SANDBOXED=1)
+    # or operator attestation (SUBSTRATE_HOST_SANDBOX=1) count for this host.
+    if cmd:
+        try:
+            root = _root()
+            if _sandbox_required(root) and not _provably_contained(root, "copilot"):
+                print(json.dumps({
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": "substrate: containment REQUIRED "
+                    "(.substrate/required_sandbox=1) but this Bash command is not provably "
+                    "sandboxed for Copilot — route via scripts/sandbox_exec.sh "
+                    "(SUBSTRATE_SANDBOXED=1) or set SUBSTRATE_HOST_SANDBOX=1.",
+                }))
+                return 0
+        except Exception:
+            pass  # never crash the hook on the gate; the tripwire below still applies
     # FAIL CLOSED: an invalid/unreadable profile must DENY, not downgrade.
     try:
         reason = _looks_dangerous(cmd, _profile()) if cmd else None

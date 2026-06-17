@@ -83,5 +83,14 @@ sandbox field/env to hooks), so it requires proof — routed through `sandbox_ex
 (`SUBSTRATE_SANDBOXED=1`), Claude strict-sandbox configured (`sandbox.enabled` +
 `allowUnsandboxedCommands:false`, read from settings), or an operator attestation
 (`SUBSTRATE_HOST_SANDBOX=1`) — and BLOCKS otherwise. No faking: absent proof, it
-refuses. Opt-in (only when `required_sandbox=1`). Codex-native sandbox detection is
-not yet wired; the attestation + routing markers cover all hosts in the meantime.
+refuses. Opt-in (only when `required_sandbox=1`).
+
+v3.5.6 makes the containment proof HOST-BOUND: Claude's `settings.json` proves
+containment only when the invoking host is Claude (`SUBSTRATE_HOOK_HOST=claude`, set
+in the generated Claude/Codex hook commands), never for a Codex/Copilot/unknown
+invocation; the **Copilot adapter** now applies the same gate (`host=copilot`,
+emitting `permissionDecision: deny`); and a malformed/missing Bash payload **fails
+closed** under `required_sandbox=1`. Env-marker proofs (`SUBSTRATE_SANDBOXED`,
+`SUBSTRATE_HOST_SANDBOX`) remain host-independent. Codex-native sandbox detection is
+still not wired; the attestation + routing markers cover it. The
+`agent_bash_uncontained_blocked` eval makes this measured behavior.

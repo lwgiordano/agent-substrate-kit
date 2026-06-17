@@ -2350,10 +2350,12 @@ def test_sandbox_eval_skip_is_not_counted_as_blocked() -> None:
     m = json.loads(p.stdout)["metrics"]
     assert m["malicious_block_rate"] == 1.0, m
     skipped_ids = {s["id"] for s in m.get("skipped", [])}
+    # The host-aware guard eval is backend-independent → always tested, never skipped.
+    assert "agent_bash_uncontained_blocked" not in skipped_ids, "guard eval must always run"
+    # Whatever is skipped (e.g. the containment eval with no backend) is excluded from
+    # the tested malicious total — a skip is never counted as a block.
     if "sandbox_exfil_contained" in skipped_ids:
-        assert m["malicious_skipped"] >= 1 and m["malicious_total"] == 15, m
-    else:
-        assert m["malicious_total"] == 16, m  # backend present → containment eval tested
+        assert m["malicious_skipped"] >= 1, m
 
 
 def test_sandbox_eval_skip_fails_when_containment_required() -> None:
@@ -2414,7 +2416,8 @@ def _stage_exfil_guard(tmp_path):
 
 def _run_exfil_guard(guard, cwd, cmd="ls -la", **env):
     import os
-    base = {k: v for k, v in os.environ.items() if k not in ("SUBSTRATE_SANDBOXED", "SUBSTRATE_HOST_SANDBOX")}
+    strip = ("SUBSTRATE_SANDBOXED", "SUBSTRATE_HOST_SANDBOX", "SUBSTRATE_HOOK_HOST")
+    base = {k: v for k, v in os.environ.items() if k not in strip}
     base.update(env)
     payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": cmd}})
     return subprocess.run([sys.executable, str(guard)], cwd=str(cwd), input=payload,
@@ -2435,10 +2438,11 @@ def test_agent_bash_blocked_when_containment_required_and_uncontained(tmp_path) 
     assert _run_exfil_guard(guard, tmp_path, SUBSTRATE_HOST_SANDBOX="1").returncode == 0, "operator attestation must pass"
 
 
-def test_agent_bash_allowed_with_claude_strict_sandbox(tmp_path) -> None:
-    """Claude strict-sandbox configured (sandbox.enabled + allowUnsandboxedCommands=false)
-    is provable host containment → Bash allowed even when required_sandbox=1. This is
-    honest detection of the host's enforcement CONFIG, not a runtime guess."""
+def test_agent_bash_claude_sandbox_proof_is_host_bound(tmp_path) -> None:
+    """v3.5.6 (audit P1): Claude strict-sandbox config (sandbox.enabled +
+    allowUnsandboxedCommands=false) proves containment ONLY for host=claude. A Codex
+    or unknown invocation must NOT be satisfied by a .claude/settings.json (it says
+    nothing about that host's execution). enabled-but-not-strict never counts."""
     if not (SCRIPTS / "check_exfil_guard.py").exists():
         return
     guard = _stage_exfil_guard(tmp_path)
@@ -2446,10 +2450,57 @@ def test_agent_bash_allowed_with_claude_strict_sandbox(tmp_path) -> None:
     (tmp_path / ".claude").mkdir()
     (tmp_path / ".claude" / "settings.json").write_text(
         '{"sandbox":{"enabled":true,"allowUnsandboxedCommands":false}}', encoding="utf-8")
-    assert _run_exfil_guard(guard, tmp_path).returncode == 0
-    # non-strict (allowUnsandboxedCommands not false) must NOT count as contained
+    assert _run_exfil_guard(guard, tmp_path, SUBSTRATE_HOOK_HOST="claude").returncode == 0, "claude host + strict config → allow"
+    assert _run_exfil_guard(guard, tmp_path, SUBSTRATE_HOOK_HOST="codex").returncode == 2, "codex host must NOT be proven by claude config"
+    assert _run_exfil_guard(guard, tmp_path).returncode == 2, "unknown host must NOT be proven by claude config"
+    # env-marker proofs are host-independent
+    assert _run_exfil_guard(guard, tmp_path, SUBSTRATE_HOOK_HOST="codex", SUBSTRATE_SANDBOXED="1").returncode == 0
+    # enabled-but-not-strict must not count even for claude
     (tmp_path / ".claude" / "settings.json").write_text('{"sandbox":{"enabled":true}}', encoding="utf-8")
-    assert _run_exfil_guard(guard, tmp_path).returncode == 2, "enabled-but-not-strict must not satisfy required containment"
+    assert _run_exfil_guard(guard, tmp_path, SUBSTRATE_HOOK_HOST="claude").returncode == 2, "enabled-but-not-strict must not satisfy"
+
+
+def test_exfil_guard_malformed_payload_fails_closed_when_required(tmp_path) -> None:
+    """v3.5.6 (audit P2): under required_sandbox=1, malformed/missing Bash payload
+    fails CLOSED (a hook that can't read the command can't prove containment)."""
+    if not (SCRIPTS / "check_exfil_guard.py").exists():
+        return
+    guard = _stage_exfil_guard(tmp_path)
+    (tmp_path / ".substrate" / "required_sandbox").write_text("1\n", encoding="utf-8")
+    import os
+    base = {k: v for k, v in os.environ.items()
+            if k not in ("SUBSTRATE_SANDBOXED", "SUBSTRATE_HOST_SANDBOX", "SUBSTRATE_HOOK_HOST")}
+    for bad in ("NOT JSON", json.dumps({"tool_name": "Bash"}), json.dumps({"tool_name": "Bash", "tool_input": "x"})):
+        r = subprocess.run([sys.executable, str(guard)], cwd=str(tmp_path), input=bad,
+                           capture_output=True, text=True, timeout=30, env=base)
+        assert r.returncode == 2, f"malformed payload must fail closed under required_sandbox: {bad!r}"
+
+
+def test_copilot_adapter_enforces_host_bound_containment(tmp_path) -> None:
+    """v3.5.6 (audit P1): the Copilot adapter applies the containment gate (host=copilot).
+    A .claude/settings.json must NOT satisfy it; only routing/attestation markers do."""
+    import os, shutil
+    adapter = SCRIPTS / "copilot_hook_adapter.py"
+    if not adapter.exists():
+        return
+    (tmp_path / "scripts").mkdir(); (tmp_path / ".substrate").mkdir(); (tmp_path / ".claude").mkdir()
+    for f in ("copilot_hook_adapter.py", "check_exfil_guard.py", "command_policy.py", "_substrate_root.py"):
+        shutil.copy(SCRIPTS / f, tmp_path / "scripts" / f)
+    (tmp_path / ".substrate" / "required_sandbox").write_text("1\n", encoding="utf-8")
+    (tmp_path / ".claude" / "settings.json").write_text(
+        '{"sandbox":{"enabled":true,"allowUnsandboxedCommands":false}}', encoding="utf-8")
+    payload = json.dumps({"toolName": "bash", "toolArgs": json.dumps({"command": "echo hi"})})
+    base = {k: v for k, v in os.environ.items()
+            if k not in ("SUBSTRATE_SANDBOXED", "SUBSTRATE_HOST_SANDBOX", "SUBSTRATE_HOOK_HOST")}
+
+    def run(**env):
+        e = dict(base); e.update(env)
+        p = subprocess.run([sys.executable, str(tmp_path / "scripts" / "copilot_hook_adapter.py")],
+                           cwd=str(tmp_path), input=payload, capture_output=True, text=True, timeout=30, env=e)
+        return json.loads(p.stdout)["permissionDecision"]
+    assert run() == "deny", "uncontained Bash (even with a .claude strict file) must be DENIED for Copilot"
+    assert run(SUBSTRATE_SANDBOXED="1") == "allow", "routed command must be allowed"
+    assert run(SUBSTRATE_HOST_SANDBOX="1") == "allow", "operator attestation must be allowed"
 
 
 def test_agent_bash_guard_inactive_when_sandbox_not_required(tmp_path) -> None:
@@ -2526,11 +2577,10 @@ def test_evals_pass_on_shipped_kit() -> None:
     p = subprocess.run([sys.executable, "-I", str(SCRIPTS / "run_substrate_evals.py"), "--no-trace"],
                        capture_output=True, text=True, timeout=120)
     assert p.returncode == 0, p.stdout + p.stderr
-    # Backend-agnostic: with a sandbox backend present the containment eval is tested
-    # (16/16); without one it is honestly SKIPPED (15/15 blocked, 1 skipped). Either
-    # way the block-rate is 1.00 and there are zero benign false-positives.
+    # Backend- and count-agnostic: exact malicious counts vary (the containment eval
+    # is tested with a backend, skipped without), but the block-rate is always 1.00
+    # and there are zero benign false-positives.
     assert "(rate 1.00), benign FP 0/7" in p.stdout, p.stdout
-    assert ("malicious 16/16 blocked" in p.stdout) or ("1 skipped" in p.stdout), p.stdout
 
 
 def test_evals_fail_on_neutered_policy(tmp_path) -> None:

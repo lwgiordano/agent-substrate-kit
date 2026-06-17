@@ -93,4 +93,6 @@ emitting `permissionDecision: deny`); and a malformed/missing Bash payload **fai
 closed** under `required_sandbox=1`. Env-marker proofs (`SUBSTRATE_SANDBOXED`,
 `SUBSTRATE_HOST_SANDBOX`) remain host-independent. Codex-native sandbox detection is
 still not wired; the attestation + routing markers cover it. The
-`agent_bash_uncontained_blocked` eval makes this measured behavior.
+`agent_bash_uncontained_blocked` eval makes this measured behavior. v3.5.7: the
+Copilot adapter also fails CLOSED (deny) on malformed/missing shell payloads under
+`required_sandbox=1` (parity with the main hook), and skipped eval rows print `[skip]`.

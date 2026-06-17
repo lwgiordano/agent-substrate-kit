@@ -1305,6 +1305,24 @@ With this, interactive Bash is fail-closed **across all supported host adapters*
 tier is complete and honest cross-host. Next: **v3.5.7 — self-published benchmark**
 (`evals --report`/`BENCHMARK.md`).
 
+## v3.5.7 — Copilot fail-closed parity + eval skip display (v3.5.6-audit P2/P3)
+
+The v3.5.6 audit confirmed the host-bound proof + main-path fail-closed, leaving one
+adapter gap and a cosmetic eval row.
+
+| Audit finding | Fix |
+|---|---|
+| **P2** Copilot adapter still failed OPEN on malformed JSON / missing command under `required_sandbox=1` (only the `if cmd:` path was gated) | `copilot_hook_adapter.py` now computes the requirement BEFORE parsing and **denies** under `required_sandbox=1` on malformed top-level JSON, a non-object payload, OR a shell-shaped call with no extractable command — parity with `check_exfil_guard.py`. Non-shell tools stay allowed; standard repos (no `required_sandbox`) keep the fail-open availability behavior. |
+| **P3** full-eval row printed `[ok]` for a SKIPPED task | skipped rows now print `[skip]` (the summary + metrics already excluded them; this is display parity). |
+
+Regression-tested: Copilot denies malformed/missing payloads under required_sandbox,
+allows non-shell tools, and stays fail-open when containment isn't required.
+
+With this, interactive Bash is fail-closed across **all** supported host adapters
+(Claude, Codex, Copilot) for normal AND malformed/missing payloads, with host-bound
+proof. The sandbox arc is credible and polished. Next: **v3.5.8 — self-published
+benchmark** (`evals --report`/`BENCHMARK.md`).
+
 ## Deferred (P2 — documented, not yet built)
 
 These are real improvements the review identified; scoped as future

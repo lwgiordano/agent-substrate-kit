@@ -590,7 +590,8 @@ def main(argv) -> int:
         print(json.dumps(trace, indent=2))
     else:
         for r in results:
-            mark = "ok " if r["ok"] else "FAIL"
+            mark = ("skip" if str(r.get("detail", "")).startswith("skipped:")
+                    else "ok " if r["ok"] else "FAIL")
             print(f"  [{mark}] {r['kind']:9} {r['id']:26} {r['seconds']:5.2f}s  {r['detail']}")
         slow = ", ".join("{}={}s".format(s["id"], s["seconds"]) for s in metrics["slowest"])
         skip_note = f", {len(mal_skipped)} skipped" if mal_skipped else ""

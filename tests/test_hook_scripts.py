@@ -2512,6 +2512,34 @@ def test_agent_bash_guard_inactive_when_sandbox_not_required(tmp_path) -> None:
     assert _run_exfil_guard(guard, tmp_path).returncode == 0
 
 
+def test_copilot_adapter_fails_closed_on_malformed_payload(tmp_path) -> None:
+    """v3.5.7 (audit P2): under required_sandbox=1 the Copilot adapter fails CLOSED
+    (deny) on malformed JSON or a shell call with no extractable command — a payload
+    it can't read can't prove containment. Standard repos (no required) stay fail-open."""
+    import os
+    import shutil
+    adapter = SCRIPTS / "copilot_hook_adapter.py"
+    if not adapter.exists():
+        return
+    (tmp_path / "scripts").mkdir(); (tmp_path / ".substrate").mkdir()
+    for f in ("copilot_hook_adapter.py", "check_exfil_guard.py", "command_policy.py", "_substrate_root.py"):
+        shutil.copy(SCRIPTS / f, tmp_path / "scripts" / f)
+    base = {k: v for k, v in os.environ.items()
+            if k not in ("SUBSTRATE_SANDBOXED", "SUBSTRATE_HOST_SANDBOX", "SUBSTRATE_HOOK_HOST")}
+
+    def decide(stdin):
+        p = subprocess.run([sys.executable, str(tmp_path / "scripts" / "copilot_hook_adapter.py")],
+                           cwd=str(tmp_path), input=stdin, capture_output=True, text=True, timeout=30, env=base)
+        return json.loads(p.stdout)["permissionDecision"]
+
+    (tmp_path / ".substrate" / "required_sandbox").write_text("1\n", encoding="utf-8")
+    assert decide("{bad json") == "deny", "malformed JSON must deny under required_sandbox"
+    assert decide(json.dumps({"toolName": "bash"})) == "deny", "missing command must deny under required_sandbox"
+    assert decide(json.dumps({"toolName": "edit", "toolArgs": "{}"})) == "allow", "non-shell tool unaffected"
+    (tmp_path / ".substrate" / "required_sandbox").write_text("0\n", encoding="utf-8")
+    assert decide("{bad json") == "allow", "no required_sandbox → malformed stays fail-open (availability)"
+
+
 def test_config_key_allowlists_agree() -> None:
     """The shell loader (_substrate_config.sh, sourced by manage.sh on every
     call) and the Python validator (check_substrate_config.py) must accept the

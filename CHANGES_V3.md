@@ -1357,6 +1357,22 @@ credibility layer; this is the honest repo-local floor.
 Behavior was already correct; this makes the published benchmark's provenance honest
 and self-consistent. The benchmark is now credible end-to-end.
 
+## v3.5.10 — fix benchmark test in bootstrapped repos (regression from v3.5.9)
+
+v3.5.9's new `test_evals_report_writes_reproducible_benchmark` assertion read
+`(ROOT/"VERSION")` unconditionally. `VERSION` is a **kit-source-only** file — a
+bootstrapped/user repo (where the kit's tests also ship + run, e.g. the release
+matrix `full-setup`) has none, so the test raised `FileNotFoundError` and the
+**Release matrix went red** (CI was green; the kit-source repo has VERSION). Local
+`package_release --full` never caught it (it runs the suite from a kit-source extract,
+which has VERSION) — the same local-passes/matrix-fails class as the early CI work.
+
+Fix: the test only asserts the benchmark's version-match **where VERSION exists**;
+`_write_benchmark` already records `?` for the version in a repo without one. Verified
+against a staged no-VERSION repo: `--report` exits 0 and writes a valid BENCHMARK.md.
+Behavior + the v3.5.9 provenance fix are unchanged; this is purely the test's
+repo-portability.
+
 ## Deferred (P2 — documented, not yet built)
 
 These are real improvements the review identified; scoped as future

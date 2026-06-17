@@ -2558,8 +2558,13 @@ def test_evals_report_writes_reproducible_benchmark() -> None:
         assert "block-rate" in text, text[:400]
         assert "evals --report" in text, "must include a reproduce command"
         assert "never" in text.lower() and "skip" in text.lower(), "must state skip is never a block"
-        version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
-        assert f"**Version:** {version}" in text, "benchmark version must match VERSION"
+        # VERSION is a kit-source file; a bootstrapped/user repo (where this test also
+        # ships + runs, e.g. the release matrix) has none — _write_benchmark records "?"
+        # there. Only assert the match where VERSION exists.
+        vf = ROOT / "VERSION"
+        if vf.exists():
+            version = vf.read_text(encoding="utf-8").strip()
+            assert f"**Version:** {version}" in text, "benchmark version must match VERSION"
         # v3.5.8-audit P1: no self-invalidating pre-commit git-checkout anchor; exact
         # provenance is deferred to RELEASE_MANIFEST.json instead.
         assert not _re.search(r"git checkout [0-9a-f]{7,40}\b", text), "must not embed a stale git-checkout commit anchor"

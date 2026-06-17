@@ -1347,6 +1347,16 @@ fail-closed interactive Bash across all adapters, honest skip accounting, and no
 reproducible published result. AgentDojo (external standard) remains a future additive
 credibility layer; this is the honest repo-local floor.
 
+## v3.5.9 — benchmark provenance fix (v3.5.8-audit P1 + P2)
+
+| Audit finding | Fix |
+|---|---|
+| **P1** `BENCHMARK.md` embedded a `git checkout <hash>` reproduce anchor pointing at the PARENT commit (`7c55033`), not the release commit (`85b6b15`) — a generated report can't carry the commit that adds it, and amending to fix it changes the hash again. So the benchmark was "not reproducible as written." | `BENCHMARK.md` no longer embeds any mutable pre-commit git hash. It anchors on **VERSION** + host/backend + the measured result, and **defers exact provenance** (git commit + source-tree + artifact SHA-256) to **`RELEASE_MANIFEST.json`** — which IS stamped correctly at package time (post-commit). The reproduce block runs on "the published release" rather than a self-invalidating checkout. Regression-tested: no `git checkout <hex>` anchor, version matches VERSION, references RELEASE_MANIFEST.json. |
+| **P2** stale comment "Skips (passes) where no backend is available" in `run_substrate_evals.py` | Reworded: a "skipped:" detail is NOT a block — excluded from the malicious total, and a FAILURE under `--require-sandbox-evals`. |
+
+Behavior was already correct; this makes the published benchmark's provenance honest
+and self-consistent. The benchmark is now credible end-to-end.
+
 ## Deferred (P2 — documented, not yet built)
 
 These are real improvements the review identified; scoped as future

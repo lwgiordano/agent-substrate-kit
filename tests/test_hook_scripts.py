@@ -2553,10 +2553,17 @@ def test_evals_report_writes_reproducible_benchmark() -> None:
                            capture_output=True, text=True, timeout=120)
         assert p.returncode == 0, p.stdout + p.stderr
         assert bench.exists(), "BENCHMARK.md must be written"
+        import re as _re
         text = bench.read_text(encoding="utf-8")
         assert "block-rate" in text, text[:400]
         assert "evals --report" in text, "must include a reproduce command"
         assert "never" in text.lower() and "skip" in text.lower(), "must state skip is never a block"
+        version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
+        assert f"**Version:** {version}" in text, "benchmark version must match VERSION"
+        # v3.5.8-audit P1: no self-invalidating pre-commit git-checkout anchor; exact
+        # provenance is deferred to RELEASE_MANIFEST.json instead.
+        assert not _re.search(r"git checkout [0-9a-f]{7,40}\b", text), "must not embed a stale git-checkout commit anchor"
+        assert "RELEASE_MANIFEST.json" in text, "must defer exact provenance to RELEASE_MANIFEST.json"
     finally:
         if pre is not None:
             bench.write_text(pre, encoding="utf-8")

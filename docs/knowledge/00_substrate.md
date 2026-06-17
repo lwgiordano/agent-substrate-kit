@@ -97,5 +97,7 @@ still not wired; the attestation + routing markers cover it. The
 Copilot adapter also fails CLOSED (deny) on malformed/missing shell payloads under
 `required_sandbox=1` (parity with the main hook), and skipped eval rows print `[skip]`.
 v3.5.8: `run_substrate_evals.py --report` (`./manage.sh evals --report`) writes a
-reproducible `BENCHMARK.md` (version + commit anchor + block-rate/FP-rate + surfaced
-skips + reproduce command) — the self-published, anyone-can-reproduce result.
+reproducible `BENCHMARK.md` (version + block-rate/FP-rate + surfaced skips + reproduce
+command) — the self-published, anyone-can-reproduce result. v3.5.9: the report embeds
+NO mutable pre-commit git hash; exact provenance (commit + source-tree + artifact
+SHA-256) is deferred to `RELEASE_MANIFEST.json` so it is never stale/non-reproducible.

@@ -285,8 +285,9 @@ def t_sandbox_exfil_contained():
     """CONTAINMENT proof (v3.5.2): a network exfil attempt the regex tripwire might
     MISS must still be CONTAINED by the OS sandbox — egress denied at the kernel.
     A raw socket connect run THROUGH sandbox_exec.sh must FAIL (EPERM / unreachable),
-    where unsandboxed it would succeed. Skips (passes) where no backend is available
-    (e.g. CI without bubblewrap) — the detail records the skip."""
+    where unsandboxed it would succeed. A host without a sandbox backend returns a
+    "skipped:" detail — a skip is NOT a block: it is excluded from the malicious total
+    and becomes a FAILURE when containment is required (--require-sandbox-evals)."""
     sx = SCRIPTS / "sandbox_exec.sh"
     if not sx.exists():
         return True, "skipped: no sandbox_exec.sh"
@@ -472,18 +473,16 @@ def _sandbox_required(argv) -> bool:
 
 def _write_benchmark(metrics: dict, results: list) -> Path:
     """Emit a reproducible BENCHMARK.md from the run — turns the self-described
-    block-rate into an anyone-can-reproduce result. Anchored on VERSION + git commit;
-    honest about skips and scope (NOT a hosted benchmark, NOT AgentDojo)."""
+    block-rate into an anyone-can-reproduce result. Anchored on VERSION; the EXACT
+    release provenance (git commit + source-tree + artifact SHA-256) lives in
+    RELEASE_MANIFEST.json, so the report embeds NO self-invalidating pre-commit git
+    hash (the v3.5.8-audit P1 — a generated report can't carry the commit that adds
+    it). Honest about skips and scope (NOT a hosted benchmark, NOT AgentDojo)."""
     version = "?"
     try:
         version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
     except Exception:
         pass
-    try:
-        commit = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--short", "HEAD"],
-                                capture_output=True, text=True, timeout=10).stdout.strip() or "none"
-    except Exception:
-        commit = "none"
     try:
         bk = subprocess.run([PY, "-I", str(SCRIPTS / "sandbox_detect.py"), "--root", str(ROOT), "--backend"],
                             capture_output=True, text=True, timeout=15)
@@ -504,9 +503,9 @@ must be ALLOWED. This turns the substrate's block-rate from a self-description i
 result anyone can re-run and verify.
 
 - **Version:** {version}
-- **Commit:** `{commit}` (anchor — `git checkout {commit}` to reproduce exactly)
 - **Generated:** {date}
 - **Host:** {host}; resolved sandbox backend: `{backend}`
+- **Exact provenance:** see `RELEASE_MANIFEST.json` (git commit + source-tree + artifact SHA-256) in the release / review bundle — this report embeds no mutable pre-commit hash.
 
 ## Results
 
@@ -539,7 +538,7 @@ result anyone can re-run and verify.
 ## Reproduce
 
 ```bash
-git checkout {commit}
+# On the published v{version} release artifact (its exact commit is in RELEASE_MANIFEST.json):
 ./manage.sh setup
 ./manage.sh evals --report      # or: python3 -I scripts/run_substrate_evals.py --no-trace
 ```

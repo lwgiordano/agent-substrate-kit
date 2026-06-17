@@ -2404,6 +2404,63 @@ def test_run_one_sandbox_skip_fails_when_required() -> None:
     assert p.returncode == 1, "skipped --run-one must FAIL under --require-sandbox-evals"
 
 
+def _stage_exfil_guard(tmp_path):
+    import shutil
+    (tmp_path / "scripts").mkdir(); (tmp_path / ".substrate").mkdir()
+    for f in ("check_exfil_guard.py", "command_policy.py", "_substrate_root.py"):
+        shutil.copy(SCRIPTS / f, tmp_path / "scripts" / f)
+    return tmp_path / "scripts" / "check_exfil_guard.py"
+
+
+def _run_exfil_guard(guard, cwd, cmd="ls -la", **env):
+    import os
+    base = {k: v for k, v in os.environ.items() if k not in ("SUBSTRATE_SANDBOXED", "SUBSTRATE_HOST_SANDBOX")}
+    base.update(env)
+    payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": cmd}})
+    return subprocess.run([sys.executable, str(guard)], cwd=str(cwd), input=payload,
+                          capture_output=True, text=True, timeout=30, env=base)
+
+
+def test_agent_bash_blocked_when_containment_required_and_uncontained(tmp_path) -> None:
+    """v3.5.5: with required_sandbox=1, an interactive Bash command that is NOT
+    provably contained must BLOCK (exit 2) — interactive agent Bash is now
+    fail-closed, not merely validated. Allowed via the provable-containment signals."""
+    if not (SCRIPTS / "check_exfil_guard.py").exists():
+        return
+    guard = _stage_exfil_guard(tmp_path)
+    (tmp_path / ".substrate" / "required_sandbox").write_text("1\n", encoding="utf-8")
+    r = _run_exfil_guard(guard, tmp_path)
+    assert r.returncode == 2 and "containment is REQUIRED" in r.stderr, r.stderr
+    assert _run_exfil_guard(guard, tmp_path, SUBSTRATE_SANDBOXED="1").returncode == 0, "routed via sandbox_exec must pass"
+    assert _run_exfil_guard(guard, tmp_path, SUBSTRATE_HOST_SANDBOX="1").returncode == 0, "operator attestation must pass"
+
+
+def test_agent_bash_allowed_with_claude_strict_sandbox(tmp_path) -> None:
+    """Claude strict-sandbox configured (sandbox.enabled + allowUnsandboxedCommands=false)
+    is provable host containment → Bash allowed even when required_sandbox=1. This is
+    honest detection of the host's enforcement CONFIG, not a runtime guess."""
+    if not (SCRIPTS / "check_exfil_guard.py").exists():
+        return
+    guard = _stage_exfil_guard(tmp_path)
+    (tmp_path / ".substrate" / "required_sandbox").write_text("1\n", encoding="utf-8")
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude" / "settings.json").write_text(
+        '{"sandbox":{"enabled":true,"allowUnsandboxedCommands":false}}', encoding="utf-8")
+    assert _run_exfil_guard(guard, tmp_path).returncode == 0
+    # non-strict (allowUnsandboxedCommands not false) must NOT count as contained
+    (tmp_path / ".claude" / "settings.json").write_text('{"sandbox":{"enabled":true}}', encoding="utf-8")
+    assert _run_exfil_guard(guard, tmp_path).returncode == 2, "enabled-but-not-strict must not satisfy required containment"
+
+
+def test_agent_bash_guard_inactive_when_sandbox_not_required(tmp_path) -> None:
+    """Opt-in: with no required_sandbox, a benign Bash command is unaffected — the
+    kit itself + standard repos are never disrupted by the containment gate."""
+    if not (SCRIPTS / "check_exfil_guard.py").exists():
+        return
+    guard = _stage_exfil_guard(tmp_path)
+    assert _run_exfil_guard(guard, tmp_path).returncode == 0
+
+
 def test_config_key_allowlists_agree() -> None:
     """The shell loader (_substrate_config.sh, sourced by manage.sh on every
     call) and the Python validator (check_substrate_config.py) must accept the

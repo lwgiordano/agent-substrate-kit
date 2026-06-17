@@ -75,4 +75,13 @@ not pre-commit itself) — and fixes the eval accounting so a SKIPPED containmen
 `--require-sandbox-evals` / when containment is required. v3.5.4 extends the same
 skip semantics to the `--run-one` diagnostic (a skipped containment eval reports
 `status=skipped`/`ok=null`, never `ok=true`, and fails under `--require-sandbox-evals`).
-Interactive agent-Bash auto-containment is the next tier.
+
+v3.5.5 closes the interactive tier: when `required_sandbox=1`, `check_exfil_guard.py`
+**fail-closes** an interactive Bash command that is not PROVABLY contained. The
+PreToolUse hook cannot read the host's runtime sandbox state (Claude exposes no
+sandbox field/env to hooks), so it requires proof — routed through `sandbox_exec.sh`
+(`SUBSTRATE_SANDBOXED=1`), Claude strict-sandbox configured (`sandbox.enabled` +
+`allowUnsandboxedCommands:false`, read from settings), or an operator attestation
+(`SUBSTRATE_HOST_SANDBOX=1`) — and BLOCKS otherwise. No faking: absent proof, it
+refuses. Opt-in (only when `required_sandbox=1`). Codex-native sandbox detection is
+not yet wired; the attestation + routing markers cover all hosts in the meantime.

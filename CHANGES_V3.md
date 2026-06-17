@@ -1251,6 +1251,39 @@ This closes the last eval-UX issue before the benchmark. Remaining: **v3.5.5 —
 interactive agent-Bash fail-closed** (pending host-native-sandbox-marker verification),
 then **v3.5.6 — self-published benchmark**.
 
+## v3.5.5 — interactive agent-Bash fail-closed (completes the strict+sandbox tier)
+
+The last deferred piece. When `required_sandbox=1`, an interactive Bash command that
+is **not provably contained** is now BLOCKED at the PreToolUse boundary.
+
+**Verification first (per "do not fake this"):** Claude's PreToolUse hook exposes **no
+sandbox state** — no JSON field, no env var (confirmed from the official hooks +
+sandboxing docs). The sandbox is decided per-command at execution, *after* the hook.
+So a hook cannot auto-detect "this Bash will be contained." Naively blocking all Bash
+would false-block when Claude's native sandbox is on; assuming "contained" is faking.
+
+**Honest design (`check_exfil_guard.py`, the thin adapter — not pinned):** allow a Bash
+command under `required_sandbox=1` only via a signal we can VERIFY, else fail-closed:
+1. **Routed through `sandbox_exec.sh`** (`SUBSTRATE_SANDBOXED=1`).
+2. **Claude strict-sandbox configured** — `sandbox.enabled:true` + `allowUnsandboxedCommands:false`
+   read from `.claude/settings.json`/local/user (honest detection of the host's
+   enforcement *config*, not a runtime guess; `enabled` alone is NOT enough).
+3. **Operator attestation** `SUBSTRATE_HOST_SANDBOX=1` (for `npx @anthropic-ai/sandbox-runtime
+   claude`, a container, etc. the substrate can't read).
+Else → BLOCK with a message naming all three remedies. Not escapable by
+`SUBSTRATE_ALLOW_SECRET_CMD` (that's the exfil-tripwire override, not a containment one).
+
+**Opt-in:** only active when `required_sandbox=1` — the kit itself + standard repos are
+never disrupted. Regression-tested: block-when-uncontained, allow via each of the three
+signals, `enabled`-but-not-strict still blocks, inactive when not required.
+
+Caveat: verified **Claude**; **Codex** native-sandbox detection is not yet wired (the
+attestation + routing markers are host-agnostic and cover it for now). With this,
+non-interactive AND interactive execution are fail-closed under `required_sandbox=1` —
+the **`strict+sandbox` containment tier is complete**. Next: **v3.5.6 — self-published
+benchmark** (`evals --report`/`BENCHMARK.md`), which can now add an agent-Bash-blocked
+eval and honestly report end-to-end containment.
+
 ## Deferred (P2 — documented, not yet built)
 
 These are real improvements the review identified; scoped as future

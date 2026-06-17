@@ -49,6 +49,62 @@ from command_policy import (  # noqa: E402
 )
 
 
+def _root() -> Path:
+    try:
+        from _substrate_root import substrate_root as _sr
+        return _sr()
+    except Exception:
+        return Path.cwd()
+
+
+def _sandbox_required(root: Path) -> bool:
+    """Containment is a REQUIRED minimum (so an UNCONTAINED Bash command must be
+    blocked) when .substrate/required_sandbox=1 or SUBSTRATE_SANDBOX="1" in config."""
+    rs = root / ".substrate" / "required_sandbox"
+    try:
+        if rs.is_file() and rs.read_text(encoding="utf-8").strip() == "1":
+            return True
+        cfg = root / ".substrate" / "config"
+        if cfg.is_file():
+            for ln in cfg.read_text(encoding="utf-8", errors="replace").splitlines():
+                ln = ln.split("#", 1)[0].strip()
+                if ln.startswith("SUBSTRATE_SANDBOX=") and ln.split("=", 1)[1].strip().strip("\"'") == "1":
+                    return True
+    except Exception:
+        return False
+    return False
+
+
+def _claude_strict_sandbox(root: Path) -> bool:
+    """True iff Claude's native sandbox is CONFIGURED to contain every Bash command:
+    sandbox.enabled=true AND allowUnsandboxedCommands=false (strict mode). Honest
+    detection of the host's enforcement CONFIG (the PreToolUse hook cannot read the
+    runtime sandbox state — Claude exposes no sandbox field/env var to hooks)."""
+    for p in (root / ".claude" / "settings.json",
+              root / ".claude" / "settings.local.json",
+              Path.home() / ".claude" / "settings.json"):
+        try:
+            if not p.is_file():
+                continue
+            sb = json.loads(p.read_text(encoding="utf-8")).get("sandbox", {})
+            if isinstance(sb, dict) and sb.get("enabled") is True and sb.get("allowUnsandboxedCommands") is False:
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _provably_contained(root: Path) -> bool:
+    """A Bash command is provably contained ONLY via a signal we can verify — never
+    a guess. Routed through sandbox_exec.sh, Claude strict-sandbox configured, or an
+    explicit operator attestation of host containment."""
+    if os.environ.get("SUBSTRATE_SANDBOXED") == "1":
+        return True   # ran through scripts/sandbox_exec.sh
+    if os.environ.get("SUBSTRATE_HOST_SANDBOX") == "1":
+        return True   # operator attests host containment (srt-wrapped session, container, …)
+    return _claude_strict_sandbox(root)
+
+
 def main() -> int:
     try:
         raw = sys.stdin.read()
@@ -65,6 +121,26 @@ def main() -> int:
     cmd = str(tool_input.get("command", ""))
     if not cmd:
         return 0
+    # SANDBOX CONTAINMENT GATE (v3.5.5). When containment is REQUIRED
+    # (required_sandbox=1), an interactive Bash command that is NOT provably
+    # contained must be BLOCKED. The PreToolUse hook cannot read the host's runtime
+    # sandbox state, so we require PROOF (routed via sandbox_exec.sh, Claude
+    # strict-sandbox configured, or an operator attestation) — absent proof we
+    # refuse rather than fake it. NOT escapable by SUBSTRATE_ALLOW_SECRET_CMD: that
+    # is the exfil-tripwire override, not a containment override.
+    _r = _root()
+    if _sandbox_required(_r) and not _provably_contained(_r):
+        print(
+            "exfil-guard: BLOCKED — containment is REQUIRED (.substrate/required_sandbox=1) "
+            "but this Bash command is not provably sandboxed.\n"
+            "Satisfy it by ONE of: run the agent via `scripts/sandbox_exec.sh` "
+            "(sets SUBSTRATE_SANDBOXED=1); enable Claude's strict sandbox "
+            "(settings.json sandbox.enabled=true + allowUnsandboxedCommands=false); "
+            "or, if the host already contains execution (`npx @anthropic-ai/sandbox-runtime "
+            "claude`, a container, …), set SUBSTRATE_HOST_SANDBOX=1.",
+            file=sys.stderr,
+        )
+        return 2
     # Audited override for legitimate one-offs (checked before profile so the
     # explicit escape hatch always works).
     if os.environ.get("SUBSTRATE_ALLOW_SECRET_CMD", "") in ("1", "true", "yes"):

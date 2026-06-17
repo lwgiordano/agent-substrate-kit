@@ -1323,6 +1323,30 @@ With this, interactive Bash is fail-closed across **all** supported host adapter
 proof. The sandbox arc is credible and polished. Next: **v3.5.8 — self-published
 benchmark** (`evals --report`/`BENCHMARK.md`).
 
+## v3.5.8 — self-published reproducible benchmark (the finale)
+
+Every containment finding from the v3.5.0→v3.5.7 audit loop is closed; the eval is
+honest in full mode AND `--run-one`. v3.5.8 publishes the result so it's no longer
+self-described but **anyone-can-reproduce** — the one external-credibility gap the
+auditors all gated until now.
+
+- `run_substrate_evals.py --report` (→ `./manage.sh evals --report`) writes
+  **`BENCHMARK.md`**: version + git-commit anchor + host/backend + block-rate, FP-rate,
+  **and the skipped tasks surfaced separately** (never folded into the block-rate), the
+  task list, the scope caveats, and a copy-paste reproduce command.
+- Committed `BENCHMARK.md` ships in the artifact. It states plainly what the suite does
+  (deterministic gates, no LLM in the loop), that a skip is never counted as a block,
+  that containment is proven-where-a-backend-exists / skipped-honestly otherwise, that
+  interactive Bash is fail-closed across Claude/Codex/Copilot with host-bound proof, and
+  that this is a repo-local suite — NOT a hosted benchmark and NOT AgentDojo (additive).
+- Regression-tested: `--report` writes a BENCHMARK.md with the block-rate, repro command,
+  and the "a skip is never a block" statement.
+
+This closes the sandbox arc end-to-end: routed non-interactive paths, host-bound
+fail-closed interactive Bash across all adapters, honest skip accounting, and now a
+reproducible published result. AgentDojo (external standard) remains a future additive
+credibility layer; this is the honest repo-local floor.
+
 ## Deferred (P2 — documented, not yet built)
 
 These are real improvements the review identified; scoped as future

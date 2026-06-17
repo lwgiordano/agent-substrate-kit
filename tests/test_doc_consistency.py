@@ -59,7 +59,9 @@ def _docs() -> list[Path]:
 def _scannable() -> list[Path]:
     """All agent-facing text: docs + scripts + templates. Stale strings
     in any of these become bad agent context or broken config."""
-    skip = {"CHANGES_V3.md", "test_doc_consistency.py"}
+    # CHANGES_V3.md = changelog (cites old versions); BENCHMARK.md = generated result
+    # report (records the host's runtime Python, which may legitimately be 3.13+).
+    skip = {"CHANGES_V3.md", "test_doc_consistency.py", "BENCHMARK.md"}
     out = []
     for ext in ("*.md", "*.py", "*.sh", "*.template", "*.toml.template"):
         for p in KIT.rglob(ext):

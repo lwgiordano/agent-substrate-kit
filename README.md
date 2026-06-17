@@ -41,7 +41,7 @@ bash /path/to/agent_substrate_kit_v3/bootstrap.sh --profile standard --lang auto
 | 4-field bug-fix commit protocol + postmortem-per-bugfix hooks | — | — | yes |
 | Extras (calibration, stale-phrases, license headers) | — | — | yes |
 
-## Current status (v3.5.7)
+## Current status (v3.5.8)
 
 Credible for controlled trial in **standard mode** across Python, Node,
 Go, and no-language repos. **Strict mode** enforces CODEOWNERS coverage
@@ -139,7 +139,9 @@ Known limitations, by design:
   / FP-rate over staged states), NOT a hosted longitudinal observability or
   trend-reporting system — pair with one for long-running high-stakes agents.
 
-See `CHANGES_V3.md` for the full per-version remediation history (v3.2.0–v3.5.7).
+See `CHANGES_V3.md` for the full per-version remediation history (v3.2.0–v3.5.8).
+See `BENCHMARK.md` for the reproducible block-rate / false-positive-rate result
+(regenerate with `./manage.sh evals --report`).
 
 ## What is new in v3.2 / v3.2.1
 

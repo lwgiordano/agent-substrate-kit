@@ -2540,6 +2540,28 @@ def test_copilot_adapter_fails_closed_on_malformed_payload(tmp_path) -> None:
     assert decide("{bad json") == "allow", "no required_sandbox → malformed stays fail-open (availability)"
 
 
+def test_evals_report_writes_reproducible_benchmark() -> None:
+    """v3.5.8: `--report` writes a BENCHMARK.md with the block-rate, honest skip
+    accounting, scope caveats, and a reproduce command. Restores any pre-existing copy."""
+    rs = SCRIPTS / "run_substrate_evals.py"
+    if not rs.exists():
+        return
+    bench = ROOT / "BENCHMARK.md"
+    pre = bench.read_text(encoding="utf-8") if bench.exists() else None
+    try:
+        p = subprocess.run([sys.executable, "-I", str(rs), "--fast", "--no-trace", "--report"],
+                           capture_output=True, text=True, timeout=120)
+        assert p.returncode == 0, p.stdout + p.stderr
+        assert bench.exists(), "BENCHMARK.md must be written"
+        text = bench.read_text(encoding="utf-8")
+        assert "block-rate" in text, text[:400]
+        assert "evals --report" in text, "must include a reproduce command"
+        assert "never" in text.lower() and "skip" in text.lower(), "must state skip is never a block"
+    finally:
+        if pre is not None:
+            bench.write_text(pre, encoding="utf-8")
+
+
 def test_config_key_allowlists_agree() -> None:
     """The shell loader (_substrate_config.sh, sourced by manage.sh on every
     call) and the Python validator (check_substrate_config.py) must accept the

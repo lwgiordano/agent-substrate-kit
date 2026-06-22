@@ -41,7 +41,7 @@ bash /path/to/agent_substrate_kit_v3/bootstrap.sh --profile standard --lang auto
 | 4-field bug-fix commit protocol + postmortem-per-bugfix hooks | — | — | yes |
 | Extras (calibration, stale-phrases, license headers) | — | — | yes |
 
-## Current status (v3.6.0)
+## Current status (v3.6.1)
 
 **Local-first, remote-expandable.** The base is offline-complete (memory,
 hooks, validators, evals, sandbox, release bundle) — no GitHub/CI/token/remote
@@ -54,7 +54,12 @@ lacking a GitHub-only CODEOWNERS) or standard+remote. `./manage.sh go-live` is t
 map across all three tiers — it surfaces the current state, the next rung, and the
 exact `enable` command, and **never claims production-hardening offline** (live
 GitHub enforcement needs `enable remote --check`). Turn the tier on with
-`bootstrap --profile strict+remote` or `./manage.sh enable remote --write`.
+`bootstrap --profile strict+remote` or `./manage.sh enable remote --write` (which
+installs the trusted-base workflow from a staged template — no re-bootstrap). go-live
+is the **fast** map (cheap base checks + offline detection only, never the full gate),
+and enabling remote governance is **complete-or-blocked**: `check` refuses if the flag
+is on but the trusted-base workflow is missing — the tier can't claim authority it
+doesn't have.
 
 Credible for controlled trial in **standard mode** across Python, Node,
 Go, and no-language repos. The **remote-governance tier** enforces CODEOWNERS

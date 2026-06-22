@@ -2458,6 +2458,102 @@ def test_base_check_offline_no_remote(tmp_path) -> None:
         assert c.returncode == 0, f"{v} failed offline: {c.stdout + c.stderr}"
 
 
+# --- v3.6.1: remote-axis completion (go-live fast-path + trusted-base hard gate) ---
+
+def test_go_live_excluded_from_full_doctor() -> None:
+    """v3.6.1 P1: --go-live must NOT be a full doctor invocation — it is the fast
+    readiness map. The full-mode calc must include a.go_live in its exclusion set,
+    else go-live pulls the integrity/operational/manifest/harness chain before
+    rendering and hangs in a fresh no-venv repo."""
+    t = (SCRIPTS / "substrate_doctor.py").read_text(encoding="utf-8")
+    assert "or a.go_live)" in t, "full-mode calc must exclude --go-live"
+
+
+def test_go_live_json_fast_in_fresh_bootstrapped_repo(tmp_path) -> None:
+    """v3.6.1 P1: `manage.sh go-live --json` in a freshly bootstrapped repo with NO
+    setup (no venv) must emit JSON quickly and create no venv — proving go-live is the
+    side-effect-light map, not the full gate."""
+    bs = ROOT / "bootstrap.sh"
+    if not bs.exists():
+        return
+    repo = tmp_path / "proj"; repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    r = subprocess.run(["bash", str(bs), "--target", str(repo), "--profile", "standard",
+                        "--lang", "none", "--no-doctor"], capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0, r.stdout + r.stderr
+    p = subprocess.run(["bash", str(repo / "manage.sh"), "go-live", "--json"],
+                       cwd=str(repo), capture_output=True, text=True, timeout=30)
+    assert p.returncode in (0, 1), p.stdout + p.stderr
+    d = json.loads(p.stdout)
+    assert "checks" in d and "repo_local" in d
+    assert not (repo / ".venv").exists(), "go-live created a project .venv"
+    assert not (repo / ".substrate" / "venv").exists(), "go-live created the substrate venv"
+
+
+def test_remote_governance_requires_trusted_base_workflow(tmp_path) -> None:
+    """v3.6.1 P1: when SUBSTRATE_REMOTE_GOVERNANCE=1 (or the lock is on) but the
+    trusted-base workflow is ABSENT, the governance gate must BLOCK — the tier has no
+    trusted-base authority. (go-live only warns; the gate must refuse.)"""
+    if not (SCRIPTS / "substrate_doctor.py").exists():
+        return
+    _strict_repo(tmp_path)  # has scripts/a.py etc.; profile strict
+    (tmp_path / ".substrate" / "config").write_text(
+        'SUBSTRATE_PROFILE="strict"\nSUBSTRATE_LANG="none"\nSUBSTRATE_REMOTE_GOVERNANCE="1"\n', encoding="utf-8")
+    (tmp_path / ".substrate" / "required_remote_governance").write_text("1\n", encoding="utf-8")
+    gh = tmp_path / ".github"; gh.mkdir(exist_ok=True)
+    (gh / "CODEOWNERS").write_text("* @realuser\n", encoding="utf-8")  # coverage satisfied
+    # no .github/workflows/trusted-base-audit.yml present
+    p = _run("substrate_doctor.py", ["--strict-governance"], "", cwd=tmp_path)
+    assert p.returncode != 0, "missing trusted-base workflow under remote governance must BLOCK"
+    assert "trusted-base-audit.yml" in (p.stdout + p.stderr)
+    # adding the workflow clears that specific block
+    (gh / "workflows").mkdir(parents=True, exist_ok=True)
+    (gh / "workflows" / "trusted-base-audit.yml").write_text("name: x\n", encoding="utf-8")
+    p = _run("substrate_doctor.py", ["--strict-governance"], "", cwd=tmp_path)
+    assert "trusted-base-audit.yml" not in (p.stdout + p.stderr), "workflow present should clear the block"
+
+
+def test_bootstrap_stages_trusted_base_template(tmp_path) -> None:
+    """v3.6.1: bootstrap stages .substrate/trusted-base-audit.yml.template (always, like
+    sandbox.json) so `enable remote --write` can install the workflow without a re-bootstrap."""
+    bs = ROOT / "bootstrap.sh"
+    if not bs.exists():
+        return
+    repo = tmp_path / "proj"; repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["bash", str(bs), "--target", str(repo), "--profile", "standard",
+                    "--lang", "none", "--no-doctor"], check=True, capture_output=True, text=True, timeout=120)
+    assert (repo / ".substrate" / "trusted-base-audit.yml.template").is_file()
+    assert not (repo / ".github" / "workflows" / "trusted-base-audit.yml").exists(), \
+        "standard (no remote) must not write the active workflow"
+
+
+def test_enable_remote_write_installs_trusted_base_workflow(tmp_path) -> None:
+    """v3.6.1: `enable remote --write` on a no-remote repo flips flag+lock AND installs
+    the trusted-base workflow from the staged template, leaving the repo in a complete
+    (non-blocking) remote-governance state."""
+    bs = ROOT / "bootstrap.sh"
+    if not bs.exists():
+        return
+    repo = tmp_path / "proj"; repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["bash", str(bs), "--target", str(repo), "--profile", "standard",
+                    "--lang", "none", "--no-doctor"], check=True, capture_output=True, text=True, timeout=120)
+    assert not (repo / ".github" / "workflows" / "trusted-base-audit.yml").exists()
+    p = subprocess.run(["bash", str(repo / "manage.sh"), "enable", "remote", "--write"],
+                       cwd=str(repo), capture_output=True, text=True, timeout=30)
+    assert p.returncode == 0, p.stdout + p.stderr
+    assert (repo / ".github" / "workflows" / "trusted-base-audit.yml").is_file(), \
+        "enable remote --write must install the trusted-base workflow"
+    assert (repo / ".substrate" / "required_remote_governance").read_text().strip() == "1"
+    cfg = (repo / ".substrate" / "config").read_text()
+    assert 'SUBSTRATE_REMOTE_GOVERNANCE="1"' in cfg
+    # the config gate must now pass (lock=1 + flag=1) — repo is in a complete state
+    g = subprocess.run([sys.executable, "-I", str(repo / "scripts" / "check_substrate_config.py")],
+                       cwd=str(repo), capture_output=True, text=True, timeout=30)
+    assert g.returncode == 0, g.stdout + g.stderr
+
+
 def test_sandbox_env_is_secretless(tmp_path) -> None:
     """v3.5.2: a sandboxed command runs under a SCRUBBED env — secrets stripped,
     SUBSTRATE_SANDBOXED marker set. Skips where no backend is available."""

@@ -100,8 +100,19 @@ PLAN
         printf 'SUBSTRATE_REMOTE_GOVERNANCE="1"\n' >> "$cfg"
       fi
       echo "1" > .substrate/required_remote_governance
+      # Install the trusted-base workflow if absent — the tier requires it and `check`
+      # now BLOCKS without it (v3.6.1). Render from a staged template; if none is
+      # findable, say so plainly (the gate will refuse until it is restored).
+      local wf=".github/workflows/trusted-base-audit.yml" tpl=""
+      if [ ! -f "$wf" ]; then
+        for cand in ".substrate/trusted-base-audit.yml.template" "workflows/trusted-base-audit.yml.template"; do
+          [ -f "$cand" ] && { tpl="$cand"; break; }
+        done
+        if [ -n "$tpl" ]; then mkdir -p .github/workflows && cp "$tpl" "$wf"; echo "installed $wf (from $tpl)"
+        else echo "WARNING: $wf is missing and no template was found — \`check\` will BLOCK until you restore it (re-bootstrap with --profile strict+remote)." >&2; fi
+      fi
       echo "remote governance ENABLED (SUBSTRATE_REMOTE_GOVERNANCE=1, required_remote_governance=1)."
-      echo "next: ensure the trusted-base workflow + a real CODEOWNERS exist, then ./manage.sh enable remote --check"
+      echo "next: ensure a real .github/CODEOWNERS covers privileged files, then ./manage.sh enable remote --check"
       ;;
     *) echo "usage: ./manage.sh enable remote [--plan|--write|--check]" >&2; exit 2 ;;
   esac

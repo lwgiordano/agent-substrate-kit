@@ -70,6 +70,14 @@ def _remote_governance():
             if line.split('#',1)[0].strip().startswith('SUBSTRATE_REMOTE_GOVERNANCE='):
                 return line.split('=',1)[1].split('#',1)[0].strip().strip('"\'')
     return '0'
+def _required_remote_governance():
+    """.substrate/required_remote_governance ('0'/'1' or None) — the pinned remote-
+    governance minimum, frozen by the trusted-base audit. v3.6.1."""
+    p=ROOT/'.substrate'/'required_remote_governance'
+    if not p.is_file(): return None
+    try: val=p.read_text(encoding='utf-8').strip()
+    except Exception: return None
+    return val if val in {'0','1'} else None
 def _codeowners_path():
     for loc in ('.github/CODEOWNERS','CODEOWNERS','docs/CODEOWNERS'):
         if (ROOT/loc).exists(): return ROOT/loc
@@ -433,7 +441,13 @@ def main():
     #   .substrate/venv. It enforces strict governance regardless of profile.
     if a.strict: a.operational=True; a.security=True
     if a.strict_governance: a.security=True
-    full=not (a.quick or a.security or a.operational or a.strict or a.strict_governance)
+    # --go-live is the FAST readiness MAP, not the gate — it must NOT pull the full
+    # doctor chain (integrity subprocesses, operational venv probe, manifest, harness
+    # scan) before rendering, or it hangs/times out in a fresh no-venv repo (v3.6.1
+    # audit P1). It runs only the cheap base checks (required files + hook wiring),
+    # then _go_live adds fast evals + offline remote/sandbox detection. The real gate
+    # stays `manage.sh check` / `doctor --strict`.
+    full=not (a.quick or a.security or a.operational or a.strict or a.strict_governance or a.go_live)
     blocks=[]; warns=[]
     for r in REQ:
         if not (ROOT/r).exists(): blocks.append(f'missing required file: {r}')
@@ -452,6 +466,16 @@ def main():
         # it (the CI trusted-base job + on-demand audit), and config
         # SUBSTRATE_REMOTE_GOVERNANCE=1 turns it on for `manage.sh check`.
         strict_gov = (_remote_governance()=='1' or a.strict or a.strict_governance)
+        # Remote-governance AUTHORITY completeness (v3.6.1 audit P1): the tier is
+        # "CODEOWNERS coverage + trusted-base authority". If remote governance is
+        # enabled (flag) or LOCKED (.substrate/required_remote_governance=1) but the
+        # trusted-base workflow is ABSENT, the repo claims an authority tier it does
+        # not actually have — a false-green. The gate must BLOCK (go-live only warns).
+        if (_remote_governance()=='1' or _required_remote_governance()=='1') and \
+                not (ROOT/'.github'/'workflows'/'trusted-base-audit.yml').exists():
+            blocks.append('SUBSTRATE_REMOTE_GOVERNANCE=1 but .github/workflows/trusted-base-audit.yml '
+                          'is missing — remote governance has no trusted-base authority '
+                          '(run `./manage.sh enable remote --write`, or re-bootstrap with --profile strict+remote)')
         if co:
             # remote-governance tier OR --strict mode requires an ACTIVE CODEOWNERS.
             (blocks if strict_gov else warns).append(co)

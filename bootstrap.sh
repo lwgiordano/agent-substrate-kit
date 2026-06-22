@@ -173,6 +173,11 @@ if [ ! -e docs/knowledge/00_substrate.md ] || [ "$FORCE" == "yes" ]; then { echo
 mkdir -p tests; for f in "$KIT_DIR"/tests/*.py; do [ -f "$f" ] && copy "$f" "tests/$(basename "$f")"; done
 copy "$KIT_DIR/templates/pytest.ini.template" pytest.ini   # deterministic, hermetic test runs in the installed repo too
 mkdir -p .github/workflows; render "$KIT_DIR/workflows/ci.yml.template" .github/workflows/ci.yml; render "$KIT_DIR/workflows/scheduled-audit.yml.template" .github/workflows/scheduled-audit.yml; render "$KIT_DIR/workflows/agent-config-audit.yml.template" .github/workflows/agent-config-audit.yml
+# Stage the trusted-base template under .substrate/ ALWAYS (like .substrate/sandbox.json)
+# so `manage.sh enable remote --write` can install the active workflow later WITHOUT a
+# re-bootstrap — the "scale on demand, one command" path. (No render placeholders in it;
+# this raw copy == what the remote-tier render produces.) v3.6.1.
+copy "$KIT_DIR/workflows/trusted-base-audit.yml.template" .substrate/trusted-base-audit.yml.template
 # Strict root-of-trust: run base-branch validators against PR content so a PR
 # cannot weaken both the policy and its own validator. This is a REMOTE-governance
 # artifact (a CI workflow + CODEOWNERS authority that only mean anything on a GitHub

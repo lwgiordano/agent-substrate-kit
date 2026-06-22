@@ -119,3 +119,12 @@ on; strict-local gets operational+security. `remote_detect.py` is OFFLINE detect
 remote --check`). DEEP rungs (security scanners, deep audit) are shown as available, not
 wired. The `+`-flag aliases (`strict+sandbox`, `strict+remote`, `strict+remote+sandbox`)
 expand to orthogonal flags, never new profile enums.
+
+v3.6.1 completes the remote axis. `go-live` is now FAST: `--go-live` is excluded from
+full-doctor mode, so it runs only cheap base checks (files + hook wiring) then offline
+detection + fast evals — not the integrity/operational/manifest/harness chain (which
+stays in `manage.sh check`). And remote governance is complete-or-blocked: when the flag
+is enabled (or locked) but `.github/workflows/trusted-base-audit.yml` is missing, the
+gate BLOCKS (the tier can't claim trusted-base authority it lacks). `enable remote
+--write` installs that workflow from `.substrate/trusted-base-audit.yml.template`
+(staged by bootstrap, frozen by the trusted-base audit) — one command, no re-bootstrap.

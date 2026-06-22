@@ -1418,6 +1418,37 @@ Every matrix mktemp repo has no git remote, so the whole matrix is also the base
 guarantee. Deferred per plan: no distribution/installer, no scanner/DeepSec/AgentDojo/MCP
 integration yet — those are visible rungs, filled on demand.
 
+## v3.6.1 — remote-axis completion (v3.6.0-audit P1s)
+
+Two real completion issues the v3.6.0 audit found; the architecture was sound, these
+finish the wiring.
+
+**P1 — go-live was a full doctor invocation.** `substrate_doctor.py`'s full-mode calc
+omitted `a.go_live`, so `--go-live` ran the whole integrity/operational/manifest/harness
+chain (6+ subprocesses, a 113-file scan) before rendering the map — ~4.4s here, a
+timeout on a constrained runner. go-live is the FAST readiness map, not the gate. Fix:
+include `a.go_live` in the exclusion, so go-live runs only the cheap base checks
+(required files + hook wiring) then `_go_live` adds fast evals + offline remote/sandbox
+detection — now ~1.4s, no venv, no network. The real gate stays `manage.sh check` /
+`doctor --strict`. Regression: `go-live --json` in a fresh no-setup repo must emit JSON
+and create no venv.
+
+**P1 — remote governance didn't require its own trusted-base workflow.** The tier is
+"CODEOWNERS coverage + trusted-base authority", but a repo could set
+`SUBSTRATE_REMOTE_GOVERNANCE=1` with the trusted-base workflow absent and still PASS the
+governance gate — a false-green (go-live only warned). Fix: when remote governance is
+enabled or LOCKED but `.github/workflows/trusted-base-audit.yml` is missing, the gate
+(`doctor --security`/`--strict`/`--strict-governance`, hence `manage.sh check`) BLOCKS.
+And `enable remote --write` now installs the workflow from a template bootstrap stages
+at `.substrate/trusted-base-audit.yml.template` (always, like `sandbox.json`) — so
+turning on the tier is one command, no re-bootstrap, and leaves the repo complete rather
+than blocked. The staged template is frozen by the trusted-base audit. Regressions:
+missing-workflow-under-remote-gov BLOCKS; `enable remote --write` installs it + the
+config gate then passes.
+
+213 tests. The local/remote/deep map is now fast and the remote-governance authority is
+complete. Next per the roadmap: v3.6.2 `context-report`.
+
 ## Deferred (P2 — documented, not yet built)
 
 These are real improvements the review identified; scoped as future

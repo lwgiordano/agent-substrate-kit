@@ -2145,17 +2145,21 @@ def test_sandbox_detect_emits_srt_settings(tmp_path) -> None:
 
 
 def test_bootstrap_strict_sandbox_alias_is_flag_not_profile() -> None:
-    """v3.5.0: `--profile strict+sandbox` is a CLI ALIAS expanding to profile=strict
-    + SUBSTRATE_SANDBOX=1 (orthogonal flag), NOT a new config enum — and bootstrap
-    writes a default .substrate/sandbox.json."""
+    """v3.5.0/v3.6.0: `--profile strict+sandbox` / `strict+remote` are CLI ALIASES
+    that expand the `+`-separated flags to orthogonal SUBSTRATE_SANDBOX=1 /
+    SUBSTRATE_REMOTE_GOVERNANCE=1, NOT new config enums — and bootstrap writes a
+    default .substrate/sandbox.json."""
     bs = ROOT / "bootstrap.sh"
     if not bs.exists():
         return
     text = bs.read_text(encoding="utf-8")
-    assert 'strict+sandbox) PROFILE="strict"; SANDBOX="1"' in text, "alias must expand to strict + flag"
+    assert "*+*" in text, "bootstrap must parse +-separated profile flags"
+    assert 'sandbox) SANDBOX="1"' in text, "sandbox flag must set SANDBOX=1"
+    assert 'REMOTE_GOVERNANCE="1"' in text, "remote flag must set REMOTE_GOVERNANCE=1"
     assert ".substrate/sandbox.json" in text, "bootstrap must write a default sandbox.json"
     cc = (SCRIPTS / "check_substrate_config.py").read_text(encoding="utf-8")
     assert "strict+sandbox" not in cc, "strict+sandbox must NOT leak into the config profile enum"
+    assert "strict+remote" not in cc, "strict+remote must NOT leak into the config profile enum"
 
 
 def test_config_accepts_and_validates_sandbox_flag(tmp_path) -> None:
@@ -2251,6 +2255,207 @@ def test_go_live_consumes_sandbox_warnings() -> None:
         return
     t = sd.read_text(encoding="utf-8")
     assert "sb_warns" in t and "not fully enforceable" in t, "go-live must consume detector warnings"
+
+
+# --- v3.6.0: local/remote/deep capability axis + remote-governance decoupling ---
+
+def test_config_accepts_and_validates_remote_governance_flag(tmp_path) -> None:
+    """SUBSTRATE_REMOTE_GOVERNANCE is data, validated to {0,1} in BOTH validators."""
+    if not (SCRIPTS / "check_substrate_config.py").exists():
+        return
+    (tmp_path / ".substrate").mkdir()
+    cfg = tmp_path / ".substrate" / "config"
+    cfg.write_text('SUBSTRATE_PROFILE="standard"\nSUBSTRATE_REMOTE_GOVERNANCE="1"\n', encoding="utf-8")
+    ok = subprocess.run([sys.executable, "-I", str(SCRIPTS / "check_substrate_config.py")],
+                        cwd=str(tmp_path), capture_output=True, text=True, timeout=30)
+    assert ok.returncode == 0, ok.stdout + ok.stderr
+    cfg.write_text('SUBSTRATE_REMOTE_GOVERNANCE="maybe"\n', encoding="utf-8")
+    bad = subprocess.run([sys.executable, "-I", str(SCRIPTS / "check_substrate_config.py")],
+                         cwd=str(tmp_path), capture_output=True, text=True, timeout=30)
+    assert bad.returncode == 2, "invalid SUBSTRATE_REMOTE_GOVERNANCE must be rejected"
+
+
+def test_config_key_allowlists_agree() -> None:
+    """The bash loader and the Python validator MUST recognize the same config keys
+    + enum values — drift here is the v3.4.2 bug class (a flag honored by one
+    validator and silently dropped by the other). Asserts the new remote-governance
+    flag is mirrored in both."""
+    sh = (SCRIPTS / "_substrate_config.sh").read_text(encoding="utf-8")
+    py = (SCRIPTS / "check_substrate_config.py").read_text(encoding="utf-8")
+    for key in ("SUBSTRATE_SANDBOX", "SUBSTRATE_REMOTE_GOVERNANCE"):
+        assert key in sh, f"{key} missing from _substrate_config.sh"
+        assert key in py, f"{key} missing from check_substrate_config.py"
+
+
+def test_required_remote_governance_lock_blocks_disabling(tmp_path) -> None:
+    """v3.6.0: when .substrate/required_remote_governance=1, a config with
+    SUBSTRATE_REMOTE_GOVERNANCE=0 must BLOCK — remote governance is a frozen
+    minimum, like the profile + sandbox locks."""
+    if not (SCRIPTS / "check_substrate_config.py").exists():
+        return
+    sub = tmp_path / ".substrate"; sub.mkdir()
+    (sub / "config").write_text('SUBSTRATE_PROFILE="standard"\nSUBSTRATE_REMOTE_GOVERNANCE="0"\n', encoding="utf-8")
+    (sub / "required_remote_governance").write_text("1\n", encoding="utf-8")
+    p = subprocess.run([sys.executable, "-I", str(SCRIPTS / "check_substrate_config.py")],
+                       cwd=str(tmp_path), capture_output=True, text=True, timeout=30)
+    assert p.returncode == 2, "required_remote_governance=1 + flag=0 must BLOCK"
+    assert "required minimum" in (p.stdout + p.stderr)
+
+
+def test_required_remote_governance_allows_when_enabled(tmp_path) -> None:
+    """required_remote_governance=1 + SUBSTRATE_REMOTE_GOVERNANCE=1 passes the gate
+    (the lock requires it ON, not OFF)."""
+    if not (SCRIPTS / "check_substrate_config.py").exists():
+        return
+    sub = tmp_path / ".substrate"; sub.mkdir()
+    (sub / "config").write_text('SUBSTRATE_PROFILE="standard"\nSUBSTRATE_REMOTE_GOVERNANCE="1"\n', encoding="utf-8")
+    (sub / "required_remote_governance").write_text("1\n", encoding="utf-8")
+    p = subprocess.run([sys.executable, "-I", str(SCRIPTS / "check_substrate_config.py")],
+                       cwd=str(tmp_path), capture_output=True, text=True, timeout=30)
+    assert p.returncode == 0, p.stdout + p.stderr
+
+
+def test_bootstrap_writes_required_remote_governance_lock_and_decouples_trusted_base() -> None:
+    """v3.6.0: bootstrap writes .substrate/required_remote_governance, and the
+    trusted-base workflow is gated on the REMOTE tier — not the strict profile."""
+    bs = ROOT / "bootstrap.sh"
+    if not bs.exists():
+        return
+    t = bs.read_text(encoding="utf-8")
+    assert "> .substrate/required_remote_governance" in t
+    assert 'if [[ "$REMOTE_GOVERNANCE" == "1" ]]; then render' in t, \
+        "trusted-base workflow must be gated on the remote tier, not the profile"
+
+
+def test_trusted_base_freezes_remote_governance() -> None:
+    """v3.6.0: the trusted-base audit must freeze .substrate/required_remote_governance
+    + guard SUBSTRATE_REMOTE_GOVERNANCE diffs, mirroring profile/sandbox."""
+    tpl = ROOT / "workflows" / "trusted-base-audit.yml.template"
+    if not tpl.exists():
+        return
+    t = tpl.read_text(encoding="utf-8")
+    assert ".substrate/required_remote_governance" in t
+    assert "SUBSTRATE_REMOTE_GOVERNANCE=" in t
+
+
+def test_remote_detect_parses_url_forms() -> None:
+    """remote_detect must parse scp-like, https, and ssh:// URLs and classify the
+    provider — offline, from the URL string alone."""
+    if not (SCRIPTS / "remote_detect.py").exists():
+        return
+    import importlib
+    rd = importlib.import_module("remote_detect")
+    for url in ("git@github.com:org/repo.git",
+                "https://github.com/org/repo.git",
+                "ssh://git@github.com/org/repo.git",
+                "https://user@github.com/org/repo"):
+        provider, owner, repo, host = rd._parse_remote_url(url)
+        assert provider == "github" and owner == "org" and repo == "repo", url
+    # non-GitHub host classifies as its provider / other
+    assert rd._parse_remote_url("git@gitlab.com:o/r.git")[0] == "gitlab"
+    assert rd._parse_remote_url("git@example.com:o/r.git")[0] == "other"
+
+
+def test_remote_detect_no_remote(tmp_path) -> None:
+    """A git repo with no remote → has_remote False, provider none. Offline, no token."""
+    if not (SCRIPTS / "remote_detect.py").exists():
+        return
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    p = subprocess.run([sys.executable, "-I", str(SCRIPTS / "remote_detect.py"),
+                        "--root", str(tmp_path), "--json"],
+                       capture_output=True, text=True, timeout=20)
+    d = json.loads(p.stdout)
+    assert d["inside_git_repo"] is True and d["has_remote"] is False and d["provider"] == "none"
+
+
+def test_go_live_has_remote_and_deep_tiers() -> None:
+    """v3.6.0: the go-live JSON map carries tier-grouped rows (local/remote/deep),
+    the new remote rows, and an offline-honest production_hardened_reason."""
+    sd = SCRIPTS / "substrate_doctor.py"
+    if not sd.exists():
+        return
+    p = subprocess.run([sys.executable, "-I", str(sd), "--go-live", "--json"],
+                       capture_output=True, text=True, timeout=90)
+    d = json.loads(p.stdout)
+    ids = {c["id"] for c in d["checks"]}
+    assert {"remote_connected", "remote_governance", "security_scanners", "deep_audit"} <= ids
+    tiers = {c.get("tier") for c in d["checks"]}
+    assert {"local", "remote", "deep"} <= tiers
+    assert d["production_hardened"] is False
+    assert "cannot confirm offline" in d["production_hardened_reason"]
+    assert "has_remote" in d["remote"] and "next" in d
+
+
+def test_strict_local_check_does_not_require_codeowners(tmp_path) -> None:
+    """v3.6.0 DECOUPLING: a strict repo with remote governance OFF must NOT be told it
+    is broken for lacking CODEOWNERS. `doctor --operational --security` (what `check`
+    runs for strict-local) must not raise a CODEOWNERS-coverage block; the same repo
+    with SUBSTRATE_REMOTE_GOVERNANCE=1 DOES enforce it."""
+    if not (SCRIPTS / "substrate_doctor.py").exists():
+        return
+    _strict_repo(tmp_path)  # strict profile, no CODEOWNERS
+    # strict-LOCAL (remote_governance unset → 0): security checks but no CODEOWNERS block
+    p = _run("substrate_doctor.py", ["--operational", "--security"], "", cwd=tmp_path)
+    assert "unowned" not in (p.stdout + p.stderr).lower(), \
+        "strict-LOCAL must not enforce CODEOWNERS coverage"
+    # turn remote governance ON → CODEOWNERS coverage becomes a BLOCK
+    cfg = tmp_path / ".substrate" / "config"
+    cfg.write_text('SUBSTRATE_PROFILE="strict"\nSUBSTRATE_LANG="none"\nSUBSTRATE_REMOTE_GOVERNANCE="1"\n', encoding="utf-8")
+    gh = tmp_path / ".github"; gh.mkdir(exist_ok=True)
+    (gh / "CODEOWNERS").write_text("README.md @realuser\n", encoding="utf-8")  # doesn't cover surfaces
+    p = _run("substrate_doctor.py", ["--security"], "", cwd=tmp_path)
+    assert p.returncode == 1 and "unowned" in (p.stdout + p.stderr).lower(), \
+        "remote_governance=1 must enforce CODEOWNERS coverage"
+
+
+def test_manage_check_routes_by_remote_governance() -> None:
+    """v3.6.0: `manage.sh check` (root + template) gates the governance doctor run on
+    the remote tier, with strict-local falling back to operational+security."""
+    for rel in ("manage.sh", "templates/manage.sh.template"):
+        p = ROOT / rel
+        if not p.exists():
+            continue
+        t = p.read_text(encoding="utf-8")
+        assert 'SUBSTRATE_REMOTE_GOVERNANCE:-0}" = "1" ]; then run_py scripts/substrate_doctor.py --strict' in t, rel
+        assert "--operational --security" in t, f"{rel}: strict-local fallback missing"
+
+
+def test_enable_remote_command_present() -> None:
+    """v3.6.0: `manage.sh enable remote` exists with --plan/--write/--check, and
+    --check delegates to the operator branch-protection helper."""
+    for rel in ("manage.sh", "templates/manage.sh.template"):
+        p = ROOT / rel
+        if not p.exists():
+            continue
+        t = p.read_text(encoding="utf-8")
+        assert "enable_remote()" in t and "enable)" in t, rel
+        assert "--write" in t and "setup_branch_protection.sh --check" in t, rel
+        assert "required_remote_governance" in t, f"{rel}: --write must pin the lock"
+
+
+def test_base_check_offline_no_remote(tmp_path) -> None:
+    """v3.6.0 BASE-OFFLINE guarantee: a freshly bootstrapped repo with NO git remote
+    must pass the static validator chain + config gate with no network/remote
+    dependency. (The full `manage.sh check` no-remote path is exercised across every
+    profile×lang combo by the release matrix, whose mktemp repos have no remote.)"""
+    bs = ROOT / "bootstrap.sh"
+    if not bs.exists():
+        return
+    repo = tmp_path / "proj"; repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    r = subprocess.run(["bash", str(bs), "--target", str(repo), "--profile", "standard",
+                        "--lang", "none", "--no-doctor"], capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0, r.stdout + r.stderr
+    # no remote was configured
+    rd = subprocess.run([sys.executable, "-I", str(repo / "scripts" / "remote_detect.py"),
+                         "--root", str(repo), "--has-remote"], capture_output=True, text=True, timeout=20)
+    assert rd.returncode == 1, "bootstrapped repo must have no remote"
+    # the static validator chain (what `check` runs, minus venv tools) passes offline
+    for v in ("check_import_shadowing", "check_python_syntax", "check_harness_patterns",
+              "check_policy_code_integrity", "check_agent_harness", "check_substrate_config"):
+        c = subprocess.run([sys.executable, "-I", str(repo / "scripts" / f"{v}.py")],
+                           cwd=str(repo), capture_output=True, text=True, timeout=60)
+        assert c.returncode == 0, f"{v} failed offline: {c.stdout + c.stderr}"
 
 
 def test_sandbox_env_is_secretless(tmp_path) -> None:

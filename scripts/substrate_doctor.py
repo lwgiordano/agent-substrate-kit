@@ -59,6 +59,17 @@ def _profile():
             if line.strip().startswith('SUBSTRATE_PROFILE='):
                 return line.split('=',1)[1].strip().strip('"\'')
     return 'standard'
+def _remote_governance():
+    """SUBSTRATE_REMOTE_GOVERNANCE from .substrate/config ('0'/'1'). v3.6.0:
+    remote governance (CODEOWNERS coverage, trusted-base authority) is an
+    ORTHOGONAL tier, decoupled from the strict profile — a repo can be
+    strict-LOCAL or standard+remote."""
+    cfg=ROOT/'.substrate/config'
+    if cfg.exists():
+        for line in cfg.read_text(encoding='utf-8',errors='replace').splitlines():
+            if line.split('#',1)[0].strip().startswith('SUBSTRATE_REMOTE_GOVERNANCE='):
+                return line.split('=',1)[1].split('#',1)[0].strip().strip('"\'')
+    return '0'
 def _codeowners_path():
     for loc in ('.github/CODEOWNERS','CODEOWNERS','docs/CODEOWNERS'):
         if (ROOT/loc).exists(): return ROOT/loc
@@ -273,6 +284,23 @@ def _go_live(blocks, warns, as_json=False):
         anchored = memory_log._anchored_head() is not None
     except Exception:
         anchored = False
+    # Remote tier (v3.6.0): OFFLINE detection only — is there a GitHub remote? Drives
+    # the remote-expansion section. remote_detect.py reads .git/config (no network, no
+    # token), so go-live stays side-effect-light. LIVE branch-protection state needs an
+    # API call and lives behind `enable remote --check`, NOT this default report.
+    has_remote, provider = False, 'none'
+    rd = ROOT / 'scripts' / 'remote_detect.py'
+    if rd.is_file():
+        try:
+            import json as _jr, subprocess as _spr, sys as _sysr
+            pr = _spr.run([_sysr.executable, '-I', str(rd), '--root', str(ROOT), '--json'],
+                          capture_output=True, text=True, timeout=15)
+            dr = _jr.loads(pr.stdout)
+            has_remote, provider = bool(dr.get('has_remote')), dr.get('provider', 'none')
+        except Exception:
+            has_remote, provider = False, 'none'
+    # Remote-governance tier (config flag, decoupled from the strict profile).
+    remote_gov = _remote_governance() == '1'
     # sandbox tier (egress containment): enabled in config AND an OS sandbox present.
     sb_cfg = ''
     cfgp = ROOT / '.substrate' / 'config'
@@ -311,39 +339,87 @@ def _go_live(blocks, warns, as_json=False):
         sb_status, sb_reason = 'warn', 'SUBSTRATE_SANDBOX=1 but no backend available (install @anthropic-ai/sandbox-runtime, or bubblewrap on Linux / sandbox-exec on macOS)'
     else:
         sb_status, sb_reason = 'warn', f'not enabled — set SUBSTRATE_SANDBOX=1 to contain egress (resolved backend={sb_backend}); else exfil stays a tripwire'
-    checks = [{'id': 'validators', 'status': 'pass' if repo_ok else 'fail',
+    # Each row carries a `tier` (local|remote|deep) so go-live reads as a MAP across
+    # the scaling model, not a flat pass/fail. LOCAL is offline-complete; REMOTE
+    # unlocks when a GitHub remote exists; DEEP rungs are optional/on-demand. v3.6.0.
+    checks = [{'id': 'validators', 'tier': 'local', 'status': 'pass' if repo_ok else 'fail',
                'reason': '' if repo_ok else f'{len(blocks)} repo-local blocker(s)'}]
     if eval_ok is not None:
-        checks.append({'id': 'evals', 'status': 'pass' if eval_ok else 'fail',
+        checks.append({'id': 'evals', 'tier': 'local', 'status': 'pass' if eval_ok else 'fail',
                        'reason': '' if eval_ok else 'fast eval suite failed'})
-    checks.append({'id': 'trusted_base_workflow', 'status': 'pass' if tb else 'warn',
-                   'reason': '' if tb else 'not present (strict-only; bootstrap --profile strict)'})
-    checks.append({'id': 'github_governance', 'status': 'warn',
-                   'reason': 'cannot verify from repo files; run check_github_governance.py --require in CI'})
-    checks.append({'id': 'sandbox', 'status': sb_status, 'reason': sb_reason})
-    checks.append({'id': 'memory_anchor', 'status': 'pass' if anchored else 'warn',
-                   'reason': '' if anchored else 'not anchored — run `./manage.sh memory anchor` + push to a protected remote'})
+    checks.append({'id': 'sandbox', 'tier': 'local', 'status': sb_status, 'reason': sb_reason})
+    checks.append({'id': 'memory_anchor', 'tier': 'local', 'status': 'pass' if anchored else 'warn',
+                   'reason': '' if anchored else 'not anchored — run `./manage.sh memory anchor` (verify against a protected remote once one exists)'})
+    # --- remote expansion ---
+    checks.append({'id': 'remote_connected', 'tier': 'remote',
+                   'status': 'pass' if (has_remote and provider == 'github') else 'warn',
+                   'reason': f'github remote present (provider={provider})' if (has_remote and provider == 'github')
+                             else (f'remote present but provider={provider} (remote governance targets GitHub)' if has_remote
+                                   else 'no git remote — add a GitHub remote to unlock remote governance')})
+    if remote_gov and tb:
+        rg_status, rg_reason = 'pass', 'enabled (SUBSTRATE_REMOTE_GOVERNANCE=1); trusted-base workflow present'
+    elif remote_gov:
+        rg_status, rg_reason = 'warn', 'enabled but trusted-base workflow missing — re-run bootstrap --profile strict+remote (or `enable remote`)'
+    else:
+        rg_status, rg_reason = 'warn', 'not enabled — run `./manage.sh enable remote --plan`'
+    checks.append({'id': 'remote_governance', 'tier': 'remote', 'status': rg_status, 'reason': rg_reason})
+    checks.append({'id': 'github_governance', 'tier': 'remote', 'status': 'warn',
+                   'reason': 'live branch protection not verifiable offline; run `./manage.sh enable remote --check` (needs an admin-readable token in CI)'})
+    # --- deep options (optional rungs; never block hardening) ---
+    checks.append({'id': 'security_scanners', 'tier': 'deep', 'status': 'available',
+                   'reason': 'Semgrep/Gitleaks/Trivy not wired — future `enable security` rung'})
+    checks.append({'id': 'deep_audit', 'tier': 'deep', 'status': 'available',
+                   'reason': 'DeepSec/AgentDojo deep audit available as a manual/scheduled tier'})
     repo_pass = repo_ok and eval_ok is not False
-    hardened = repo_pass and all(c['status'] == 'pass' for c in checks)
+    def _st(cid):
+        return next((c['status'] for c in checks if c['id'] == cid), None)
+    # Production-hardened requires the LOCAL containment tier AND enforced REMOTE
+    # governance — and the latter's LIVE state is unverifiable offline, so go-live
+    # can NEVER assert hardened from local files alone (anti-overclaim, v3.6.0).
+    hardened = (repo_pass and _st('sandbox') == 'pass'
+                and _st('remote_governance') == 'pass' and _st('github_governance') == 'pass')
+    missing = []
+    if _st('sandbox') != 'pass': missing.append('sandbox containment')
+    if not remote_gov: missing.append('remote governance')
+    missing.append('verified GitHub enforcement')  # never confirmable offline
+    ph_reason = '' if hardened else ('cannot confirm offline — ' + ', '.join(missing)
+                + ' still required; run `./manage.sh enable remote --check`')
+    if not repo_pass: next_hint = 'fix the repo-local blocker(s) above'
+    elif not has_remote: next_hint = 'add a GitHub remote, then `./manage.sh enable remote --plan`'
+    elif not remote_gov: next_hint = '`./manage.sh enable remote --plan`'
+    elif _st('github_governance') != 'pass': next_hint = '`./manage.sh enable remote --check` to verify live GitHub enforcement'
+    else: next_hint = 'production-hardened — no further rungs'
     if as_json:
         print(json.dumps({'repo_local': 'pass' if repo_pass else 'fail',
                           'production_hardened': hardened,
+                          'production_hardened_reason': ph_reason,
+                          'remote': {'has_remote': has_remote, 'provider': provider},
+                          'next': next_hint,
                           'checks': checks, 'blockers': blocks}, indent=2))
         return 0 if repo_pass else 1
     print('GO-LIVE REPORT'); print('=' * 48)
-    for c in checks:
-        tag = {'pass': 'PASS ', 'fail': 'FAIL ', 'warn': 'WARN '}[c['status']]
-        print(tag + c['id'] + ('' if not c['reason'] else ' — ' + c['reason']))
+    tagmap = {'pass': 'PASS ', 'fail': 'FAIL ', 'warn': 'WARN ', 'available': 'AVAIL'}
+    for title, tier in (('Repo-local readiness', 'local'),
+                        ('Remote expansion', 'remote'),
+                        ('Deep options', 'deep')):
+        rows = [c for c in checks if c.get('tier') == tier]
+        if not rows: continue
+        print('\n' + title)
+        for c in rows:
+            tag = tagmap.get(c['status'], '?    ')
+            print('  ' + tag + ' ' + c['id'] + ('' if not c['reason'] else ' — ' + c['reason']))
     if blocks:
         print('\nrepo-local BLOCKERS:')
         for b in blocks:
             print('  - ' + b)
+    print()
     if not repo_pass:
-        print('\ngo-live: NOT READY — repo-local checks are failing'); return 1
+        print('go-live: NOT READY — repo-local checks are failing'); return 1
+    print(f'repo_local: pass   production_hardened: {"yes" if hardened else "no (" + ph_reason + ")"}')
+    print('next: ' + next_hint)
     if hardened:
         print('\ngo-live: PASS (production-hardened)'); return 0
-    print('\ngo-live: PASS (repo-local) / NOT PRODUCTION-HARDENED — sandbox + '
-          'enforced GitHub governance still required before high-stakes use')
+    print('\ngo-live: PASS (repo-local) / NOT PRODUCTION-HARDENED')
     return 0
 
 
@@ -369,9 +445,15 @@ def main():
     if a.security or full:
         hb,hw=_hook_findings(cfg); blocks+=hb; warns+=hw
         co=_codeowners_warn()
-        strict_gov = (_profile()=='strict' or a.strict or a.strict_governance)
+        # CODEOWNERS coverage is REMOTE governance (a GitHub feature), so v3.6.0
+        # gates it on the remote tier — NOT the strict profile. A strict-LOCAL repo
+        # (no remote) is no longer told it is "broken" for lacking CODEOWNERS. The
+        # explicit high-stakes flags (`--strict`, `--strict-governance`) still enforce
+        # it (the CI trusted-base job + on-demand audit), and config
+        # SUBSTRATE_REMOTE_GOVERNANCE=1 turns it on for `manage.sh check`.
+        strict_gov = (_remote_governance()=='1' or a.strict or a.strict_governance)
         if co:
-            # strict profile OR --strict mode requires an ACTIVE CODEOWNERS.
+            # remote-governance tier OR --strict mode requires an ACTIVE CODEOWNERS.
             (blocks if strict_gov else warns).append(co)
         # An ACTIVE CODEOWNERS full of placeholder owners is a false-green:
         # GitHub assigns no owner for nonexistent teams.

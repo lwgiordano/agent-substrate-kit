@@ -67,13 +67,62 @@ setup(){
   # so setup never blocks on a not-yet-activated CODEOWNERS.
   run_py scripts/substrate_doctor.py --operational
 }
+# enable_remote: turn ON the remote-governance tier (v3.6.0). Orthogonal to the
+# governance profile — decoupled from strict. --plan (default) prints what it does
+# with NO mutation; --write makes the LOCAL config edits (no network, no GitHub
+# mutation); --check delegates the LIVE GitHub enforcement check to the operator helper.
+enable_remote(){
+  local mode="${1:---plan}"
+  case "$mode" in
+    --check) exec bash scripts/setup_branch_protection.sh --check ;;
+    --plan)
+      cat <<'PLAN'
+`enable remote` turns on the REMOTE-GOVERNANCE tier (decoupled from the strict profile):
+  - sets SUBSTRATE_REMOTE_GOVERNANCE="1" in .substrate/config
+  - writes .substrate/required_remote_governance=1 (frozen minimum; a PR may not disable it)
+  - CODEOWNERS coverage + trusted-base authority become REQUIRED in `check`
+
+It does NOT configure GitHub branch protection (that stays an explicit operator action):
+  - ensure a GitHub remote exists and a real-owner .github/CODEOWNERS covers scripts/, workflows, .substrate/required_*
+  - the trusted-base workflow ships with `bootstrap --profile *+remote`; if .github/workflows/trusted-base-audit.yml is absent, re-bootstrap with --profile strict+remote
+  - then verify live enforcement:  ./manage.sh enable remote --check
+
+Apply the local config changes with:  ./manage.sh enable remote --write
+PLAN
+      ;;
+    --write)
+      local cfg=".substrate/config"
+      [ -f "$cfg" ] || { echo "no $cfg — run bootstrap first" >&2; exit 2; }
+      if grep -q '^SUBSTRATE_REMOTE_GOVERNANCE=' "$cfg"; then
+        local tmp; tmp="$(mktemp)"
+        awk '/^SUBSTRATE_REMOTE_GOVERNANCE=/{print "SUBSTRATE_REMOTE_GOVERNANCE=\"1\""; next}{print}' "$cfg" > "$tmp" && mv "$tmp" "$cfg"
+      else
+        printf 'SUBSTRATE_REMOTE_GOVERNANCE="1"\n' >> "$cfg"
+      fi
+      echo "1" > .substrate/required_remote_governance
+      echo "remote governance ENABLED (SUBSTRATE_REMOTE_GOVERNANCE=1, required_remote_governance=1)."
+      echo "next: ensure the trusted-base workflow + a real CODEOWNERS exist, then ./manage.sh enable remote --check"
+      ;;
+    *) echo "usage: ./manage.sh enable remote [--plan|--write|--check]" >&2; exit 2 ;;
+  esac
+}
 case "$cmd" in
   setup) setup ;;
   doctor) run_py_system scripts/substrate_doctor.py "$@" ;;
   go-live) run_py_system scripts/substrate_doctor.py --go-live "$@" ;;
+  enable)
+    what="${1:-}"; shift || true
+    case "$what" in
+      remote) enable_remote "${1:---plan}" ;;
+      *) echo "usage: ./manage.sh enable remote [--plan|--write|--check]" >&2; exit 2 ;;
+    esac ;;
   check)
-    # strict profile enforces governance (CODEOWNERS) as part of check.
-    if [ "$SUBSTRATE_PROFILE" = "strict" ]; then run_py scripts/substrate_doctor.py --strict; fi
+    # Remote governance (CODEOWNERS coverage + trusted-base authority) is enforced as
+    # part of check only when the remote tier is ON (v3.6.0 — decoupled from the strict
+    # profile, so a strict-LOCAL repo is not told it is "broken" for lacking a
+    # GitHub-only CODEOWNERS). strict profile still gets operational+security checks.
+    if [ "${SUBSTRATE_REMOTE_GOVERNANCE:-0}" = "1" ]; then run_py scripts/substrate_doctor.py --strict
+    elif [ "$SUBSTRATE_PROFILE" = "strict" ]; then run_py scripts/substrate_doctor.py --operational --security; fi
     run_py scripts/check_import_shadowing.py          # no repo-local stdlib shadow can subvert the hash validators
     run_py scripts/update_manifest.py --check
     run_py scripts/check_doc_drift.py --strict
@@ -98,9 +147,11 @@ case "$cmd" in
   memory) run_py scripts/memory_log.py "$@" ;;
   design-init) mkdir -p design-system/pages design-system/tokens; echo "design-system/ scaffolded" ;;
   *) cat <<'HELP'
-Usage: ./manage.sh setup|doctor|go-live|check|evals|audit|full-audit|release|manifest|agent-system-audit|handoff|memory|design-init
+Usage: ./manage.sh setup|doctor|go-live|enable|check|evals|audit|full-audit|release|manifest|agent-system-audit|handoff|memory|design-init
   evals                                       adversarial behavior evals (block-rate / FP-rate, writes a trace)
   doctor [--quick|--security|--operational]   readiness levels
+  go-live [--json]                            local/remote/deep readiness map (offline, side-effect-light)
+  enable remote [--plan|--write|--check]      turn on the remote-governance tier (CODEOWNERS + trusted-base)
   memory [verify|tail|tasks]                  append-only event log
 Config: .substrate/config (profile, language, LINT_CMD/TYPECHECK_CMD/TEST_CMD indirection)
 Substrate validators + pre-commit run from .substrate/venv (works in any language).

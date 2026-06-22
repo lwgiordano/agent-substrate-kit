@@ -41,11 +41,24 @@ bash /path/to/agent_substrate_kit_v3/bootstrap.sh --profile standard --lang auto
 | 4-field bug-fix commit protocol + postmortem-per-bugfix hooks | — | — | yes |
 | Extras (calibration, stale-phrases, license headers) | — | — | yes |
 
-## Current status (v3.5.10)
+## Current status (v3.6.0)
+
+**Local-first, remote-expandable.** The base is offline-complete (memory,
+hooks, validators, evals, sandbox, release bundle) — no GitHub/CI/token/remote
+required. Three orthogonal capability axes layer on top: governance **profile**
+(starter/standard/strict), egress **sandbox** (`SUBSTRATE_SANDBOX`), and **remote
+governance** (`SUBSTRATE_REMOTE_GOVERNANCE` — CODEOWNERS coverage + the
+trusted-base authority). v3.6.0 **decoupled remote governance from the strict
+profile**: a repo can be strict-LOCAL (no remote → never told it is "broken" for
+lacking a GitHub-only CODEOWNERS) or standard+remote. `./manage.sh go-live` is the
+map across all three tiers — it surfaces the current state, the next rung, and the
+exact `enable` command, and **never claims production-hardening offline** (live
+GitHub enforcement needs `enable remote --check`). Turn the tier on with
+`bootstrap --profile strict+remote` or `./manage.sh enable remote --write`.
 
 Credible for controlled trial in **standard mode** across Python, Node,
-Go, and no-language repos. **Strict mode** enforces CODEOWNERS coverage
-of the actual privileged files (last-match semantics, `*`/`**`/trailing-
+Go, and no-language repos. The **remote-governance tier** enforces CODEOWNERS
+coverage of the actual privileged files (last-match semantics, `*`/`**`/trailing-
 slash matching, placeholder rejection, 3 MB load-limit check),
 subdirectory-safe exfil policy, and environment-independent audits.
 Untrusted model/tool state — transcript turns AND TodoWrite labels — is
@@ -89,9 +102,10 @@ imports and defeat the hash pins.
 **Root of trust (strict).** The local gate runs validators FROM the PR, so
 on its own it cannot stop a PR that edits both a policy file and the
 validator that judges it — a repo-local gate is developer feedback, not the
-final authority. Strict mode therefore ships
-`.github/workflows/trusted-base-audit.yml`, which **freezes** the validator,
-policy, profile, AND CI-execution code relative to the protected **base
+final authority. The **remote-governance tier** therefore ships
+`.github/workflows/trusted-base-audit.yml` (written by `bootstrap --profile
+*+remote` / `enable remote`, not by `strict` alone — v3.6.0), which **freezes** the
+validator, policy, profile, AND CI-execution code relative to the protected **base
 branch**: a `git diff` guard FAILS the check on any change to `scripts/`,
 `manage.sh`, `.pre-commit-config.yaml`, `.github/workflows/`, or
 `.substrate/required_profile`, and on any diff that changes `SUBSTRATE_PROFILE`

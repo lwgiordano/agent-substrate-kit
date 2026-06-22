@@ -43,13 +43,17 @@ except Exception as _e:  # pragma: no cover - exercised via staged broken module
 
 _ALLOWED_KEYS = {"SUBSTRATE_PROFILE", "SUBSTRATE_LANG", "SUBSTRATE_RUNNER",
                  "LINT_CMD", "TYPECHECK_CMD", "TEST_CMD", "SUBSTRATE_CODE_SUFFIXES",
-                 "SUBSTRATE_SANDBOX"}
+                 "SUBSTRATE_SANDBOX", "SUBSTRATE_REMOTE_GOVERNANCE"}
 _ENUMS = {
     "SUBSTRATE_PROFILE": {"starter", "standard", "strict"},
     "SUBSTRATE_LANG": {"python", "node", "go", "none"},
     "SUBSTRATE_RUNNER": {"auto", "uv", "python", "poetry"},
     # SUBSTRATE_SANDBOX=1 opts into the egress-containment tier (sandbox_exec.sh).
     "SUBSTRATE_SANDBOX": {"0", "1"},
+    # SUBSTRATE_REMOTE_GOVERNANCE=1 opts into the remote-governance tier (CODEOWNERS
+    # coverage, trusted-base authority) — orthogonal to the governance PROFILE so a
+    # repo can be strict-LOCAL (no remote) or standard+remote. v3.6.0.
+    "SUBSTRATE_REMOTE_GOVERNANCE": {"0", "1"},
 }
 
 
@@ -109,6 +113,21 @@ def _required_sandbox():
     Written by bootstrap when the sandbox tier is selected (→ '1'); frozen by the
     trusted-base guard + CODEOWNERS, exactly like .substrate/required_profile."""
     p = ROOT / ".substrate" / "required_sandbox"
+    if not p.is_file():
+        return None
+    try:
+        val = p.read_text(encoding="utf-8").strip()
+    except Exception:
+        return None
+    return val if val in {"0", "1"} else None
+
+
+def _required_remote_governance():
+    """The pinned remote-governance requirement (.substrate/required_remote_governance):
+    '0'/'1' or None. Written by bootstrap when the remote tier is selected (→ '1');
+    frozen by the trusted-base guard + CODEOWNERS, exactly like .substrate/required_sandbox.
+    v3.6.0."""
+    p = ROOT / ".substrate" / "required_remote_governance"
     if not p.is_file():
         return None
     try:
@@ -194,6 +213,18 @@ def main() -> int:
         print('check-substrate-config: SUBSTRATE_SANDBOX must be "1" — containment is a '
               "required minimum (.substrate/required_sandbox=1); a PR may not disable it",
               file=sys.stderr)
+        return 2
+    # REMOTE-GOVERNANCE LOCK (v3.6.0). Mirror the profile + sandbox locks for the
+    # remote-governance tier. Once a repo pins .substrate/required_remote_governance=1
+    # (written by bootstrap --profile *+remote, CODEOWNED + trusted-base frozen), a PR
+    # may not flip SUBSTRATE_REMOTE_GOVERNANCE to 0 to silently drop CODEOWNERS coverage
+    # / trusted-base authority. Only enforced when the lock is "1".
+    req_rg = _required_remote_governance()
+    remote_gov_on = vals.get("SUBSTRATE_REMOTE_GOVERNANCE", "0")
+    if req_rg == "1" and remote_gov_on != "1":
+        print('check-substrate-config: SUBSTRATE_REMOTE_GOVERNANCE must be "1" — remote '
+              "governance is a required minimum (.substrate/required_remote_governance=1); "
+              "a PR may not disable it", file=sys.stderr)
         return 2
     sbx_det = Path(__file__).resolve().parent / "sandbox_detect.py"
     if sbx_det.is_file() and ((ROOT / ".substrate" / "sandbox.json").is_file() or req_sb == "1"):

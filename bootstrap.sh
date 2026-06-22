@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 KIT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TARGET="$(pwd)"; RUNNER="auto"; WORKFLOW="superpowers"; UI_ENABLED="no"; PROFILE="standard"; LANG_PRIMARY="auto"; FORCE="no"; INSTALL_TOOLS="no"; RUN_DOCTOR="yes"; SANDBOX="0"
+TARGET="$(pwd)"; RUNNER="auto"; WORKFLOW="superpowers"; UI_ENABLED="no"; PROFILE="standard"; LANG_PRIMARY="auto"; FORCE="no"; INSTALL_TOOLS="no"; RUN_DOCTOR="yes"; SANDBOX="0"; REMOTE_GOVERNANCE="0"
 usage(){ cat <<'HELP'
 Agent Substrate Kit v3 bootstrap
 Options:
@@ -9,7 +9,7 @@ Options:
   --runner auto|uv|python|poetry
   --workflow superpowers|gsd|none
   --ui yes|no
-  --profile starter|standard|strict|strict+sandbox   (strict+sandbox = strict + egress containment)
+  --profile starter|standard|strict[+sandbox][+remote]   (+sandbox = egress containment; +remote = remote governance)
   --lang auto|python|node|go|none
   --force
   --install-tools
@@ -19,12 +19,23 @@ HELP
 while [[ $# -gt 0 ]]; do case "$1" in --target) TARGET="$2"; shift 2;; --runner) RUNNER="$2"; shift 2;; --workflow) WORKFLOW="$2"; shift 2;; --ui) UI_ENABLED="$2"; shift 2;; --profile) PROFILE="$2"; shift 2;; --lang) LANG_PRIMARY="$2"; shift 2;; --force) FORCE="yes"; shift;; --install-tools) INSTALL_TOOLS="yes"; shift;; --no-doctor) RUN_DOCTOR="no"; shift;; -h|--help) usage; exit 0;; *) echo "Unknown option $1"; usage; exit 1;; esac; done
 case "$RUNNER" in auto|uv|python|poetry) ;; *) echo "invalid runner"; exit 1;; esac
 case "$WORKFLOW" in superpowers|gsd|none) ;; *) echo "invalid workflow"; exit 1;; esac
-# `strict+sandbox` is a CLI ALIAS, not a new config enum: it expands to the strict
-# governance profile PLUS the orthogonal SUBSTRATE_SANDBOX=1 flag. Sandbox (and,
-# later, security scanners) are orthogonal to the governance level, so they are
-# flags + .substrate/sandbox.json — NOT a combinatorial profile matrix.
+# `+`-separated suffixes are CLI ALIASES, not new config enums: `strict+sandbox`,
+# `strict+remote`, `strict+remote+sandbox` expand to the base governance profile PLUS
+# orthogonal flags (SUBSTRATE_SANDBOX=1 egress containment, SUBSTRATE_REMOTE_GOVERNANCE=1
+# remote governance). Capabilities are orthogonal to the governance level, so they are
+# flags — NOT a combinatorial profile matrix. (v3.5.0 sandbox; v3.6.0 remote.)
+if [[ "$PROFILE" == *+* ]]; then
+  _base="${PROFILE%%+*}"; _flags="${PROFILE#*+}"; PROFILE="$_base"
+  IFS='+' read -ra _flag_list <<< "$_flags"
+  for _f in "${_flag_list[@]}"; do
+    case "$_f" in
+      sandbox) SANDBOX="1";;
+      remote)  REMOTE_GOVERNANCE="1";;
+      *) echo "invalid profile flag: $_f (allowed: sandbox, remote)"; exit 1;;
+    esac
+  done
+fi
 case "$PROFILE" in
-  strict+sandbox) PROFILE="strict"; SANDBOX="1";;
   starter|standard|strict) ;;
   *) echo "invalid profile"; exit 1;;
 esac
@@ -78,6 +89,7 @@ if [ ! -e .substrate/config ] || [ "$FORCE" == "yes" ]; then
     echo "SUBSTRATE_LANG=\"$LANG_PRIMARY\""
     echo "SUBSTRATE_RUNNER=\"$RUNNER\""
     echo "SUBSTRATE_SANDBOX=\"$SANDBOX\"   # 1 = contain agent egress via scripts/sandbox_exec.sh (backend resolved from .substrate/sandbox.json)"
+    echo "SUBSTRATE_REMOTE_GOVERNANCE=\"$REMOTE_GOVERNANCE\"   # 1 = enforce remote governance (CODEOWNERS coverage + trusted-base authority); needs a GitHub remote"
     case "$LANG_PRIMARY" in
       python) echo 'LINT_CMD=""        # ruff runs via pre-commit'; echo 'TYPECHECK_CMD=""   # e.g. "uv run mypy src/"'; echo 'TEST_CMD=""        # pytest runs via pre-commit';;
       node|go) # gates run through the adapter, which detects opt-in and skips cleanly.
@@ -96,6 +108,11 @@ echo "$PROFILE" > .substrate/required_profile; echo "    +    .substrate/require
 # `--profile strict+sandbox` pins this to 1, so a PR can RAISE but never silently
 # DISABLE containment (check_substrate_config + trusted-base enforce it). v3.5.1.
 echo "$SANDBOX" > .substrate/required_sandbox; echo "    +    .substrate/required_sandbox"
+# Remote-governance LOCK: the minimum remote-governance requirement, frozen like
+# required_profile/required_sandbox. `--profile *+remote` pins this to 1 so a PR can
+# RAISE but never silently DISABLE remote governance (check_substrate_config +
+# trusted-base enforce it). Orthogonal to the profile — decoupled from strict. v3.6.0.
+echo "$REMOTE_GOVERNANCE" > .substrate/required_remote_governance; echo "    +    .substrate/required_remote_governance"
 # Sandbox backend policy (DATA, validated fail-closed by scripts/sandbox_detect.py).
 # Written always so it's discoverable + editable; only ENFORCED when SUBSTRATE_SANDBOX=1.
 # backend=auto prefers @anthropic-ai/sandbox-runtime (srt) if present, else the OS-native
@@ -157,8 +174,12 @@ mkdir -p tests; for f in "$KIT_DIR"/tests/*.py; do [ -f "$f" ] && copy "$f" "tes
 copy "$KIT_DIR/templates/pytest.ini.template" pytest.ini   # deterministic, hermetic test runs in the installed repo too
 mkdir -p .github/workflows; render "$KIT_DIR/workflows/ci.yml.template" .github/workflows/ci.yml; render "$KIT_DIR/workflows/scheduled-audit.yml.template" .github/workflows/scheduled-audit.yml; render "$KIT_DIR/workflows/agent-config-audit.yml.template" .github/workflows/agent-config-audit.yml
 # Strict root-of-trust: run base-branch validators against PR content so a PR
-# cannot weaken both the policy and its own validator. Strict profile only.
-if [[ "$PROFILE" == "strict" ]]; then render "$KIT_DIR/workflows/trusted-base-audit.yml.template" .github/workflows/trusted-base-audit.yml; fi
+# cannot weaken both the policy and its own validator. This is a REMOTE-governance
+# artifact (a CI workflow + CODEOWNERS authority that only mean anything on a GitHub
+# remote), so v3.6.0 gates it on the remote tier — NOT the strict profile. A
+# strict-LOCAL repo (no remote) no longer gets a useless CI workflow; `strict+remote`
+# (or `enable remote`) writes it. (Decouples remote governance from `strict`.)
+if [[ "$REMOTE_GOVERNANCE" == "1" ]]; then render "$KIT_DIR/workflows/trusted-base-audit.yml.template" .github/workflows/trusted-base-audit.yml; fi
 copy "$KIT_DIR/templates/pull_request_template.md" .github/pull_request_template.md; copy "$KIT_DIR/templates/CODEOWNERS.template" .github/CODEOWNERS.suggested; copy "$KIT_DIR/templates/SECURITY.md" SECURITY.md; copy "$KIT_DIR/templates/CONTRIBUTING.md" CONTRIBUTING.md
 # GitHub Copilot reads .github/copilot-instructions.md natively; point it at AGENTS.md.
 copy "$KIT_DIR/templates/copilot-instructions.md" .github/copilot-instructions.md

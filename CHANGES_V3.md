@@ -1373,6 +1373,51 @@ against a staged no-VERSION repo: `--report` exits 0 and writes a valid BENCHMAR
 Behavior + the v3.5.9 provenance fix are unchanged; this is purely the test's
 repo-portability.
 
+## v3.6.0 — local/remote/deep capability axis + remote-governance decoupling
+
+Not "more substrate" — this makes the kit's **scaling model** explicit, enforceable,
+and visible. The base was already offline-complete (memory, hooks, validators, evals,
+sandbox, release bundle); v3.6.0 is a **wiring + decoupling** release.
+
+**The one real refactor — decouple remote governance from the `strict` profile.**
+Historically `strict` meant "strict local checks AND GitHub/trusted-base/CODEOWNERS
+remote governance". That conflated two orthogonal things. Now remote governance is its
+own axis:
+
+- New `SUBSTRATE_REMOTE_GOVERNANCE` flag (data, `{0,1}`, mirrored in BOTH validators —
+  `_substrate_config.sh` + `check_substrate_config.py` — with a `test_config_key_allowlists_agree`
+  gate against the v3.4.2 drift class).
+- New `.substrate/required_remote_governance` lock: once `1`, a PR may not flip the flag
+  to `0` (mirrors `required_profile` / `required_sandbox`); frozen by the trusted-base
+  audit (the flag diff + the lock file are both in the frozen set).
+- `bootstrap --profile strict+remote` (and `strict+remote+sandbox`) via a generalized
+  `+`-flag alias parser — flags stay orthogonal, never new profile enums.
+- The trusted-base CI workflow is now written on the **remote tier**, not at `strict`. A
+  strict-LOCAL repo gets no useless CI workflow and is **never told it is "broken"** for
+  lacking a GitHub-only CODEOWNERS. `substrate_doctor` gates CODEOWNERS coverage on the
+  remote tier (`--strict`/`--strict-governance` still enforce it explicitly); `manage.sh
+  check` runs `--strict` only when the remote tier is on, else operational+security.
+
+**`go-live` becomes the map.** Rows are grouped by tier (Repo-local / Remote expansion /
+Deep options), the new `remote_detect.py` reports the remote OFFLINE (reads `.git/config`,
+no network/token), and the report surfaces the next rung + exact `enable` command. It
+**never claims `production_hardened` offline** — live GitHub enforcement is unverifiable
+without `enable remote --check`, so the JSON carries `production_hardened: false` +
+`production_hardened_reason: "cannot confirm offline …"`. Deep rungs (security scanners,
+deep audit) show as `AVAIL`, not wired.
+
+**`manage.sh enable remote [--plan|--write|--check]`.** `--plan` (default) prints what
+enabling does with no mutation; `--write` makes the LOCAL config edits (flag + lock, no
+network, no GitHub mutation); `--check` delegates the LIVE enforcement check to
+`setup_branch_protection.sh --check`. No auto-apply of branch protection (operator action).
+
+**CI proves the decoupling both ways.** The release matrix `full-setup` now runs plain
+`strict` (no CODEOWNERS synthesized → `check` must PASS, proving strict-LOCAL works) AND
+`strict+remote` (CODEOWNERS synthesized → coverage REQUIRED, proving the remote path).
+Every matrix mktemp repo has no git remote, so the whole matrix is also the base-offline
+guarantee. Deferred per plan: no distribution/installer, no scanner/DeepSec/AgentDojo/MCP
+integration yet — those are visible rungs, filled on demand.
+
 ## Deferred (P2 — documented, not yet built)
 
 These are real improvements the review identified; scoped as future

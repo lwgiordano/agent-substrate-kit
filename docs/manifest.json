@@ -38,6 +38,7 @@
         "scripts/lint_on_write.py",
         "scripts/memory_log.py",
         "scripts/release_gate.sh",
+        "scripts/remote_detect.py",
         "scripts/run_python_gate.sh",
         "scripts/run_smoke_verification.py",
         "scripts/run_substrate_evals.py",
@@ -50,7 +51,7 @@
         "scripts/todo_state_hook.py",
         "scripts/update_manifest.py"
       ],
-      "last_human_reviewed": "2026-06-16",
+      "last_human_reviewed": "2026-06-22",
       "path": "docs/knowledge/00_substrate.md",
       "purpose": "Universal Agent Substrate Kit v3 files installed in this repo."
     }

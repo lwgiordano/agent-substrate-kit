@@ -42,7 +42,7 @@ jobs:
           # profile). NOT the audited DATA/content — harness_patterns.json is
           # .json (data) and AGENTS.md / docs / .substrate/config (command
           # values) may change. (v3.2.19/20 findings.)
-          TRUSTED="scripts manage.sh .pre-commit-config.yaml .github/workflows .substrate/required_profile .substrate/required_sandbox"
+          TRUSTED="scripts manage.sh .pre-commit-config.yaml .github/workflows .substrate/required_profile .substrate/required_sandbox .substrate/required_remote_governance"
           # carve the one DATA file back out of scripts/ (PRs may extend it; the
           # frozen check_harness_patterns.py validates it against pinned hashes).
           changed="$(git diff --name-only "origin/${{ github.base_ref }}...HEAD" -- $TRUSTED \
@@ -75,7 +75,18 @@ jobs:
             echo "::error::Disabling containment must route through the release process."
             exit 1
           fi
-          echo "freeze-guard: ok — no frozen policy/validator/CI/profile/sandbox change"
+          # Remote-governance authority (v3.6.0): when remote governance is a required
+          # minimum (.substrate/required_remote_governance=1), the SUBSTRATE_REMOTE_GOVERNANCE
+          # flag is frozen too — a PR must not silently drop CODEOWNERS coverage / trusted-base
+          # authority while keeping the rest of the governance posture.
+          if git diff "origin/${{ github.base_ref }}...HEAD" -- .substrate/config \
+               | grep -Eq '^[+-]\s*SUBSTRATE_REMOTE_GOVERNANCE='; then
+            echo "::error::This PR changes SUBSTRATE_REMOTE_GOVERNANCE in .substrate/config."
+            echo "::error::Remote governance is frozen when .substrate/required_remote_governance=1."
+            echo "::error::Disabling it must route through the release process."
+            exit 1
+          fi
+          echo "freeze-guard: ok — no frozen policy/validator/CI/profile/sandbox/remote-governance change"
       - name: Run the (frozen) validators + strict governance against PR content
         run: |
           set -euo pipefail

@@ -1,6 +1,6 @@
 ---
 purpose: Universal Agent Substrate Kit v3 files installed in this repo.
-last_human_reviewed: 2026-06-16
+last_human_reviewed: 2026-06-22
 covers:
   - extras/calibrate_diy_ultrareview.py
   - extras/check_license_headers.py
@@ -37,6 +37,7 @@ covers:
   - scripts/lint_on_write.py
   - scripts/memory_log.py
   - scripts/release_gate.sh
+  - scripts/remote_detect.py
   - scripts/run_python_gate.sh
   - scripts/run_smoke_verification.py
   - scripts/run_substrate_evals.py
@@ -101,3 +102,20 @@ reproducible `BENCHMARK.md` (version + block-rate/FP-rate + surfaced skips + rep
 command) — the self-published, anyone-can-reproduce result. v3.5.9: the report embeds
 NO mutable pre-commit git hash; exact provenance (commit + source-tree + artifact
 SHA-256) is deferred to `RELEASE_MANIFEST.json` so it is never stale/non-reproducible.
+
+v3.6.0 makes the LOCAL/REMOTE/DEEP scaling model explicit. The base is offline-complete
+(memory, hooks, validators, evals, sandbox, release bundle) — no GitHub/CI/token/remote
+needed. REMOTE governance (CODEOWNERS coverage + the trusted-base authority) is now an
+ORTHOGONAL tier (`SUBSTRATE_REMOTE_GOVERNANCE`, locked by `.substrate/required_remote_
+governance`, frozen by the trusted-base audit), DECOUPLED from the `strict` profile:
+a repo can be strict-LOCAL (no remote → never told it is "broken" for lacking a
+GitHub-only CODEOWNERS) or standard+remote. `bootstrap --profile strict+remote` (or
+`./manage.sh enable remote --write`) turns it on; the trusted-base CI workflow ships only
+with the remote tier. `manage.sh check` enforces CODEOWNERS only when the remote tier is
+on; strict-local gets operational+security. `remote_detect.py` is OFFLINE detection (reads
+`.git/config`, no network/token) feeding the new `go-live` map, which groups rows by tier
+(local/remote/deep), surfaces the next rung + exact `enable` command, and NEVER claims
+`production_hardened` offline (live GitHub enforcement is unverifiable without `enable
+remote --check`). DEEP rungs (security scanners, deep audit) are shown as available, not
+wired. The `+`-flag aliases (`strict+sandbox`, `strict+remote`, `strict+remote+sandbox`)
+expand to orthogonal flags, never new profile enums.

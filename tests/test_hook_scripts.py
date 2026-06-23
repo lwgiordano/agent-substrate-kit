@@ -2615,9 +2615,13 @@ def test_context_report_is_read_only_no_venv(tmp_path) -> None:
 
 def test_manage_wires_context_report() -> None:
     """context-report dispatch present in both manage.sh and the template, routed
-    side-effect-light."""
+    side-effect-light. (templates/ is kit-source-only — absent in bootstrapped repos,
+    where the kit's tests also run; guard existence, the v3.5.10 lesson.)"""
     for rel in ("manage.sh", "templates/manage.sh.template"):
-        t = (ROOT / rel).read_text(encoding="utf-8")
+        p = ROOT / rel
+        if not p.is_file():
+            continue
+        t = p.read_text(encoding="utf-8")
         assert "context-report) run_py_system scripts/context_report.py" in t, rel
 
 

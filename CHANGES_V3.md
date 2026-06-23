@@ -1510,8 +1510,27 @@ subprocess tree is out of scope.)
 `keystone_cache_prefix`) with a note that it is the keystone prefix only, not a full
 host-prompt hash (the skill index is also always-loaded but not in the keystone).
 
-Regressions for all four. 222 tests. context-report is now an accurate local
-token/memory-efficiency measurement.
+Regressions for all four; the shipped artifact's `RELEASE_MANIFEST.json` records the
+exact test count (the count differs by one between the kit-source tree and the
+bootstrapped extract — a no-`__pycache__` test guards on `bootstrap.sh` and skips where
+that file is absent). context-report is now an accurate local token/memory-efficiency
+measurement.
+
+## v3.6.4 — doc-provenance: stop hardcoding test counts in release notes
+
+Pure docs, no code/behavior change. The v3.6.2-audit's only finding was a release-note
+mismatch: the v3.6.3 changelog said "222 tests" (the kit-source count) while the shipped
+`RELEASE_MANIFEST.json` recorded "221 passed" (the bootstrapped-extract count — a
+no-`__pycache__` test guards on `bootstrap.sh`, absent in the extract, so it skips there).
+Both numbers are true for their environment, but a hardcoded count in prose drifts from
+the provenance source and reads as overclaim.
+
+Fix (the durable form): the changelog no longer asserts a hard test count — the exact,
+per-environment count lives in `RELEASE_MANIFEST.json` (`test_summary`), which
+`package_release.sh` stamps from the actual artifact self-test. Counts are recorded
+where they are measured, not transcribed into prose that goes stale. This matches the
+older entries' "N tests pass from the extracted artifact" phrasing and the kit's
+no-overclaim discipline applied to its own release notes.
 
 ## Deferred (P2 — documented, not yet built)
 

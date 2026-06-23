@@ -41,7 +41,7 @@ bash /path/to/agent_substrate_kit_v3/bootstrap.sh --profile standard --lang auto
 | 4-field bug-fix commit protocol + postmortem-per-bugfix hooks | — | — | yes |
 | Extras (calibration, stale-phrases, license headers) | — | — | yes |
 
-## Current status (v3.6.1)
+## Current status (v3.6.2)
 
 **Local-first, remote-expandable.** The base is offline-complete (memory,
 hooks, validators, evals, sandbox, release bundle) — no GitHub/CI/token/remote
@@ -59,7 +59,9 @@ installs the trusted-base workflow from a staged template — no re-bootstrap). 
 is the **fast** map (cheap base checks + offline detection only, never the full gate),
 and enabling remote governance is **complete-or-blocked**: `check` refuses if the flag
 is on but the trusted-base workflow is missing — the tier can't claim authority it
-doesn't have.
+doesn't have. `./manage.sh context-report` measures the token/context footprint locally
+(always-loaded vs on-demand, the cache-prefix hash, largest contributors) so the lean
+keystone + progressive-disclosure design stays honest and visible.
 
 Credible for controlled trial in **standard mode** across Python, Node,
 Go, and no-language repos. The **remote-governance tier** enforces CODEOWNERS

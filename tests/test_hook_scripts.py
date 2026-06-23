@@ -2554,6 +2554,73 @@ def test_enable_remote_write_installs_trusted_base_workflow(tmp_path) -> None:
     assert g.returncode == 0, g.stdout + g.stderr
 
 
+# --- v3.6.2: context-report (local, read-only token/context footprint) ---
+
+def test_context_report_json_shape() -> None:
+    """v3.6.2: context_report --json emits the stable contract — tiered footprint
+    (always-loaded / session / memory / on-demand), cache-prefix hash, largest
+    contributors, recommendations."""
+    cr = SCRIPTS / "context_report.py"
+    if not cr.exists():
+        return
+    p = subprocess.run([sys.executable, "-I", str(cr), "--json"],
+                       capture_output=True, text=True, timeout=30)
+    assert p.returncode == 0, p.stdout + p.stderr
+    d = json.loads(p.stdout)
+    for k in ("always_loaded", "session", "memory", "on_demand", "cache_prefix",
+              "largest_contributors", "recommendations"):
+        assert k in d, f"missing key {k}"
+    assert d["always_loaded"]["est_tokens"] >= 0
+    assert len(d["cache_prefix"]["sha256"]) == 64
+    assert isinstance(d["recommendations"], list) and d["recommendations"]
+
+
+def test_context_report_classifies_always_vs_on_demand(tmp_path) -> None:
+    """The report must put AGENTS.md/CLAUDE.md in always-loaded and a skill BODY in
+    on-demand (progressive disclosure) — the core token lever it exists to surface."""
+    cr = SCRIPTS / "context_report.py"
+    if not cr.exists():
+        return
+    (tmp_path / ".claude" / "skills" / "demo").mkdir(parents=True)
+    (tmp_path / "AGENTS.md").write_text("# A\n" + "x" * 500, encoding="utf-8")
+    (tmp_path / "CLAUDE.md").write_text("@AGENTS.md\n", encoding="utf-8")
+    (tmp_path / ".claude" / "skills" / "demo" / "SKILL.md").write_text(
+        "---\nname: demo\ndescription: short\n---\n" + "BODY " * 400, encoding="utf-8")
+    p = subprocess.run([sys.executable, "-I", str(cr), "--root", str(tmp_path), "--json"],
+                       capture_output=True, text=True, timeout=30)
+    d = json.loads(p.stdout)
+    assert "AGENTS.md" in d["always_loaded"]["files"]
+    # the large skill body must dominate the on-demand tier, not always-loaded
+    assert d["on_demand"]["total_bytes"] > d["always_loaded"]["total_bytes"]
+    tiers = {c["tier"] for c in d["largest_contributors"]}
+    assert "on-demand" in tiers
+
+
+def test_context_report_is_read_only_no_venv(tmp_path) -> None:
+    """v3.6.2: `manage.sh context-report` must be side-effect-light — emit JSON, create
+    no venv, no network. (Routed through run_py_system like go-live/doctor.)"""
+    bs = ROOT / "bootstrap.sh"
+    if not bs.exists():
+        return
+    repo = tmp_path / "proj"; repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["bash", str(bs), "--target", str(repo), "--profile", "standard",
+                    "--lang", "none", "--no-doctor"], check=True, capture_output=True, text=True, timeout=120)
+    p = subprocess.run(["bash", str(repo / "manage.sh"), "context-report", "--json"],
+                       cwd=str(repo), capture_output=True, text=True, timeout=30)
+    assert p.returncode == 0, p.stdout + p.stderr
+    json.loads(p.stdout)
+    assert not (repo / ".venv").exists() and not (repo / ".substrate" / "venv").exists()
+
+
+def test_manage_wires_context_report() -> None:
+    """context-report dispatch present in both manage.sh and the template, routed
+    side-effect-light."""
+    for rel in ("manage.sh", "templates/manage.sh.template"):
+        t = (ROOT / rel).read_text(encoding="utf-8")
+        assert "context-report) run_py_system scripts/context_report.py" in t, rel
+
+
 def test_sandbox_env_is_secretless(tmp_path) -> None:
     """v3.5.2: a sandboxed command runs under a SCRUBBED env — secrets stripped,
     SUBSTRATE_SANDBOXED marker set. Skips where no backend is available."""

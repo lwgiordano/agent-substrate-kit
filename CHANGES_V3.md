@@ -1449,6 +1449,32 @@ config gate then passes.
 213 tests. The local/remote/deep map is now fast and the remote-governance authority is
 complete. Next per the roadmap: v3.6.2 `context-report`.
 
+## v3.6.2 — context-report (local token/context-efficiency measurement)
+
+A LOCAL, read-only command that makes the remaining "optimize memory + tokens" goal
+measurable. `./manage.sh context-report [--json]` (new `scripts/context_report.py`,
+routed side-effect-light like go-live/doctor — no network, no token, no venv, no writes)
+reports the agent context footprint split by WHEN it loads:
+
+- **ALWAYS-LOADED (every turn):** CLAUDE.md + AGENTS.md + .claude/settings.json + the
+  skill INDEX (each SKILL.md's `name`+`description` — what a host loads to decide whether
+  to trigger a skill; the body is NOT loaded until invoked). The real per-turn cost.
+- **SESSION:** docs/CURRENT_SESSION.md + todo state (re-injected on compaction).
+- **MEMORY:** the durable event log (not loaded into context, but grows the repo).
+- **ON-DEMAND (progressive disclosure):** skill bodies, subagent defs, knowledge docs,
+  ADRs, postmortems — loaded only when invoked.
+
+Plus the **cache-prefix SHA-256** of CLAUDE.md+AGENTS.md (a byte-stable prefix earns the
+~10x cached-read discount; the hash changes whenever they do), the **largest
+contributors** with their tier, and **recommendations** (trim AGENTS.md if always-loaded
+is heavy; keep the keystone byte-stable; terse handoffs). Token counts are a rough
+~bytes/4 estimate for relative comparison, not billing. On the shipped kit: always-loaded
+≈ 2.2k tok (lean), on-demand ≈ 7.6k tok (progressive disclosure working). 218 tests.
+
+This serves the token-efficiency goal without disturbing the now-solid local/remote/deep
+readiness map — the always-loaded-vs-on-demand split (the core token lever) is now
+visible and measured.
+
 ## Deferred (P2 — documented, not yet built)
 
 These are real improvements the review identified; scoped as future

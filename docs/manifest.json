@@ -32,6 +32,7 @@
         "scripts/check_substrate_config.py",
         "scripts/check_validator_input_coverage.py",
         "scripts/command_policy.py",
+        "scripts/context_report.py",
         "scripts/copilot_hook_adapter.py",
         "scripts/diy_ultrareview.sh",
         "scripts/lang_gate.sh",

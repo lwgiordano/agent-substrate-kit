@@ -121,6 +121,7 @@ case "$cmd" in
   setup) setup ;;
   doctor) run_py_system scripts/substrate_doctor.py "$@" ;;
   go-live) run_py_system scripts/substrate_doctor.py --go-live "$@" ;;
+  context-report) run_py_system scripts/context_report.py "$@" ;;
   enable)
     what="${1:-}"; shift || true
     case "$what" in
@@ -158,10 +159,11 @@ case "$cmd" in
   memory) run_py scripts/memory_log.py "$@" ;;
   design-init) mkdir -p design-system/pages design-system/tokens; echo "design-system/ scaffolded" ;;
   *) cat <<'HELP'
-Usage: ./manage.sh setup|doctor|go-live|enable|check|evals|audit|full-audit|release|manifest|agent-system-audit|handoff|memory|design-init
+Usage: ./manage.sh setup|doctor|go-live|context-report|enable|check|evals|audit|full-audit|release|manifest|agent-system-audit|handoff|memory|design-init
   evals                                       adversarial behavior evals (block-rate / FP-rate, writes a trace)
   doctor [--quick|--security|--operational]   readiness levels
   go-live [--json]                            local/remote/deep readiness map (offline, side-effect-light)
+  context-report [--json]                     token/context footprint: always-loaded vs on-demand, cache prefix
   enable remote [--plan|--write|--check]      turn on the remote-governance tier (CODEOWNERS + trusted-base)
   memory [verify|tail|tasks]                  append-only event log
 Config: .substrate/config (profile, language, LINT_CMD/TYPECHECK_CMD/TEST_CMD indirection)

@@ -31,6 +31,7 @@ covers:
   - scripts/check_substrate_config.py
   - scripts/check_validator_input_coverage.py
   - scripts/command_policy.py
+  - scripts/context_report.py
   - scripts/copilot_hook_adapter.py
   - scripts/diy_ultrareview.sh
   - scripts/lang_gate.sh
@@ -128,3 +129,15 @@ is enabled (or locked) but `.github/workflows/trusted-base-audit.yml` is missing
 gate BLOCKS (the tier can't claim trusted-base authority it lacks). `enable remote
 --write` installs that workflow from `.substrate/trusted-base-audit.yml.template`
 (staged by bootstrap, frozen by the trusted-base audit) — one command, no re-bootstrap.
+
+v3.6.2 adds `context_report.py` (`./manage.sh context-report [--json]`) — a LOCAL,
+read-only token/context-footprint measurement (no network, no token, no venv, no
+writes). It splits context by WHEN it loads: ALWAYS-LOADED per turn (CLAUDE.md +
+AGENTS.md + settings.json + the skill INDEX = each SKILL.md's name+description, since the
+body is on-demand), SESSION (compaction re-injection), MEMORY (durable log), and
+ON-DEMAND (skill bodies, subagent defs, knowledge docs, ADRs — progressive disclosure,
+loaded only when invoked). It reports the cache-prefix SHA-256 of CLAUDE.md+AGENTS.md (a
+byte-stable prefix earns the ~10x cached-read discount), the largest contributors with
+their tier, and recommendations. Token counts are a rough ~bytes/4 estimate for relative
+comparison, not billing. This makes the always-loaded-vs-on-demand split — the core
+token lever — visible and measurable.

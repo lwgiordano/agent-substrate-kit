@@ -1475,6 +1475,44 @@ This serves the token-efficiency goal without disturbing the now-solid local/rem
 readiness map — the always-loaded-vs-on-demand split (the core token lever) is now
 visible and measured.
 
+## v3.6.3 — context-report measurement-semantics fixes (v3.6.2-audit)
+
+A measurement feature must measure the real sources. The audit found three accuracy
+bugs in `context_report.py` (none touching the security core):
+
+**P1 — SESSION tier measured the wrong source of truth.** `session_handoff.py restore`
+re-injects from `.substrate/memory/tasks/current.json` (the STRUCTURED source; "NO
+Markdown fallback" — `docs/CURRENT_SESSION.md` is a derived human view, never
+re-injected). The report had it backwards: it put `current.json` under MEMORY and the
+derived Markdown under SESSION, and even recommended trimming CURRENT_SESSION.md because
+"compaction RE-INJECTS it" — explicitly false. Fixed: SESSION now measures
+`.substrate/memory/tasks/current.json` (+ `docs/.todo_state.json` capture input);
+`docs/CURRENT_SESSION.md` moved to a DERIVED/human-only bucket; `current.json` is
+excluded from the MEMORY glob (no double-count); the recommendation now targets the real
+re-injected file.
+
+**P2 — `.claude/settings.json` was counted as always-loaded prompt tokens.** It is
+harness config (permissions/hooks/env), NOT injected into the model prompt — counting it
+overstated the per-turn cost by ~467 tok. Fixed: settings.json + `.codex/hooks.json` +
+`.github/hooks/*` moved to a RUNTIME CONFIG bucket ("footprint, not prompt tokens").
+Always-loaded prompt context on the kit is now ~1.76k tok (CLAUDE.md + AGENTS.md + skill
+index).
+
+**P2 — not actually read-only.** Importing the sibling `_substrate_root` dropped
+`scripts/__pycache__`. `python -I` (isolated) ignores `PYTHONDONTWRITEBYTECODE`, so the
+env approach is a no-op — fixed IN-SCRIPT with `sys.dont_write_bytecode = True` before the
+local import. Verified: context-report creates no `__pycache__` via either `manage.sh` or
+direct `python -I`. (go-live/doctor are unchanged — they advertise "side-effect-light,"
+not "no writes," and their `__pycache__` is gitignored; chasing it through their
+subprocess tree is out of scope.)
+
+**P3 — cache-prefix wording.** Renamed to KEYSTONE CACHE PREFIX (JSON key
+`keystone_cache_prefix`) with a note that it is the keystone prefix only, not a full
+host-prompt hash (the skill index is also always-loaded but not in the keystone).
+
+Regressions for all four. 222 tests. context-report is now an accurate local
+token/memory-efficiency measurement.
+
 ## Deferred (P2 — documented, not yet built)
 
 These are real improvements the review identified; scoped as future

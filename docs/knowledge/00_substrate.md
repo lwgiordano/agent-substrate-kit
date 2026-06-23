@@ -1,6 +1,6 @@
 ---
 purpose: Universal Agent Substrate Kit v3 files installed in this repo.
-last_human_reviewed: 2026-06-22
+last_human_reviewed: 2026-06-23
 covers:
   - extras/calibrate_diy_ultrareview.py
   - extras/check_license_headers.py
@@ -132,12 +132,22 @@ gate BLOCKS (the tier can't claim trusted-base authority it lacks). `enable remo
 
 v3.6.2 adds `context_report.py` (`./manage.sh context-report [--json]`) — a LOCAL,
 read-only token/context-footprint measurement (no network, no token, no venv, no
-writes). It splits context by WHEN it loads: ALWAYS-LOADED per turn (CLAUDE.md +
-AGENTS.md + settings.json + the skill INDEX = each SKILL.md's name+description, since the
-body is on-demand), SESSION (compaction re-injection), MEMORY (durable log), and
-ON-DEMAND (skill bodies, subagent defs, knowledge docs, ADRs — progressive disclosure,
-loaded only when invoked). It reports the cache-prefix SHA-256 of CLAUDE.md+AGENTS.md (a
-byte-stable prefix earns the ~10x cached-read discount), the largest contributors with
-their tier, and recommendations. Token counts are a rough ~bytes/4 estimate for relative
-comparison, not billing. This makes the always-loaded-vs-on-demand split — the core
-token lever — visible and measurable.
+writes; `sys.dont_write_bytecode=True` is set in-script so importing a sibling can't drop
+a `scripts/__pycache__` — `-I` ignores `PYTHONDONTWRITEBYTECODE`, so the env approach
+would not suffice). v3.6.3 corrected the measurement SEMANTICS (a measurement tool must
+measure the real sources): it classifies by WHEN/HOW context loads —
+- ALWAYS-LOADED PROMPT (per turn): CLAUDE.md + AGENTS.md + the skill INDEX (each
+  SKILL.md's name+description; the body is on-demand).
+- SESSION restore (re-injected at SessionStart): `.substrate/memory/tasks/current.json`
+  — the STRUCTURED source of truth `session_handoff.py restore` reads — plus
+  `docs/.todo_state.json` (capture input).
+- DERIVED / human-only: `docs/CURRENT_SESSION.md` — a generated view, NEVER re-injected.
+- RUNTIME CONFIG (NOT prompt tokens): `.claude/settings.json`, `.codex/hooks.json`,
+  `.github/hooks/*` — read by the harness, not injected into the model prompt.
+- MEMORY: the durable hash-chained log (minus the session SOT, so it is not double-counted).
+- ON-DEMAND: skill bodies, subagent defs, knowledge docs, ADRs (progressive disclosure).
+It reports the KEYSTONE CACHE PREFIX SHA-256 of CLAUDE.md+AGENTS.md (the stable keystone,
+NOT a full host-prompt hash; byte-stable → ~10x cached-read discount), the largest
+contributors with their tier, and recommendations. Token counts are a rough ~bytes/4
+estimate for relative comparison, not billing. This makes the always-loaded-vs-on-demand
+split — the core token lever — visible and accurately measured.

@@ -24,8 +24,10 @@ have_uv=false; [ "$SUBSTRATE_LANG" = python ] && command -v uv >/dev/null 2>&1 &
 # (run first) is the belt to this `-I` suspenders.
 run_py(){ if [ -x "$SUBPY" ]; then "$SUBPY" -I "$@"; elif $have_uv; then uv run python -I "$@"; else python3 -I "$@"; fi; }
 # Side-effect-light runner: substrate venv if present, else system python3 — NO
-# `uv run` fallback, so read-only inspection commands (doctor, go-live) never
-# create a project .venv or print installer noise (v3.3.13 reviewer).
+# `uv run` fallback, so read-only inspection commands (doctor, go-live, context-report)
+# never create a project .venv or print installer noise (v3.3.13 reviewer). NOTE: `-I`
+# (isolated) ignores PYTHON* env vars, so PYTHONDONTWRITEBYTECODE here would be a no-op —
+# the no-__pycache__ guarantee is set IN-SCRIPT via sys.dont_write_bytecode (context_report.py).
 run_py_system(){ if [ -x "$SUBPY" ]; then "$SUBPY" -I "$@"; else python3 -I "$@"; fi; }
 # Run a substrate TOOL (pre-commit). Always the substrate venv.
 subtool(){ local t="$1"; shift || true; if [ -x "$SUBVENV/bin/$t" ]; then "$SUBVENV/bin/$t" "$@"; elif $have_uv; then uv run "$t" "$@"; else "$t" "$@"; fi; }

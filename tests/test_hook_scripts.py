@@ -2567,11 +2567,11 @@ def test_context_report_json_shape() -> None:
                        capture_output=True, text=True, timeout=30)
     assert p.returncode == 0, p.stdout + p.stderr
     d = json.loads(p.stdout)
-    for k in ("always_loaded", "session", "memory", "on_demand", "cache_prefix",
-              "largest_contributors", "recommendations"):
+    for k in ("always_loaded", "session", "derived", "runtime_config", "memory",
+              "on_demand", "keystone_cache_prefix", "largest_contributors", "recommendations"):
         assert k in d, f"missing key {k}"
     assert d["always_loaded"]["est_tokens"] >= 0
-    assert len(d["cache_prefix"]["sha256"]) == 64
+    assert len(d["keystone_cache_prefix"]["sha256"]) == 64
     assert isinstance(d["recommendations"], list) and d["recommendations"]
 
 
@@ -2611,6 +2611,64 @@ def test_context_report_is_read_only_no_venv(tmp_path) -> None:
     assert p.returncode == 0, p.stdout + p.stderr
     json.loads(p.stdout)
     assert not (repo / ".venv").exists() and not (repo / ".substrate" / "venv").exists()
+
+
+def test_context_report_session_uses_structured_current_json(tmp_path) -> None:
+    """v3.6.3 (audit P1): the SESSION tier must measure the ACTUAL restore source of
+    truth (.substrate/memory/tasks/current.json, what session_handoff.py restore reads),
+    NOT the derived human view docs/CURRENT_SESSION.md (never re-injected)."""
+    cr = SCRIPTS / "context_report.py"
+    if not cr.exists():
+        return
+    (tmp_path / ".substrate" / "memory" / "tasks").mkdir(parents=True)
+    (tmp_path / ".substrate" / "memory" / "tasks" / "current.json").write_text("x" * 9000, encoding="utf-8")
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "CURRENT_SESSION.md").write_text("y" * 100, encoding="utf-8")
+    p = subprocess.run([sys.executable, "-I", str(cr), "--root", str(tmp_path), "--json"],
+                       capture_output=True, text=True, timeout=30)
+    d = json.loads(p.stdout)
+    assert ".substrate/memory/tasks/current.json" in d["session"]["files"]
+    assert "docs/CURRENT_SESSION.md" not in d["session"]["files"]
+    assert "docs/CURRENT_SESSION.md" in d["derived"]["files"]
+    # current.json must NOT be double-counted under MEMORY (it is the re-injected SOT)
+    assert not any(c["path"].endswith("tasks/current.json") and c["tier"] == "memory"
+                   for c in d["largest_contributors"])
+    # no recommendation may falsely claim CURRENT_SESSION.md is re-injected
+    assert not any("CURRENT_SESSION" in r and "re-inject" in r.lower() for r in d["recommendations"])
+
+
+def test_context_report_settings_are_runtime_config_not_prompt_context(tmp_path) -> None:
+    """v3.6.3 (audit P2): .claude/settings.json is harness config (permissions/hooks/env),
+    NOT model prompt tokens — it must be in runtime_config, not always-loaded."""
+    cr = SCRIPTS / "context_report.py"
+    if not cr.exists():
+        return
+    (tmp_path / "AGENTS.md").write_text("# A\n", encoding="utf-8")
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude" / "settings.json").write_text('{"hooks":{}}', encoding="utf-8")
+    p = subprocess.run([sys.executable, "-I", str(cr), "--root", str(tmp_path), "--json"],
+                       capture_output=True, text=True, timeout=30)
+    d = json.loads(p.stdout)
+    assert ".claude/settings.json" not in d["always_loaded"]["files"]
+    assert ".claude/settings.json" in d["runtime_config"]["files"]
+
+
+def test_context_report_creates_no_pycache(tmp_path) -> None:
+    """v3.6.3 (audit P2): context-report advertises READ-ONLY. Importing a sibling module
+    must NOT drop scripts/__pycache__ (sys.dont_write_bytecode is set in-script; `-I`
+    ignores PYTHONDONTWRITEBYTECODE so the env approach would not suffice)."""
+    bs = ROOT / "bootstrap.sh"
+    if not bs.exists():
+        return
+    repo = tmp_path / "proj"; repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["bash", str(bs), "--target", str(repo), "--profile", "standard",
+                    "--lang", "none", "--no-doctor"], check=True, capture_output=True, text=True, timeout=120)
+    import shutil as _sh
+    _sh.rmtree(repo / "scripts" / "__pycache__", ignore_errors=True)
+    subprocess.run(["bash", str(repo / "manage.sh"), "context-report", "--json"],
+                   cwd=str(repo), check=True, capture_output=True, text=True, timeout=30)
+    assert not (repo / "scripts" / "__pycache__").exists(), "context-report wrote __pycache__ (not read-only)"
 
 
 def test_manage_wires_context_report() -> None:

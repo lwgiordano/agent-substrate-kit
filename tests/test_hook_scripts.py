@@ -3004,6 +3004,31 @@ def test_evals_report_writes_reproducible_benchmark() -> None:
             bench.write_text(pre, encoding="utf-8")
 
 
+def test_fast_report_lists_only_executed_tasks() -> None:
+    """v3.7.1 (audit P2): a --fast --report BENCHMARK.md must label its Mode and list
+    ONLY the tasks actually executed (the in-process subset) — not the full registry,
+    which would advertise heavy tasks it never ran (a misleading benchmark)."""
+    rs = SCRIPTS / "run_substrate_evals.py"
+    if not rs.exists():
+        return
+    bench = ROOT / "BENCHMARK.md"
+    pre = bench.read_text(encoding="utf-8") if bench.exists() else None
+    try:
+        p = subprocess.run([sys.executable, "-I", str(rs), "--fast", "--no-trace", "--report"],
+                           capture_output=True, text=True, timeout=120)
+        assert p.returncode == 0, p.stdout + p.stderr
+        text = bench.read_text(encoding="utf-8")
+        assert "**Mode:** fast" in text, text[:400]
+        assert "FAST mode" in text, "fast report must carry the in-process-subset caveat"
+        assert "`exfil_secret_read`" in text, "an in-process task must be listed"
+        assert "`hook_neuter`" not in text, "a heavy task NOT run in fast mode must not be listed"
+    finally:
+        if pre is not None:
+            bench.write_text(pre, encoding="utf-8")
+        elif bench.exists():
+            bench.unlink()  # leave a bootstrapped/throwaway repo clean
+
+
 def test_config_key_allowlists_agree() -> None:
     """The shell loader (_substrate_config.sh, sourced by manage.sh on every
     call) and the Python validator (check_substrate_config.py) must accept the

@@ -1532,6 +1532,22 @@ where they are measured, not transcribed into prose that goes stale. This matche
 older entries' "N tests pass from the extracted artifact" phrasing and the kit's
 no-overclaim discipline applied to its own release notes.
 
+## v3.7.1 — benchmark-report correctness (v3.7.0-audit P2)
+
+A measurement tool must not mislabel its own measurement. `--fast --report` produced a
+BENCHMARK.md whose metrics were the in-process subset but whose **task list was the full
+registry** — advertising heavy tasks it never ran. `_write_benchmark()` derived the task
+lists from the global `TASKS` instead of the `results` actually executed.
+
+Fix: the report now (a) derives the Malicious/Benign task lists from `results` (only tasks
+that actually ran, skips split out), (b) records a **Mode: full|fast** line, and (c) in
+fast mode carries an explicit "in-process subset only — run without `--fast` for the
+published suite" caveat. The committed BENCHMARK.md is regenerated in **full** mode and is
+unchanged in substance (it gains the `Mode: full` line). Regression
+`test_fast_report_lists_only_executed_tasks` asserts a fast report is labeled fast, lists
+an in-process task, and does NOT list a heavy task. Docs/behavior otherwise unchanged;
+Phases B/D/E remain deferred.
+
 ## v3.7.0 — adversarial eval coverage (the "talk the gatekeeper out of it" threat)
 
 Phase 1 of the satire-derived hardening (CVE-2026-LGTM): *measure* that the story's

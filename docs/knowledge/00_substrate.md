@@ -162,3 +162,9 @@ allowlist sourced only from `.substrate/sandbox.json`) and the `[SYSTEM: …]` a
 (planted CURRENT_SESSION.md never restored). BENCHMARK.md gains an Adversarial-context
 section — staged artifacts do NOT alter the gates' decisions, explicitly NOT a claim that
 injection is "solved." Additive only: no config flag, no network, no external tool.
+
+v3.7.1 fixes a benchmark-report correctness bug: `_write_benchmark` derived its task list
+from the global `TASKS` registry, so `--fast --report` listed heavy tasks it never ran.
+The report now derives Malicious/Benign lists from the `results` actually executed, records
+a `Mode: full|fast` line, and carries an in-process-subset caveat in fast mode. The
+committed BENCHMARK.md is generated in full mode.

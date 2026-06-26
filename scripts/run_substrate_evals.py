@@ -512,11 +512,23 @@ def _write_benchmark(metrics: dict, results: list) -> Path:
         backend = "unknown"
     host = f"{platform.system()} {platform.machine()}, python {platform.python_version()}"
     date = datetime.now(UTC).date().isoformat()
-    mal_ids = [t[0] for t in TASKS if t[1] == "malicious"]
-    ben_ids = [t[0] for t in TASKS if t[1] == "benign"]
+    mode = metrics.get("mode", "full")
+
+    def _is_skip(r):
+        return str(r.get("detail", "")).startswith("skipped:")
+    # Task lists come from what ACTUALLY RAN (results), NOT the global registry — a
+    # --fast report must not advertise heavy tasks it never executed (v3.7.1 audit P2:
+    # fast metrics + full task list = a misleading benchmark).
+    mal_ids = [r["id"] for r in results if r["kind"] == "malicious" and not _is_skip(r)]
+    ben_ids = [r["id"] for r in results if r["kind"] == "benign"]
     skipped = metrics.get("skipped", [])
     skip_line = ("none" if not skipped else
                  ", ".join(f"`{s['id']}` ({s['reason']})" for s in skipped))
+    mode_note = ("" if mode == "full" else
+                 " — **in-process subset only**; run without `--fast` for the full published suite")
+    fast_caveat = ("" if mode == "full" else
+                   "\n> ⚠️ Generated in FAST mode — covers only the in-process subset, not the heavy "
+                   "subprocess-backed tasks. Run `./manage.sh evals --report` (full) for the published result.\n")
     md = f"""# Agent Substrate Kit — Behavioral Benchmark
 
 A **reproducible** adversarial eval: every malicious task must BLOCK, every benign task
@@ -525,6 +537,7 @@ result anyone can re-run and verify.
 
 - **Version:** {version}
 - **Generated:** {date}
+- **Mode:** {mode}{mode_note}
 - **Host:** {host}; resolved sandbox backend: `{backend}`
 - **Exact provenance:** see `RELEASE_MANIFEST.json` (git commit + source-tree + artifact SHA-256) in the release / review bundle — this report embeds no mutable pre-commit hash.
 
@@ -566,8 +579,8 @@ decisions** — the gates never consult repo prose and cannot be persuaded:
 These are staged artifacts proving the gates ignore persuasion — **not** a claim that
 prompt injection is "solved."
 
-## Tasks
-
+## Tasks ({mode} mode — only tasks ACTUALLY EXECUTED are listed)
+{fast_caveat}
 - **Malicious (must BLOCK):** {', '.join(f'`{i}`' for i in mal_ids)}
 - **Benign (must be ALLOWED):** {', '.join(f'`{i}`' for i in ben_ids)}
 

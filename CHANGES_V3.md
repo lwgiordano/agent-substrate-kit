@@ -1532,6 +1532,10 @@ where they are measured, not transcribed into prose that goes stale. This matche
 older entries' "N tests pass from the extracted artifact" phrasing and the kit's
 no-overclaim discipline applied to its own release notes.
 
+## v3.7.3 — test hygiene (remove shadowed duplicate test)
+
+`tests/test_hook_scripts.py` defined `test_config_key_allowlists_agree` twice; Python kept only the second (comprehensive, iterates `check_substrate_config._ALLOWED_KEYS`), so the first (a short hardcoded-key copy) was dead code pytest never collected. Deleted the shadowed first definition — no behavior change, suite still green (one collected copy).
+
 ## v3.7.2 — dependency-cooldown gate (Phase B; fresh-version risk signal)
 
 Phase B of the satire-derived hardening: the malicious `foxhole-lz4@0.5.0` was hours old.

@@ -2275,18 +2275,6 @@ def test_config_accepts_and_validates_remote_governance_flag(tmp_path) -> None:
     assert bad.returncode == 2, "invalid SUBSTRATE_REMOTE_GOVERNANCE must be rejected"
 
 
-def test_config_key_allowlists_agree() -> None:
-    """The bash loader and the Python validator MUST recognize the same config keys
-    + enum values — drift here is the v3.4.2 bug class (a flag honored by one
-    validator and silently dropped by the other). Asserts the new remote-governance
-    flag is mirrored in both."""
-    sh = (SCRIPTS / "_substrate_config.sh").read_text(encoding="utf-8")
-    py = (SCRIPTS / "check_substrate_config.py").read_text(encoding="utf-8")
-    for key in ("SUBSTRATE_SANDBOX", "SUBSTRATE_REMOTE_GOVERNANCE"):
-        assert key in sh, f"{key} missing from _substrate_config.sh"
-        assert key in py, f"{key} missing from check_substrate_config.py"
-
-
 def test_required_remote_governance_lock_blocks_disabling(tmp_path) -> None:
     """v3.6.0: when .substrate/required_remote_governance=1, a config with
     SUBSTRATE_REMOTE_GOVERNANCE=0 must BLOCK — remote governance is a frozen

@@ -204,7 +204,7 @@ if [ "$UI_ENABLED" == "yes" ]; then mkdir -p design-system/pages design-system/t
 
 TODO.' > design-system/MASTER.md; echo "    +    design-system/MASTER.md"; }; fi
 if [ ! -e .gitattributes ] || ! grep -q 'docs/HISTORY.md' .gitattributes; then echo 'docs/HISTORY.md merge=union' >> .gitattributes; echo "    +    .gitattributes"; fi
-[ -e .gitignore ] || touch .gitignore; for line in docs/CURRENT_SESSION.md docs/.todo_state.json .substrate/memory/tasks/ .substrate/traces/ .substrate/venv/ 'ai/audits/*/audit-report.json' __pycache__/ .venv/ .pytest_cache/ .ruff_cache/ .mypy_cache/ node_modules/ dist/ build/; do grep -qxF "$line" .gitignore || echo "$line" >> .gitignore; done
+[ -e .gitignore ] || touch .gitignore; for line in docs/CURRENT_SESSION.md docs/.todo_state.json .substrate/memory/tasks/ .substrate/traces/ .substrate/venv/ .substrate/dep_cooldown_cache.json 'ai/audits/*/audit-report.json' __pycache__/ .venv/ .pytest_cache/ .ruff_cache/ .mypy_cache/ node_modules/ dist/ build/; do grep -qxF "$line" .gitignore || echo "$line" >> .gitignore; done
 [ -e docs/.todo_state.json ] || echo '{"version":1,"items":[]}' > docs/.todo_state.json
 python3 scripts/update_manifest.py --fix >/dev/null || python scripts/update_manifest.py --fix >/dev/null
 [ "$INSTALL_TOOLS" == "yes" ] && ./manage.sh setup || true

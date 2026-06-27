@@ -19,6 +19,7 @@ TEST_CMD="${TEST_CMD:-}"
 SUBSTRATE_CODE_SUFFIXES="${SUBSTRATE_CODE_SUFFIXES:-}"
 SUBSTRATE_SANDBOX="${SUBSTRATE_SANDBOX:-0}"
 SUBSTRATE_REMOTE_GOVERNANCE="${SUBSTRATE_REMOTE_GOVERNANCE:-0}"
+SUBSTRATE_DEP_COOLDOWN="${SUBSTRATE_DEP_COOLDOWN:-0}"
 
 # Balanced-quote check. Returns 0 if quoting is balanced (no surrounding
 # quote, OR a matching pair), 1 if a lone leading/trailing quote makes the
@@ -66,7 +67,7 @@ load_substrate_config() {
     fi
     key="${line%%=*}"; raw="${line#*=}"
     case "$key" in
-      SUBSTRATE_PROFILE|SUBSTRATE_LANG|SUBSTRATE_RUNNER|LINT_CMD|TYPECHECK_CMD|TEST_CMD|SUBSTRATE_CODE_SUFFIXES|SUBSTRATE_SANDBOX|SUBSTRATE_REMOTE_GOVERNANCE) ;;
+      SUBSTRATE_PROFILE|SUBSTRATE_LANG|SUBSTRATE_RUNNER|LINT_CMD|TYPECHECK_CMD|TEST_CMD|SUBSTRATE_CODE_SUFFIXES|SUBSTRATE_SANDBOX|SUBSTRATE_REMOTE_GOVERNANCE|SUBSTRATE_DEP_COOLDOWN) ;;
       *) echo "substrate-config: unknown key: $key" >&2; return 2;;
     esac
     # reject ambiguous quoting (e.g. SUBSTRATE_PROFILE="strict with no close)
@@ -102,6 +103,10 @@ load_substrate_config() {
       SUBSTRATE_REMOTE_GOVERNANCE)
         case "$val" in 0|1) ;;
           *) echo "substrate-config: invalid $key: $val" >&2; return 2;; esac;;
+      SUBSTRATE_DEP_COOLDOWN)
+        # non-negative integer (days). 0 = off. Kept in lockstep with
+        # check_substrate_config.py:_INT_KEYS.
+        case "$val" in ''|*[!0-9]*) echo "substrate-config: invalid $key: $val (want non-negative integer days)" >&2; return 2;; esac;;
     esac
     printf -v "$key" '%s' "$val"
   done < "$cfg"

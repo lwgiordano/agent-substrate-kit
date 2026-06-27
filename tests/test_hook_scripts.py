@@ -3029,6 +3029,125 @@ def test_fast_report_lists_only_executed_tasks() -> None:
             bench.unlink()  # leave a bootstrapped/throwaway repo clean
 
 
+# --- v3.7.2: dependency-cooldown gate (Phase B; opt-in, networked, skip-honest) ---
+
+def _ccfg(tmp_path):
+    sub = tmp_path / ".substrate"; sub.mkdir(exist_ok=True)
+    return sub
+
+
+def test_config_dep_cooldown_int_validated(tmp_path) -> None:
+    """SUBSTRATE_DEP_COOLDOWN is a non-negative integer (days) in BOTH validators."""
+    cc = SCRIPTS / "check_substrate_config.py"
+    if not cc.exists():
+        return
+    sub = _ccfg(tmp_path); cfg = sub / "config"
+    cfg.write_text('SUBSTRATE_PROFILE="standard"\nSUBSTRATE_DEP_COOLDOWN="7"\n', encoding="utf-8")
+    ok = subprocess.run([sys.executable, "-I", str(cc)], cwd=str(tmp_path), capture_output=True, text=True, timeout=30)
+    assert ok.returncode == 0, ok.stdout + ok.stderr
+    for bad in ("x", "-1", "7.5"):
+        cfg.write_text(f'SUBSTRATE_DEP_COOLDOWN="{bad}"\n', encoding="utf-8")
+        r = subprocess.run([sys.executable, "-I", str(cc)], cwd=str(tmp_path), capture_output=True, text=True, timeout=30)
+        assert r.returncode == 2, f"{bad!r} must be rejected"
+
+
+def test_dep_cooldown_disabled_is_noop(tmp_path) -> None:
+    dc = SCRIPTS / "check_dep_cooldown.py"
+    if not dc.exists():
+        return
+    _ccfg(tmp_path)  # no flag -> 0
+    r = subprocess.run([sys.executable, "-I", str(dc), "--root", str(tmp_path)],
+                       capture_output=True, text=True, timeout=20)
+    assert r.returncode == 0 and "disabled" in r.stdout
+
+
+def _go_mod_repo(tmp_path):
+    (tmp_path / "go.mod").write_text(
+        "module x\n\ngo 1.21\n\nrequire (\n\tgithub.com/foo/bar v1.2.3\n"
+        "\tgithub.com/old/dep v0.9.0 // indirect\n)\n", encoding="utf-8")
+    _ccfg(tmp_path)
+
+
+def _seed_cache(tmp_path, key, age_days):
+    from datetime import datetime, timezone, timedelta
+    now = datetime.now(timezone.utc)
+    (tmp_path / ".substrate" / "dep_cooldown_cache.json").write_text(
+        json.dumps({key: {"published_at": (now - timedelta(days=age_days)).isoformat(), "source": "go"}}),
+        encoding="utf-8")
+
+
+def test_dep_cooldown_flags_young(tmp_path) -> None:
+    """A direct dep whose cached publish date is younger than the cooldown window → rc1."""
+    dc = SCRIPTS / "check_dep_cooldown.py"
+    if not dc.exists():
+        return
+    _go_mod_repo(tmp_path)
+    _seed_cache(tmp_path, "go:github.com/foo/bar@v1.2.3", age_days=0.2)
+    r = subprocess.run([sys.executable, "-I", str(dc), "--root", str(tmp_path), "--days", "7", "--offline"],
+                       capture_output=True, text=True, timeout=20)
+    assert r.returncode == 1 and "YOUNG" in r.stdout, r.stdout + r.stderr
+
+
+def test_dep_cooldown_old_passes_and_direct_only(tmp_path) -> None:
+    """An old cached dep passes; the // indirect dep is NOT checked (direct-only v1)."""
+    dc = SCRIPTS / "check_dep_cooldown.py"
+    if not dc.exists():
+        return
+    _go_mod_repo(tmp_path)
+    _seed_cache(tmp_path, "go:github.com/foo/bar@v1.2.3", age_days=30)
+    r = subprocess.run([sys.executable, "-I", str(dc), "--root", str(tmp_path), "--days", "7", "--offline", "--json"],
+                       capture_output=True, text=True, timeout=20)
+    assert r.returncode == 0
+    d = json.loads(r.stdout)
+    assert d["checked"] == 1 and d["young"] == []
+    assert not any("old/dep" in s["id"] for s in d["skipped"]), "indirect dep must not be evaluated"
+
+
+def test_dep_cooldown_offline_skips_unless_required(tmp_path) -> None:
+    """Offline + uncached → SKIP-honest (rc0); same + --require → BLOCK (rc1)."""
+    dc = SCRIPTS / "check_dep_cooldown.py"
+    if not dc.exists():
+        return
+    _go_mod_repo(tmp_path)  # no cache
+    r = subprocess.run([sys.executable, "-I", str(dc), "--root", str(tmp_path), "--days", "7", "--offline"],
+                       capture_output=True, text=True, timeout=20)
+    assert r.returncode == 0 and "SKIP" in r.stdout, r.stdout
+    r2 = subprocess.run([sys.executable, "-I", str(dc), "--root", str(tmp_path), "--days", "7", "--offline", "--require"],
+                        capture_output=True, text=True, timeout=20)
+    assert r2.returncode == 1, "required + unverifiable must BLOCK"
+
+
+def test_required_dep_cooldown_lock_blocks_disabling(tmp_path) -> None:
+    """v3.7.2: required_dep_cooldown=1 + SUBSTRATE_DEP_COOLDOWN=0 must BLOCK the config gate."""
+    cc = SCRIPTS / "check_substrate_config.py"
+    if not cc.exists():
+        return
+    sub = _ccfg(tmp_path)
+    (sub / "config").write_text('SUBSTRATE_PROFILE="standard"\nSUBSTRATE_DEP_COOLDOWN="0"\n', encoding="utf-8")
+    (sub / "required_dep_cooldown").write_text("1\n", encoding="utf-8")
+    r = subprocess.run([sys.executable, "-I", str(cc)], cwd=str(tmp_path), capture_output=True, text=True, timeout=30)
+    assert r.returncode == 2 and "required minimum" in (r.stdout + r.stderr)
+
+
+def test_go_live_has_dep_cooldown_deep_row() -> None:
+    sd = SCRIPTS / "substrate_doctor.py"
+    if not sd.exists():
+        return
+    p = subprocess.run([sys.executable, "-I", str(sd), "--go-live", "--json"],
+                       capture_output=True, text=True, timeout=90)
+    d = json.loads(p.stdout)
+    row = next((c for c in d["checks"] if c["id"] == "dep_cooldown"), None)
+    assert row is not None and row["tier"] == "deep"
+
+
+def test_trusted_base_freezes_dep_cooldown() -> None:
+    tpl = ROOT / "workflows" / "trusted-base-audit.yml.template"
+    if not tpl.exists():
+        return
+    t = tpl.read_text(encoding="utf-8")
+    assert ".substrate/required_dep_cooldown" in t and "SUBSTRATE_DEP_COOLDOWN=" in t
+
+
 def test_config_key_allowlists_agree() -> None:
     """The shell loader (_substrate_config.sh, sourced by manage.sh on every
     call) and the Python validator (check_substrate_config.py) must accept the

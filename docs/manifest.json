@@ -15,6 +15,7 @@
         "scripts/check_agent_harness.py",
         "scripts/check_bandit_skip_baseline.py",
         "scripts/check_coverage_floors.py",
+        "scripts/check_dep_cooldown.py",
         "scripts/check_doc_drift.py",
         "scripts/check_exfil_guard.py",
         "scripts/check_finding_response.py",
@@ -52,7 +53,7 @@
         "scripts/todo_state_hook.py",
         "scripts/update_manifest.py"
       ],
-      "last_human_reviewed": "2026-06-26",
+      "last_human_reviewed": "2026-06-27",
       "path": "docs/knowledge/00_substrate.md",
       "purpose": "Universal Agent Substrate Kit v3 files installed in this repo."
     }

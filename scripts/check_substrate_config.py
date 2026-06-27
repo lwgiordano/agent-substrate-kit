@@ -43,7 +43,11 @@ except Exception as _e:  # pragma: no cover - exercised via staged broken module
 
 _ALLOWED_KEYS = {"SUBSTRATE_PROFILE", "SUBSTRATE_LANG", "SUBSTRATE_RUNNER",
                  "LINT_CMD", "TYPECHECK_CMD", "TEST_CMD", "SUBSTRATE_CODE_SUFFIXES",
-                 "SUBSTRATE_SANDBOX", "SUBSTRATE_REMOTE_GOVERNANCE"}
+                 "SUBSTRATE_SANDBOX", "SUBSTRATE_REMOTE_GOVERNANCE", "SUBSTRATE_DEP_COOLDOWN"}
+# Non-negative-integer keys (validated numerically, not against a fixed enum domain).
+# SUBSTRATE_DEP_COOLDOWN=N opts into the dependency-cooldown tier — flag direct deps
+# whose resolved version published < N days ago (a fresh-version risk signal). 0 = off. v3.7.2.
+_INT_KEYS = {"SUBSTRATE_DEP_COOLDOWN"}
 _ENUMS = {
     "SUBSTRATE_PROFILE": {"starter", "standard", "strict"},
     "SUBSTRATE_LANG": {"python", "node", "go", "none"},
@@ -137,6 +141,20 @@ def _required_remote_governance():
     return val if val in {"0", "1"} else None
 
 
+def _required_dep_cooldown():
+    """The pinned dependency-cooldown requirement (.substrate/required_dep_cooldown):
+    '0'/'1' or None. When '1', the cooldown tier may not be disabled (flag set to 0).
+    Frozen by the trusted-base guard, like the other locks. v3.7.2."""
+    p = ROOT / ".substrate" / "required_dep_cooldown"
+    if not p.is_file():
+        return None
+    try:
+        val = p.read_text(encoding="utf-8").strip()
+    except Exception:
+        return None
+    return val if val in {"0", "1"} else None
+
+
 def _strip_quotes_checked(raw: str, key: str):
     """Returns (value, error). Rejects unbalanced quotes."""
     v = raw.strip()
@@ -186,6 +204,10 @@ def main() -> int:
         if key in _ENUMS and val not in _ENUMS[key]:
             print(f"check-substrate-config: invalid {key}: {val}", file=sys.stderr)
             return 2
+        # integer-valued keys (e.g. cooldown days) must be non-negative ints.
+        if key in _INT_KEYS and not val.isdigit():
+            print(f"check-substrate-config: invalid {key}: {val} (want non-negative integer)", file=sys.stderr)
+            return 2
         vals[key] = val
     profile = vals.get("SUBSTRATE_PROFILE", "standard")
     # PROFILE LOCK: a repo may RAISE its profile but never silently LOWER it.
@@ -224,6 +246,14 @@ def main() -> int:
     if req_rg == "1" and remote_gov_on != "1":
         print('check-substrate-config: SUBSTRATE_REMOTE_GOVERNANCE must be "1" — remote '
               "governance is a required minimum (.substrate/required_remote_governance=1); "
+              "a PR may not disable it", file=sys.stderr)
+        return 2
+    # DEPENDENCY-COOLDOWN LOCK (v3.7.2). When .substrate/required_dep_cooldown=1, the
+    # cooldown tier may not be silently disabled — SUBSTRATE_DEP_COOLDOWN must be > 0.
+    req_dc = _required_dep_cooldown()
+    if req_dc == "1" and vals.get("SUBSTRATE_DEP_COOLDOWN", "0") == "0":
+        print('check-substrate-config: SUBSTRATE_DEP_COOLDOWN must be > 0 — the dependency-'
+              "cooldown tier is a required minimum (.substrate/required_dep_cooldown=1); "
               "a PR may not disable it", file=sys.stderr)
         return 2
     sbx_det = Path(__file__).resolve().parent / "sandbox_detect.py"

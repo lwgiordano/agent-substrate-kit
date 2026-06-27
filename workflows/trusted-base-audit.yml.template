@@ -42,7 +42,7 @@ jobs:
           # profile). NOT the audited DATA/content — harness_patterns.json is
           # .json (data) and AGENTS.md / docs / .substrate/config (command
           # values) may change. (v3.2.19/20 findings.)
-          TRUSTED="scripts manage.sh .pre-commit-config.yaml .github/workflows .substrate/required_profile .substrate/required_sandbox .substrate/required_remote_governance .substrate/trusted-base-audit.yml.template"
+          TRUSTED="scripts manage.sh .pre-commit-config.yaml .github/workflows .substrate/required_profile .substrate/required_sandbox .substrate/required_remote_governance .substrate/required_dep_cooldown .substrate/trusted-base-audit.yml.template"
           # carve the one DATA file back out of scripts/ (PRs may extend it; the
           # frozen check_harness_patterns.py validates it against pinned hashes).
           changed="$(git diff --name-only "origin/${{ github.base_ref }}...HEAD" -- $TRUSTED \
@@ -86,7 +86,16 @@ jobs:
             echo "::error::Disabling it must route through the release process."
             exit 1
           fi
-          echo "freeze-guard: ok — no frozen policy/validator/CI/profile/sandbox/remote-governance change"
+          # Dependency-cooldown authority (v3.7.2): frozen when required_dep_cooldown=1 —
+          # a PR must not silently disable the fresh-version risk signal.
+          if git diff "origin/${{ github.base_ref }}...HEAD" -- .substrate/config \
+               | grep -Eq '^[+-]\s*SUBSTRATE_DEP_COOLDOWN='; then
+            echo "::error::This PR changes SUBSTRATE_DEP_COOLDOWN in .substrate/config."
+            echo "::error::Dependency cooldown is frozen when .substrate/required_dep_cooldown=1."
+            echo "::error::Disabling it must route through the release process."
+            exit 1
+          fi
+          echo "freeze-guard: ok — no frozen policy/validator/CI/profile/sandbox/remote-governance/cooldown change"
       - name: Run the (frozen) validators + strict governance against PR content
         run: |
           set -euo pipefail

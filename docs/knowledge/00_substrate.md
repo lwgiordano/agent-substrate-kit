@@ -1,6 +1,6 @@
 ---
 purpose: Universal Agent Substrate Kit v3 files installed in this repo.
-last_human_reviewed: 2026-06-26
+last_human_reviewed: 2026-06-27
 covers:
   - extras/calibrate_diy_ultrareview.py
   - extras/check_license_headers.py
@@ -14,6 +14,7 @@ covers:
   - scripts/check_agent_harness.py
   - scripts/check_bandit_skip_baseline.py
   - scripts/check_coverage_floors.py
+  - scripts/check_dep_cooldown.py
   - scripts/check_doc_drift.py
   - scripts/check_exfil_guard.py
   - scripts/check_finding_response.py
@@ -168,3 +169,18 @@ from the global `TASKS` registry, so `--fast --report` listed heavy tasks it nev
 The report now derives Malicious/Benign lists from the `results` actually executed, records
 a `Mode: full|fast` line, and carries an in-process-subset caveat in fast mode. The
 committed BENCHMARK.md is generated in full mode.
+
+v3.7.2 adds Phase B of the satire-derived hardening: the dependency-cooldown gate
+(`check_dep_cooldown.py`, opt-in `SUBSTRATE_DEP_COOLDOWN=N` days, 0=off). It flags DIRECT
+deps whose resolved version published < N days ago — a FRESH-VERSION RISK SIGNAL (the
+window a malicious new fork/typosquat exploits), explicitly NOT a malware detector. The
+RULE is a deterministic date comparison; the DATA (publish dates) is registry metadata
+(network), so it is an opt-in DEEP tier, never part of the offline base — `manage.sh
+check` runs it only when the flag is > 0. SKIP-HONEST: a dep whose publish time can't be
+determined (offline, uncached, registry-ambiguous) is SKIPPED with a reason, never
+assumed young; results cache to `.substrate/dep_cooldown_cache.json` (gitignored;
+publish dates are immutable). Direct deps only (npm package.json+lock / pyproject+uv.lock
+/ go.mod non-indirect); transitive is a later mode. Exit 0 (clean / skips-only) | 1
+(young found, or required+unverifiable) | 2 (malformed lockfile/config). Mirrored in both
+validators (`_INT_KEYS`), lockable via `.substrate/required_dep_cooldown` (frozen by the
+trusted-base audit), and surfaced as a go-live deep row.

@@ -1532,6 +1532,39 @@ where they are measured, not transcribed into prose that goes stale. This matche
 older entries' "N tests pass from the extracted artifact" phrasing and the kit's
 no-overclaim discipline applied to its own release notes.
 
+## v3.7.2 — dependency-cooldown gate (Phase B; fresh-version risk signal)
+
+Phase B of the satire-derived hardening: the malicious `foxhole-lz4@0.5.0` was hours old.
+A deterministic timing gate closes that window — **opt-in**, **deep-tier**, **skip-honest**.
+
+New `scripts/check_dep_cooldown.py` + `SUBSTRATE_DEP_COOLDOWN=N` (days, 0=off). Flags
+DIRECT dependencies whose resolved version published < N days ago. Framed precisely as a
+**fresh-version risk signal**, NOT a malware detector — it catches suspicious
+freshness/typosquat/new-fork timing; it does NOT catch old compromised versions,
+maintainer takeover, or anything shipped after the window elapses.
+
+Design honors every base invariant:
+- The RULE is a deterministic date comparison; the DATA (publish dates) is registry
+  metadata = network, so it is an opt-in DEEP tier — `manage.sh check` runs it ONLY when
+  the flag is > 0, and the offline base is untouched.
+- **SKIP-HONEST:** off → no-op; on + offline/uncached/registry-ambiguous → SKIP with a
+  reason (never assumed young, never silently passed); on + `--require` (or
+  `.substrate/required_dep_cooldown=1`) + unverifiable → BLOCK.
+- Direct deps only for v1 (npm `package.json`+`package-lock.json` / `pyproject.toml`+`uv.lock`
+  / `go.mod` non-`// indirect`); transitive is a later mode. Sources: npm `registry.npmjs.org`,
+  PyPI JSON API, Go module proxy. Conservative — unavailable/ambiguous publish time → SKIP,
+  never infer.
+- Cache `.substrate/dep_cooldown_cache.json` (gitignored; publish dates are immutable).
+- Exit 0 (clean / skips-only non-required) | 1 (young found, or required+unverifiable) | 2
+  (malformed lockfile/config).
+
+Wiring follows the shipped flag pattern: mirrored in BOTH validators (new `_INT_KEYS`
+numeric domain) with the `test_config_key_allowlists_agree` gate; lockable via
+`.substrate/required_dep_cooldown` (frozen by the trusted-base audit, with a
+`SUBSTRATE_DEP_COOLDOWN=` diff guard); a go-live **deep** row (offline — reports the flag
+state, never runs the networked check). Phases D/E (MCP declaration pinning, scanner tier)
+remain deferred, one flag added when its feature lands.
+
 ## v3.7.1 — benchmark-report correctness (v3.7.0-audit P2)
 
 A measurement tool must not mislabel its own measurement. `--fast --report` produced a

@@ -70,6 +70,16 @@ def _remote_governance():
             if line.split('#',1)[0].strip().startswith('SUBSTRATE_REMOTE_GOVERNANCE='):
                 return line.split('=',1)[1].split('#',1)[0].strip().strip('"\'')
     return '0'
+def _dep_cooldown_days():
+    """SUBSTRATE_DEP_COOLDOWN (int days, 0=off) from .substrate/config. v3.7.2 — the
+    cooldown deep tier. go-live reports it OFFLINE (never runs the networked check)."""
+    cfg=ROOT/'.substrate/config'
+    if cfg.exists():
+        for line in cfg.read_text(encoding='utf-8',errors='replace').splitlines():
+            if line.split('#',1)[0].strip().startswith('SUBSTRATE_DEP_COOLDOWN='):
+                v=line.split('=',1)[1].split('#',1)[0].strip().strip('"\'')
+                return int(v) if v.isdigit() else 0
+    return 0
 def _required_remote_governance():
     """.substrate/required_remote_governance ('0'/'1' or None) — the pinned remote-
     governance minimum, frozen by the trusted-base audit. v3.6.1."""
@@ -374,6 +384,12 @@ def _go_live(blocks, warns, as_json=False):
     checks.append({'id': 'github_governance', 'tier': 'remote', 'status': 'warn',
                    'reason': 'live branch protection not verifiable offline; run `./manage.sh enable remote --check` (needs an admin-readable token in CI)'})
     # --- deep options (optional rungs; never block hardening) ---
+    _dc = _dep_cooldown_days()
+    checks.append({'id': 'dep_cooldown', 'tier': 'deep',
+                   'status': 'pass' if _dc > 0 else 'available',
+                   'reason': (f'enabled ({_dc}d); flags fresh direct deps in `manage.sh check` (networked, skip-honest)'
+                              if _dc > 0 else
+                              'not enabled — set SUBSTRATE_DEP_COOLDOWN=N to flag direct deps published < N days ago')})
     checks.append({'id': 'security_scanners', 'tier': 'deep', 'status': 'available',
                    'reason': 'Semgrep/Gitleaks/Trivy not wired — future `enable security` rung'})
     checks.append({'id': 'deep_audit', 'tier': 'deep', 'status': 'available',

@@ -147,6 +147,9 @@ case "$cmd" in
     run_py scripts/check_hook_smoke.py                # hooks actually DENY (compile-clean but neutered hook)
     run_py scripts/check_agent_harness.py
     run_py scripts/check_substrate_config.py   # reject dangerous LINT/TEST values before they run
+    # Dependency-cooldown tier (v3.7.2): opt-in fresh-version risk signal. Networked +
+    # skip-honest; only runs when SUBSTRATE_DEP_COOLDOWN>0, so the base check stays offline.
+    if [ "${SUBSTRATE_DEP_COOLDOWN:-0}" != "0" ]; then run_py scripts/check_dep_cooldown.py; fi
     run_lang "lint" "$LINT_CMD"
     run_lang "typecheck" "$TYPECHECK_CMD"
     run_lang "test" "$TEST_CMD"

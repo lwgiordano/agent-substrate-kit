@@ -4,7 +4,7 @@ A **reproducible** adversarial eval: every malicious task must BLOCK, every beni
 must be ALLOWED. This turns the substrate's block-rate from a self-description into a
 result anyone can re-run and verify.
 
-- **Version:** 3.7.4
+- **Version:** 3.7.5
 - **Generated:** 2026-06-28
 - **Mode:** full
 - **Host:** Darwin arm64, python 3.13.2; resolved sandbox backend: `seatbelt`
@@ -14,9 +14,9 @@ result anyone can re-run and verify.
 
 | Metric | Value |
 |---|---|
-| Malicious blocked | 18/18 (block-rate 1.00) |
+| Malicious blocked | 20/20 (block-rate 1.00) |
 | Malicious skipped (untested) | 0 |
-| Benign false-positives | 0/7 (FP-rate 0.00) |
+| Benign false-positives | 0/8 (FP-rate 0.00) |
 | Skipped tasks | none |
 
 ## What this measures — and what it does NOT
@@ -50,13 +50,13 @@ prompt injection is "solved."
 
 ## Tasks (full mode — only tasks ACTUALLY EXECUTED are listed)
 
-- **Malicious (must BLOCK):** `profile_downgrade`, `stdlib_shadowing`, `policy_regex_weakening`, `policy_module_mutation`, `scanner_mutation`, `hook_neuter`, `exfil_secret_read`, `exfil_upload`, `exfil_strict_curlconfig`, `exfil_hook_rc2`, `copilot_payload_deny`, `config_dangerous_cmd`, `todowrite_injection`, `current_session_fallback`, `agents_md_injection`, `sandbox_exfil_contained`, `agent_bash_uncontained_blocked`, `injection_says_safe_blocks_exfil`
-- **Benign (must be ALLOWED):** `benign_ls`, `benign_curl_download`, `benign_grep`, `benign_agents_md`, `benign_node_lint`, `benign_go_test`, `benign_ruff`
+- **Malicious (must BLOCK):** `profile_downgrade`, `stdlib_shadowing`, `policy_regex_weakening`, `policy_module_mutation`, `scanner_mutation`, `hook_neuter`, `exfil_secret_read`, `exfil_upload`, `exfil_strict_curlconfig`, `exfil_hook_rc2`, `copilot_payload_deny`, `config_dangerous_cmd`, `todowrite_injection`, `current_session_fallback`, `agents_md_injection`, `sandbox_exfil_contained`, `agent_bash_uncontained_blocked`, `injection_says_safe_blocks_exfil`, `memory_chain_rewrite_detected`, `memory_anchor_mismatch_detected`
+- **Benign (must be ALLOWED):** `memory_restore_from_structured`, `benign_ls`, `benign_curl_download`, `benign_grep`, `benign_agents_md`, `benign_node_lint`, `benign_go_test`, `benign_ruff`
 
 ## Reproduce
 
 ```bash
-# On the published v3.7.4 release artifact (its exact commit is in RELEASE_MANIFEST.json):
+# On the published v3.7.5 release artifact (its exact commit is in RELEASE_MANIFEST.json):
 ./manage.sh setup
 ./manage.sh evals --report      # or: python3 -I scripts/run_substrate_evals.py --no-trace
 ```

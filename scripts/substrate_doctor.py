@@ -302,6 +302,21 @@ def _go_live(blocks, warns, as_json=False):
         anchored = memory_log._anchored_head() is not None
     except Exception:
         anchored = False
+    # Memory posture (v3.7.5): a BROKEN hash-chain (tamper evidence) is a stronger signal
+    # than "not anchored". 3-state: no-log → warn | chain-broken → fail | ok+anchored → pass
+    # | ok+unanchored → warn. The gate (operational/check) already BLOCKS a broken chain;
+    # go-live surfaces it.
+    mem_events = ROOT / '.substrate' / 'memory' / 'events.jsonl'
+    if not mem_events.exists():
+        mem_status, mem_reason = 'warn', 'no memory log yet (events.jsonl absent)'
+    else:
+        rc_mem, _ = run([sys.executable, '-I', 'scripts/memory_log.py', 'verify'])
+        if rc_mem != 0:
+            mem_status, mem_reason = 'fail', 'memory hash-chain BROKEN (tamper evidence) — run `./manage.sh memory verify`'
+        elif anchored:
+            mem_status, mem_reason = 'pass', 'hash-chain ok + anchored'
+        else:
+            mem_status, mem_reason = 'warn', 'hash-chain ok but not anchored — run `./manage.sh memory anchor`'
     # Remote tier (v3.6.0): OFFLINE detection only — is there a GitHub remote? Drives
     # the remote-expansion section. remote_detect.py reads .git/config (no network, no
     # token), so go-live stays side-effect-light. LIVE branch-protection state needs an
@@ -366,8 +381,7 @@ def _go_live(blocks, warns, as_json=False):
         checks.append({'id': 'evals', 'tier': 'local', 'status': 'pass' if eval_ok else 'fail',
                        'reason': '' if eval_ok else 'fast eval suite failed'})
     checks.append({'id': 'sandbox', 'tier': 'local', 'status': sb_status, 'reason': sb_reason})
-    checks.append({'id': 'memory_anchor', 'tier': 'local', 'status': 'pass' if anchored else 'warn',
-                   'reason': '' if anchored else 'not anchored — run `./manage.sh memory anchor` (verify against a protected remote once one exists)'})
+    checks.append({'id': 'memory_anchor', 'tier': 'local', 'status': mem_status, 'reason': mem_reason})
     # --- remote expansion ---
     checks.append({'id': 'remote_connected', 'tier': 'remote',
                    'status': 'pass' if (has_remote and provider == 'github') else 'warn',

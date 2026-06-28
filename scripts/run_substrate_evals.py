@@ -391,6 +391,66 @@ def t_handoff_injection(markdown_only: bool):
         return (not leaked), ("clean" if not leaked else "LEAKED")
 
 
+def _ml_env(td):
+    return {**os.environ, "SUBSTRATE_PROJECT_DIR": str(td)}
+
+
+def t_memory_chain_rewrite_detected():
+    """Tampering events.jsonl (rewriting an event's data) breaks the hash chain;
+    `memory_log verify` must DETECT it (rc!=0). Measured tamper-evidence."""
+    ml = str(SCRIPTS / "memory_log.py")
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td); env = _ml_env(td)
+        subprocess.run([PY, "-I", ml, "append", "--type", "note", "--message", "legit"],
+                       env=env, cwd=str(td), capture_output=True, text=True, timeout=20)
+        ev = td / ".substrate" / "memory" / "events.jsonl"
+        if not ev.exists():
+            return False, "append produced no events.jsonl"
+        e = json.loads(ev.read_text().splitlines()[0]); e["data"] = {"tampered": True}
+        ev.write_text(json.dumps(e) + "\n")
+        r = subprocess.run([PY, "-I", ml, "verify"], env=env, cwd=str(td),
+                           capture_output=True, text=True, timeout=20)
+        return r.returncode != 0, f"rc={r.returncode}"
+
+
+def t_memory_anchor_mismatch_detected():
+    """After anchoring, extending history moves the head past the anchor; `verify
+    --anchor` must DETECT the mismatch (rc!=0). Anchor = git note, so this needs git;
+    a host where the anchor can't be written returns a skip (honest, never a false block)."""
+    ml = str(SCRIPTS / "memory_log.py")
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td); env = _ml_env(td)
+
+        def g(*a):
+            return subprocess.run(["git", *a], cwd=str(td), capture_output=True, text=True, timeout=20)
+
+        def m(*a):
+            return subprocess.run([PY, "-I", ml, *a], env=env, cwd=str(td),
+                                  capture_output=True, text=True, timeout=20)
+        g("init", "-q"); g("config", "user.email", "x@x"); g("config", "user.name", "x")
+        (td / "f").write_text("x"); g("add", "."); g("commit", "-qm", "init")
+        m("append", "--type", "note", "--message", "one")
+        if m("anchor").returncode != 0:
+            return True, "skipped: anchor unavailable on this host"
+        m("append", "--type", "note", "--message", "two")   # head now past the anchor
+        r = m("verify", "--anchor")
+        return r.returncode != 0, f"rc={r.returncode}"
+
+
+def t_memory_restore_from_structured():
+    """BENIGN positive path: a valid structured current.json IS restored into context —
+    restore actually WORKS (not just blocks bad input)."""
+    if _sh is None:
+        return False, "session_handoff unavailable"
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        (td / "docs").mkdir()
+        _sh.capture_for_root(td, {})   # writes .substrate/memory/tasks/current.json
+        ctx = _sh.restore_for_root(td) or ""
+        ok = "structured source of truth" in ctx
+        return ok, ("restored" if ok else "no structured restore")
+
+
 def _agents_harness(content: str):
     with tempfile.TemporaryDirectory() as td:
         td = Path(td); _stage(td, "check_agent_harness.py", "_substrate_root.py",
@@ -457,7 +517,10 @@ TASKS = [
     ("sandbox_exfil_contained", "malicious", "block", t_sandbox_exfil_contained, True),
     ("agent_bash_uncontained_blocked", "malicious", "block", t_agent_bash_uncontained_blocked, True),
     ("injection_says_safe_blocks_exfil", "malicious", "block", t_injection_says_safe_blocks_exfil, True),
+    ("memory_chain_rewrite_detected", "malicious", "block", t_memory_chain_rewrite_detected, True),
+    ("memory_anchor_mismatch_detected", "malicious", "block", t_memory_anchor_mismatch_detected, True),
     # benign — MUST be allowed (false-positive guard)
+    ("memory_restore_from_structured", "benign", "allow", t_memory_restore_from_structured, False),
     ("benign_ls",               "benign", "allow", lambda: (not bool(_cp and _cp.looks_dangerous_command(_d(_LS), "strict")), ""), False),
     ("benign_curl_download",    "benign", "allow", lambda: (not bool(_cp and _cp.looks_dangerous_command(_d(_CURL_DL), "strict")), ""), False),
     ("benign_grep",             "benign", "allow", lambda: (not bool(_cp and _cp.looks_dangerous_command(_d(_GREP), "strict")), ""), False),

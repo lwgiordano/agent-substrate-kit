@@ -193,3 +193,12 @@ committed BENCHMARK.md is regenerated per release (asserted by a version-match t
 `--json`/trace eval `results[]` normalize skipped tasks to `status:"skipped"`/`ok:null`
 (not `ok:true`); and the offline go-live `dep_cooldown` row reports `warn` (enabled, runs
 in `manage.sh check`) rather than overclaiming `pass`.
+
+v3.7.5 adds MEASURED memory coverage (memory was strong but un-evaluated): new eval tasks
+`memory_chain_rewrite_detected` (tampering events.jsonl breaks the hash chain → `memory_log
+verify` detects), `memory_anchor_mismatch_detected` (post-anchor history rewrite → `verify
+--anchor` detects; skip-honest where a git-note anchor can't be written), and benign
+`memory_restore_from_structured` (a valid current.json IS restored — the positive path
+works). The go-live `memory_anchor` row is now 3-state: no-log→warn | hash-chain
+BROKEN→fail | ok+anchored→pass | ok+unanchored→warn (the gate already BLOCKS a broken
+chain; go-live surfaces it).

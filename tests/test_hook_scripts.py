@@ -3270,7 +3270,46 @@ def test_evals_pass_on_shipped_kit() -> None:
     # Backend- and count-agnostic: exact malicious counts vary (the containment eval
     # is tested with a backend, skipped without), but the block-rate is always 1.00
     # and there are zero benign false-positives.
-    assert "(rate 1.00), benign FP 0/7" in p.stdout, p.stdout
+    assert "(rate 1.00), benign FP 0/8" in p.stdout, p.stdout
+
+
+# --- v3.7.5: memory tamper/anchor evals + go-live 3-state row ---
+
+def test_memory_tamper_and_anchor_evals_block() -> None:
+    """v3.7.5: the new measured memory tasks must DETECT tampering — a rewritten
+    events.jsonl (broken hash chain) and a post-anchor history rewrite."""
+    rs = SCRIPTS / "run_substrate_evals.py"
+    if not rs.exists():
+        return
+    for tid in ("memory_chain_rewrite_detected", "memory_anchor_mismatch_detected"):
+        p = subprocess.run([sys.executable, "-I", str(rs), "--run-one", tid],
+                           capture_output=True, text=True, timeout=60)
+        rec = json.loads(p.stdout)
+        # ok=true means detected; a host that can't write a git-note anchor reports a
+        # skip (status=skipped/ok=null) — never a false "undetected".
+        assert rec.get("ok") is True or rec.get("status") == "skipped", rec
+
+
+def test_go_live_memory_row_flags_broken_chain(tmp_path) -> None:
+    """v3.7.5: go-live's memory_anchor row must report 'fail' on a BROKEN hash chain
+    (tamper evidence), not merely 'warn: not anchored'. (bootstrap.sh is kit-source-only;
+    skip where absent, e.g. bootstrapped repos.)"""
+    bs = ROOT / "bootstrap.sh"
+    if not bs.exists():
+        return
+    repo = tmp_path / "proj"; repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["bash", str(bs), "--target", str(repo), "--profile", "standard",
+                    "--lang", "none", "--no-doctor"], check=True, capture_output=True, text=True, timeout=120)
+    mem = repo / ".substrate" / "memory"; mem.mkdir(parents=True, exist_ok=True)
+    (mem / "events.jsonl").write_text(
+        '{"seq":0,"ts":"2026-01-01T00:00:00+00:00","type":"note","prev":"' + "0" * 64
+        + '","hash":"deadbeef","data":{}}\n', encoding="utf-8")  # hash != content → broken chain
+    p = subprocess.run(["bash", str(repo / "manage.sh"), "go-live", "--json"],
+                       cwd=str(repo), capture_output=True, text=True, timeout=90)
+    d = json.loads(p.stdout)
+    row = next((c for c in d["checks"] if c["id"] == "memory_anchor"), None)
+    assert row is not None and row["status"] == "fail" and "BROKEN" in row["reason"], row
 
 
 # --- v3.7.0: satire-derived adversarial coverage (gates ignore persuasion) ---

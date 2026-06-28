@@ -1532,6 +1532,32 @@ where they are measured, not transcribed into prose that goes stale. This matche
 older entries' "N tests pass from the extracted artifact" phrasing and the kit's
 no-overclaim discipline applied to its own release notes.
 
+## v3.7.5 — memory tamper/anchor evals + go-live 3-state row
+
+Moves memory from A- toward A: the structured hash-chained memory + git-note anchor were
+strong but had **no eval category proving they actually catch tampering** ("measured, not
+claimed" — applied to memory). Additive; no config/flag/script surface.
+
+New measured eval tasks (`run_substrate_evals.py`):
+- `memory_chain_rewrite_detected` (malicious/block) — rewriting an event's data in
+  `events.jsonl` breaks the hash chain; `memory_log verify` DETECTS it (rc≠0).
+- `memory_anchor_mismatch_detected` (malicious/block) — extending history after `anchor`
+  moves the head past the git-note anchor; `verify --anchor` DETECTS the rewrite. Skip-honest
+  where a host can't write a git note (never a false "undetected").
+- `memory_restore_from_structured` (benign/allow) — the positive path: a valid structured
+  `current.json` IS restored (the SOT header surfaces), proving restore actually WORKS, not
+  just that bad input is blocked.
+
+Block-rate stays 1.00; benign FP 0.00. (Already covered, noted for completeness:
+`current_session_fallback` = planted Markdown not restored; `todowrite_injection` = poisoned
+TODO sanitized.)
+
+go-live `memory_anchor` row is now **3-state** instead of pass/not-anchored: no log → warn |
+hash-chain **BROKEN (tamper evidence)** → **fail** | chain ok + anchored → pass | chain ok +
+unanchored → warn. The gate (operational/check) already BLOCKS a broken chain; go-live now
+surfaces it rather than only reporting "not anchored". Regenerated BENCHMARK.md (per the
+v3.7.4 ship-checklist lesson). Phases D/E (MCP pinning, scanner tier) remain deferred.
+
 ## v3.7.4 — Phase-B correctness + provenance (v3.7.2/v3.7.3-audit)
 
 Closes the carried Phase-B findings plus the release-provenance class. No new surface.

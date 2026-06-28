@@ -202,3 +202,13 @@ verify` detects), `memory_anchor_mismatch_detected` (post-anchor history rewrite
 works). The go-live `memory_anchor` row is now 3-state: no-log→warn | hash-chain
 BROKEN→fail | ok+anchored→pass | ok+unanchored→warn (the gate already BLOCKS a broken
 chain; go-live surfaces it).
+
+v3.7.6 fixes that go-live row to VERIFY the anchor (compare `_anchored_head()` to
+`_head_hash()`), not just check a note exists — a stale anchor (new events since last
+anchor, or a rewrite) is now `fail`, not a false `pass`. This surfaced a real isolation
+bug: `capture_for_root(root)` scoped session_handoff's files but not memory_log's globals,
+so the durable event `capture()` appends leaked into the PROCESS repo — meaning running
+the eval suite / go-live silently mutated the host repo's memory and staled its anchor.
+`_root_context` now rebinds `memory_log.ROOT/MEM/EVENTS` too. Also v3.7.6: the Copilot
+adapter now FAILS CLOSED (denies shell tools) when the policy/containment guard can't
+import, instead of failing open.

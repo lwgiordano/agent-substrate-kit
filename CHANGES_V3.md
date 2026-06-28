@@ -1532,6 +1532,36 @@ where they are measured, not transcribed into prose that goes stale. This matche
 older entries' "N tests pass from the extracted artifact" phrasing and the kit's
 no-overclaim discipline applied to its own release notes.
 
+## v3.7.6 — go-live anchor VERIFICATION + memory-isolation + Copilot fail-closed (v3.7.5-audit)
+
+**P1 — go-live overclaimed `pass` on a stale anchor.** The v3.7.5 row checked anchor
+*existence* (`_anchored_head() is not None`), not anchor *match*, so an anchor note that no
+longer matched the current head (new events since the last anchor, or a rewrite) still
+read `pass`. `verify --anchor` caught it; the readiness map didn't. Fixed to compare
+`_anchored_head() == _head_hash()`: chain broken → fail | unanchored → warn |
+**head == anchor → pass** | **head ≠ anchor (stale/mismatch) → fail**. Wording is precise —
+a mismatch is "new events since last anchor, or a rewrite", not necessarily malicious.
+
+**Found while fixing it — a real isolation bug.** `capture_for_root(root)` scoped
+`session_handoff`'s files to `root` but NOT `memory_log`'s globals, so the durable event
+`capture()` appends landed in the PROCESS repo, not `root`. Consequence: running the eval
+suite (or `go-live`, which runs evals) **silently appended `handoff` events to the host
+repo's memory log and made its anchor go stale**. Fixed `_root_context` to rebind
+`memory_log.ROOT/MEM/EVENTS` too (and restore them) — capturing for a root now writes only
+under that root. Regression asserts the event lands under the capture root and the globals
+are restored; the anchor-verified test doubles as a pollution check (anchor stays `pass`
+across repeated go-live runs).
+
+**P2 — Copilot adapter failed OPEN on guard-import failure.** If `check_exfil_guard`
+couldn't import, the fallback set `_sandbox_required → False` / `_provably_contained →
+True`, so shell commands were allowed. Now it flags the failure and **denies shell tools
+fail-closed** ("policy/containment guard unavailable") while leaving non-shell tools
+allowed — matching the main guard's posture. (A broken guard is also caught by
+CI/trusted-base; this hardens the runtime hook boundary for mid-edit breakage.)
+
+Regenerated BENCHMARK.md. Verified all four anchor states + isolation + Copilot fail-closed
+in bootstrapped repos before push. Phases D/E remain deferred.
+
 ## v3.7.5 — memory tamper/anchor evals + go-live 3-state row
 
 Moves memory from A- toward A: the structured hash-chained memory + git-note anchor were

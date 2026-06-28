@@ -27,6 +27,8 @@ try:
 except Exception:  # pragma: no cover
     class CommandPolicyUnavailable(RuntimeError):
         pass
+_GUARD_IMPORT_FAILED = False
+_GUARD_IMPORT_ERROR = ""
 try:
     from check_exfil_guard import (  # type: ignore
         _looks_dangerous,
@@ -35,7 +37,13 @@ try:
         _root,
         _sandbox_required,
     )
-except Exception:  # pragma: no cover - guard import must never crash the hook
+except Exception as _e:  # pragma: no cover - guard import must never crash the hook
+    # FAIL CLOSED (v3.7.6 audit P2): if the policy/containment guard can't import, we
+    # cannot evaluate exfil danger OR containment — so main() DENIES shell tools rather
+    # than allowing them. These stubs exist only so the hook process doesn't crash.
+    _GUARD_IMPORT_FAILED = True
+    _GUARD_IMPORT_ERROR = str(_e)[:160]
+
     def _looks_dangerous(_cmd: str, _profile_name: str = "standard"):
         return None
 
@@ -136,6 +144,13 @@ def main() -> int:
     tname = _tool_name(data)
     if tname and tname not in _SHELL_TOOLS:
         return _decide("allow")
+    # FAIL CLOSED (v3.7.6 audit P2): the policy/containment guard failed to import, so we
+    # cannot judge this shell command at all — deny it rather than fail open. (Non-shell
+    # tools already returned `allow` above.) A broken guard is caught by CI/trusted-base;
+    # at the hook boundary, an un-judgeable shell command must not run.
+    if _GUARD_IMPORT_FAILED:
+        return _decide("deny", f"substrate: policy/containment guard unavailable "
+                       f"({_GUARD_IMPORT_ERROR}) — denying shell command fail-closed")
     cmd = _extract_command(data)
     # A shell-shaped call with no extractable command can't prove containment.
     if not cmd:

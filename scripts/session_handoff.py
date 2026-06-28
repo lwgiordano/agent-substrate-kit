@@ -407,10 +407,27 @@ def _root_context(root):
     HANDOFF = root / "docs" / "CURRENT_SESSION.md"
     TASKS_STATE = root / ".substrate" / "memory" / "tasks" / "current.json"
     TODO_STATE = root / "docs" / ".todo_state.json"
+    # Scope memory_log's globals too (v3.7.6): capture() appends a durable hash-chained
+    # event via memory_log.append(), which uses memory_log's OWN module ROOT — NOT this
+    # root. Without rebinding it, capture_for_root(root) writes the event to the PROCESS
+    # repo, so running the eval suite (or go-live, which runs evals) silently MUTATED the
+    # host repo's memory log and made its anchor go stale. Rebind so the write lands here.
+    _ml = None
+    _ml_saved = None
+    try:
+        import memory_log as _ml  # type: ignore
+        _ml_saved = (_ml.ROOT, _ml.MEM, _ml.EVENTS)
+        _ml.ROOT = root
+        _ml.MEM = root / ".substrate" / "memory"
+        _ml.EVENTS = _ml.MEM / "events.jsonl"
+    except Exception:
+        _ml = None
     try:
         yield
     finally:
         ROOT, HANDOFF, TASKS_STATE, TODO_STATE = saved
+        if _ml is not None and _ml_saved is not None:
+            _ml.ROOT, _ml.MEM, _ml.EVENTS = _ml_saved
 
 
 def capture_for_root(root, hook=None) -> int:

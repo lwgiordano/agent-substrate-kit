@@ -3312,6 +3312,110 @@ def test_go_live_memory_row_flags_broken_chain(tmp_path) -> None:
     assert row is not None and row["status"] == "fail" and "BROKEN" in row["reason"], row
 
 
+# --- v3.7.6: go-live anchor VERIFICATION (anchored_head == current_head) + isolation ---
+
+def _bootstrapped_git_repo(tmp_path):
+    """A bootstrapped repo with an initial commit (anchor needs a git commit)."""
+    repo = tmp_path / "proj"; repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "x@x"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "x"], cwd=repo, check=True)
+    subprocess.run(["bash", str(ROOT / "bootstrap.sh"), "--target", str(repo), "--profile",
+                    "standard", "--lang", "none", "--no-doctor"], check=True,
+                   capture_output=True, text=True, timeout=120)
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "init"], cwd=repo, check=True, capture_output=True)
+    return repo
+
+
+def _ml(repo, *a):
+    return subprocess.run([sys.executable, "-I", "scripts/memory_log.py", *a],
+                          cwd=str(repo), capture_output=True, text=True, timeout=20)
+
+
+def _memrow(repo):
+    p = subprocess.run([sys.executable, "-I", "scripts/substrate_doctor.py", "--go-live", "--json"],
+                       cwd=str(repo), capture_output=True, text=True, timeout=90)
+    d = json.loads(p.stdout)
+    return next((c for c in d["checks"] if c["id"] == "memory_anchor"), None)
+
+
+def test_go_live_memory_anchor_verified_is_pass(tmp_path) -> None:
+    """v3.7.6 (audit P1): anchored_head == current_head → pass. Also a pollution
+    regression: running go-live (which runs evals) must NOT append to the repo's memory
+    and make the anchor stale."""
+    if not (ROOT / "bootstrap.sh").exists():
+        return
+    repo = _bootstrapped_git_repo(tmp_path)
+    _ml(repo, "append", "--type", "note", "--message", "one")
+    _ml(repo, "anchor")
+    row = _memrow(repo)
+    assert row and row["status"] == "pass", row
+    # go-live again — anchor must still verify (evals must not have mutated memory)
+    row2 = _memrow(repo)
+    assert row2 and row2["status"] == "pass", "go-live polluted memory → anchor went stale"
+    assert sum(1 for _ in (repo / ".substrate" / "memory" / "events.jsonl").open()) == 1
+
+
+def test_go_live_memory_anchor_stale_is_fail(tmp_path) -> None:
+    """v3.7.6 (audit P1): an anchor NOTE that exists but no longer matches the current
+    head (new events since the last anchor, or a rewrite) → fail, NOT a false pass."""
+    if not (ROOT / "bootstrap.sh").exists():
+        return
+    repo = _bootstrapped_git_repo(tmp_path)
+    _ml(repo, "append", "--type", "note", "--message", "one")
+    _ml(repo, "anchor")
+    _ml(repo, "append", "--type", "note", "--message", "two")  # head now past the anchor
+    row = _memrow(repo)
+    assert row and row["status"] == "fail" and "STALE" in row["reason"].upper(), row
+
+
+def test_go_live_memory_unanchored_is_warn(tmp_path) -> None:
+    """v3.7.6: a valid chain with no anchor at all → warn (not fail, not pass)."""
+    if not (ROOT / "bootstrap.sh").exists():
+        return
+    repo = _bootstrapped_git_repo(tmp_path)
+    _ml(repo, "append", "--type", "note", "--message", "one")
+    row = _memrow(repo)
+    assert row and row["status"] == "warn" and "not anchored" in row["reason"], row
+
+
+def test_capture_for_root_scopes_memory_to_root(tmp_path) -> None:
+    """v3.7.6: capture_for_root(root) must write its durable memory event UNDER root, not
+    the process repo (the leak that made eval/go-live runs mutate host memory). And it must
+    restore memory_log's globals afterward."""
+    if not (SCRIPTS / "session_handoff.py").exists():
+        return
+    import session_handoff as sh
+    import memory_log
+    before = memory_log.EVENTS
+    td = tmp_path / "proj"; (td / "docs").mkdir(parents=True)
+    sh.capture_for_root(td, {})
+    ev = td / ".substrate" / "memory" / "events.jsonl"
+    assert ev.exists(), "memory event must land under the capture root"
+    assert any(json.loads(l)["type"] == "handoff" for l in ev.read_text().splitlines())
+    assert memory_log.EVENTS == before, "memory_log globals must be restored after capture_for_root"
+
+
+def test_copilot_fail_closed_on_guard_import_failure(tmp_path) -> None:
+    """v3.7.6 (audit P2): if the policy/containment guard fails to import, the Copilot
+    adapter must DENY shell commands (fail closed), not allow them. Non-shell tools stay allowed."""
+    src = SCRIPTS / "copilot_hook_adapter.py"
+    if not src.exists():
+        return
+    s = tmp_path / "scripts"; s.mkdir()
+    (s / "copilot_hook_adapter.py").write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+    (s / "check_exfil_guard.py").write_text("this is not valid python :::\n", encoding="utf-8")  # break import
+    bash = subprocess.run([sys.executable, str(s / "copilot_hook_adapter.py")],
+                          input='{"toolName":"bash","toolArgs":"{\\"command\\":\\"echo hi\\"}"}',
+                          cwd=str(tmp_path), capture_output=True, text=True, timeout=20)
+    assert json.loads(bash.stdout)["permissionDecision"] == "deny", bash.stdout
+    edit = subprocess.run([sys.executable, str(s / "copilot_hook_adapter.py")],
+                          input='{"toolName":"editFile","toolArgs":"{}"}',
+                          cwd=str(tmp_path), capture_output=True, text=True, timeout=20)
+    assert json.loads(edit.stdout)["permissionDecision"] == "allow", edit.stdout
+
+
 # --- v3.7.0: satire-derived adversarial coverage (gates ignore persuasion) ---
 
 def test_eval_injection_says_safe_blocks_exfil() -> None:

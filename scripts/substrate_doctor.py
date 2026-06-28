@@ -295,17 +295,17 @@ def _go_live(blocks, warns, as_json=False):
         rc, _ = run([sys.executable, '-I', str(ev), '--fast', '--no-trace'])
         eval_ok = (rc == 0)
     tb = (ROOT / '.github' / 'workflows' / 'trusted-base-audit.yml').exists()
-    anchored = False
+    _mem_mod = None
     try:
         sys.path.insert(0, str(ROOT / 'scripts'))
-        import memory_log
-        anchored = memory_log._anchored_head() is not None
+        import memory_log as _mem_mod
     except Exception:
-        anchored = False
-    # Memory posture (v3.7.5): a BROKEN hash-chain (tamper evidence) is a stronger signal
-    # than "not anchored". 3-state: no-log → warn | chain-broken → fail | ok+anchored → pass
-    # | ok+unanchored → warn. The gate (operational/check) already BLOCKS a broken chain;
-    # go-live surfaces it.
+        _mem_mod = None
+    # Memory posture. v3.7.6 (audit P1): a present anchor NOTE is not a verified anchor —
+    # the row must compare the anchored head to the CURRENT head, not merely check that a
+    # note exists, or it overclaims `pass` on a stale/mismatched anchor (new events since
+    # the last anchor, or a rewrite). 4-state: no-log → warn | chain-broken → fail |
+    # anchored_head==current_head → pass | unanchored → warn | mismatch/stale → fail.
     mem_events = ROOT / '.substrate' / 'memory' / 'events.jsonl'
     if not mem_events.exists():
         mem_status, mem_reason = 'warn', 'no memory log yet (events.jsonl absent)'
@@ -313,10 +313,20 @@ def _go_live(blocks, warns, as_json=False):
         rc_mem, _ = run([sys.executable, '-I', 'scripts/memory_log.py', 'verify'])
         if rc_mem != 0:
             mem_status, mem_reason = 'fail', 'memory hash-chain BROKEN (tamper evidence) — run `./manage.sh memory verify`'
-        elif anchored:
-            mem_status, mem_reason = 'pass', 'hash-chain ok + anchored'
         else:
-            mem_status, mem_reason = 'warn', 'hash-chain ok but not anchored — run `./manage.sh memory anchor`'
+            try:
+                anchored_head = _mem_mod._anchored_head() if _mem_mod else None
+                current_head = _mem_mod._head_hash() if _mem_mod else None
+            except Exception:
+                anchored_head, current_head = None, None
+            if anchored_head is None:
+                mem_status, mem_reason = 'warn', 'hash-chain ok but not anchored — run `./manage.sh memory anchor`'
+            elif anchored_head == current_head:
+                mem_status, mem_reason = 'pass', 'hash-chain ok + anchor verified (head matches the git-note anchor)'
+            else:
+                mem_status, mem_reason = 'fail', ('memory anchor STALE/MISMATCH — head differs from the git-note '
+                                                  'anchor (new events since last anchor, or a rewrite); run '
+                                                  '`./manage.sh memory verify --anchor`, then re-anchor if expected')
     # Remote tier (v3.6.0): OFFLINE detection only — is there a GitHub remote? Drives
     # the remote-expansion section. remote_detect.py reads .git/config (no network, no
     # token), so go-live stays side-effect-light. LIVE branch-protection state needs an

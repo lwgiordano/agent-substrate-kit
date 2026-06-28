@@ -702,6 +702,13 @@ def main(argv) -> int:
         "sandbox_required": _sandbox_required(argv),
         "passed": block_rate >= 1.0 and fp_rate <= 0.0 and not skip_is_failure,
     }
+    # Normalize skipped records for ALL consumers of results[] (trace / --json / --report):
+    # a skipped task is NOT ok=true. The --run-one path already does this; do it here too so
+    # the full-run results[] are consistent (v3.7.4 audit P2). Safe AFTER metrics — block-rate
+    # uses detail.startswith("skipped:"), never these `ok` fields.
+    for rec in results:
+        if str(rec.get("detail", "")).startswith("skipped:"):
+            rec["status"], rec["ok"] = "skipped", None
     trace = {"ran_at_utc": datetime.now(UTC).replace(microsecond=0).isoformat(),
              "metrics": metrics, "results": results}
 

@@ -1532,6 +1532,33 @@ where they are measured, not transcribed into prose that goes stale. This matche
 older entries' "N tests pass from the extracted artifact" phrasing and the kit's
 no-overclaim discipline applied to its own release notes.
 
+## v3.7.4 — Phase-B correctness + provenance (v3.7.2/v3.7.3-audit)
+
+Closes the carried Phase-B findings plus the release-provenance class. No new surface.
+
+- **P1 required dep-cooldown masked partial skips.** A `required` cooldown blocked only
+  when *every* dep was unverifiable (`checked == 0`), so one verified-old dep masked
+  another offline/uncached one. Now: in required mode (`--require` /
+  `.substrate/required_dep_cooldown=1`) ANY skip BLOCKS — you required cooldown, so it must
+  be verifiable for all. Regression `test_dep_cooldown_required_blocks_partial_skips`.
+- **P1 stale release provenance.** `RELEASE_MANIFEST.json` could record a `git_commit` that
+  isn't the packaged content (packaging before the final commit). `package_release.sh` now
+  marks `git_commit` as `<commit>-dirty` when the tree has uncommitted tracked changes, so
+  the manifest never sends a reviewer to a commit whose source differs from the zip; package
+  AFTER committing for clean provenance.
+- **P1 stale BENCHMARK.md.** The committed benchmark identified an older release (v3.7.1 in
+  a v3.7.x artifact) because nothing regenerated it per release. Regenerated for the current
+  version; new `test_benchmark_version_matches_version` asserts the committed BENCHMARK.md
+  matches VERSION (guarded where VERSION is absent).
+- **P2 eval JSON skipped records.** The full `--json`/trace `results[]` left skipped tasks
+  as `ok: true`; only `--run-one` normalized them. Now all skipped records are normalized to
+  `status: "skipped"`, `ok: null` (block-rate math unaffected — it keys off the `detail`
+  prefix). Regression `test_full_json_skipped_records_normalized`.
+- **P2 go-live cooldown overclaim.** The offline go-live row said `pass` when the tier was
+  enabled, but go-live never runs the networked check. Now `warn` with "runs in
+  `manage.sh check`, not by offline go-live". Regression
+  `test_go_live_dep_cooldown_does_not_overclaim_pass`.
+
 ## v3.7.3 — test hygiene (remove shadowed duplicate test)
 
 `tests/test_hook_scripts.py` defined `test_config_key_allowlists_agree` twice; Python kept only the second (comprehensive, iterates `check_substrate_config._ALLOWED_KEYS`), so the first (a short hardcoded-key copy) was dead code pytest never collected. Deleted the shadowed first definition — no behavior change, suite still green (one collected copy).

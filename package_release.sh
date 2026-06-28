@@ -69,6 +69,14 @@ SRC_HASH="$(cd "$KITROOT" && find . -type f \
     ! -name '*.pyc' ! -name '.DS_Store' \
     -exec shasum -a 256 {} + | awk '{print $1}' | sort | shasum -a 256 | awk '{print $1}')"
 GIT_COMMIT="$(cd "$KITROOT" && git rev-parse --short HEAD 2>/dev/null || echo 'none')"
+# Provenance honesty (v3.7.4 audit P1): the manifest's git_commit must point at the
+# packaged content. If the tree has UNCOMMITTED changes to tracked files, the artifact
+# is NOT the commit — mark it `<commit>-dirty` so a reviewer is never sent to a commit
+# whose source differs from the zip. Package AFTER committing for a clean provenance.
+if [ "$GIT_COMMIT" != "none" ] && [ -n "$(cd "$KITROOT" && git status --porcelain --untracked-files=no 2>/dev/null)" ]; then
+  GIT_COMMIT="${GIT_COMMIT}-dirty"
+  echo "    WARN: working tree has uncommitted changes — manifest git_commit=$GIT_COMMIT (commit first for clean provenance)"
+fi
 
 echo "==> Building $ZIP_VER"
 mkdir -p "$DIST"

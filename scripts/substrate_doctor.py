@@ -385,9 +385,11 @@ def _go_live(blocks, warns, as_json=False):
                    'reason': 'live branch protection not verifiable offline; run `./manage.sh enable remote --check` (needs an admin-readable token in CI)'})
     # --- deep options (optional rungs; never block hardening) ---
     _dc = _dep_cooldown_days()
+    # 'warn' not 'pass' when enabled: go-live is OFFLINE and does NOT run the networked
+    # cooldown check, so it cannot claim the deps actually passed (v3.7.4 audit P2 — no overclaim).
     checks.append({'id': 'dep_cooldown', 'tier': 'deep',
-                   'status': 'pass' if _dc > 0 else 'available',
-                   'reason': (f'enabled ({_dc}d); flags fresh direct deps in `manage.sh check` (networked, skip-honest)'
+                   'status': 'warn' if _dc > 0 else 'available',
+                   'reason': (f'enabled ({_dc}d) — runs in `manage.sh check` (networked), not by offline go-live'
                               if _dc > 0 else
                               'not enabled — set SUBSTRATE_DEP_COOLDOWN=N to flag direct deps published < N days ago')})
     checks.append({'id': 'security_scanners', 'tier': 'deep', 'status': 'available',

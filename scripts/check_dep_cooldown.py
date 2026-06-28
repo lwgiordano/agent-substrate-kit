@@ -270,15 +270,16 @@ def main(argv) -> int:
         for s in skipped:
             print(f"dep-cooldown: SKIP {s['id']} ({s['reason']})")
         verdict = ("BLOCK" if young else
-                   "BLOCK (required + unverifiable)" if (skipped and required and checked == 0) else "ok")
+                   "BLOCK (required + unverifiable)" if (skipped and required) else "ok")
         print(f"dep-cooldown: {verdict} — checked {checked}, young {len(young)}, "
               f"skipped {len(skipped)} (cache {cache_hits}, net {fetches})")
     if young:
         return 1
-    # required but nothing could be verified (all skipped) → can't prove cooldown
-    if skipped and required and checked == 0:
-        print("dep-cooldown: BLOCK — cooldown REQUIRED but no dependency publish time "
-              "could be verified (offline/uncached/ambiguous)", file=sys.stderr)
+    # required + ANY unverifiable dep → BLOCK (v3.7.4 audit P1: one verified dep must NOT
+    # mask another unverifiable one — you required cooldown but can't prove it for all).
+    if skipped and required:
+        print(f"dep-cooldown: BLOCK — cooldown REQUIRED but {len(skipped)} dependency "
+              "publish time(s) could not be verified (offline/uncached/ambiguous)", file=sys.stderr)
         return 1
     return 0
 

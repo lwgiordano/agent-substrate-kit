@@ -3136,6 +3136,72 @@ def test_trusted_base_freezes_dep_cooldown() -> None:
     assert ".substrate/required_dep_cooldown" in t and "SUBSTRATE_DEP_COOLDOWN=" in t
 
 
+# --- v3.7.4: Phase-B correctness + provenance (v3.7.3-audit) ---
+
+def test_dep_cooldown_required_blocks_partial_skips(tmp_path) -> None:
+    """v3.7.4 (audit P1): in REQUIRED mode, one verified (old) dep must NOT mask another
+    UNVERIFIABLE dep — any skip blocks. (Bug: previously only `checked == 0` blocked.)"""
+    dc = SCRIPTS / "check_dep_cooldown.py"
+    if not dc.exists():
+        return
+    (tmp_path / "go.mod").write_text(
+        "module x\n\ngo 1.21\n\nrequire (\n\tgithub.com/a/old v1.0.0\n\tgithub.com/b/new v2.0.0\n)\n",
+        encoding="utf-8")
+    _ccfg(tmp_path)
+    _seed_cache(tmp_path, "go:github.com/a/old@v1.0.0", age_days=30)  # one verified-old; b/new uncached
+    r = subprocess.run([sys.executable, "-I", str(dc), "--root", str(tmp_path),
+                        "--days", "7", "--offline", "--require", "--json"],
+                       capture_output=True, text=True, timeout=20)
+    d = json.loads(r.stdout)
+    assert d["checked"] == 1 and len(d["skipped"]) == 1, d
+    assert r.returncode == 1, "required + a partial skip must BLOCK"
+
+
+def test_full_json_skipped_records_normalized() -> None:
+    """v3.7.4 (audit P2): any result whose detail starts 'skipped:' must carry
+    status=skipped / ok=null in the full --json results[] (not ok=true). Holds whether or
+    not a sandbox backend is present (no-skip hosts satisfy it vacuously)."""
+    rs = SCRIPTS / "run_substrate_evals.py"
+    if not rs.exists():
+        return
+    p = subprocess.run([sys.executable, "-I", str(rs), "--json", "--no-trace"],
+                       capture_output=True, text=True, timeout=120)
+    d = json.loads(p.stdout)
+    for rec in d["results"]:
+        if str(rec.get("detail", "")).startswith("skipped:"):
+            assert rec.get("status") == "skipped" and rec.get("ok") is None, rec
+
+
+def test_benchmark_version_matches_version() -> None:
+    """v3.7.4 (audit P1): the COMMITTED BENCHMARK.md must identify the current release —
+    a v3.7.1-labeled benchmark in a v3.7.4 artifact is stale provenance. (VERSION is
+    kit-source-only; skip where absent, as in bootstrapped repos.)"""
+    vf = ROOT / "VERSION"
+    bench = ROOT / "BENCHMARK.md"
+    if not vf.exists() or not bench.exists():
+        return
+    version = vf.read_text(encoding="utf-8").strip()
+    assert f"**Version:** {version}" in bench.read_text(encoding="utf-8"), \
+        "committed BENCHMARK.md must match VERSION — regenerate with `./manage.sh evals --report`"
+
+
+def test_go_live_dep_cooldown_does_not_overclaim_pass(tmp_path) -> None:
+    """v3.7.4 (audit P2): when cooldown is enabled, the offline go-live row must NOT say
+    'pass' — go-live does not run the networked check, so it can't claim the deps passed."""
+    sd = SCRIPTS / "substrate_doctor.py"
+    if not sd.exists():
+        return
+    (tmp_path / ".substrate").mkdir()
+    (tmp_path / ".substrate" / "config").write_text(
+        'SUBSTRATE_PROFILE="standard"\nSUBSTRATE_DEP_COOLDOWN="7"\n', encoding="utf-8")
+    env = {**_HERMETIC_ENV, "SUBSTRATE_PROJECT_DIR": str(tmp_path)}
+    p = subprocess.run([sys.executable, "-I", str(sd), "--go-live", "--json"],
+                       cwd=str(tmp_path), capture_output=True, text=True, timeout=90, env=env)
+    d = json.loads(p.stdout)
+    row = next((c for c in d["checks"] if c["id"] == "dep_cooldown"), None)
+    assert row is not None and row["status"] != "pass", row
+
+
 def test_config_key_allowlists_agree() -> None:
     """The shell loader (_substrate_config.sh, sourced by manage.sh on every
     call) and the Python validator (check_substrate_config.py) must accept the

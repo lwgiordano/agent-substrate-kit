@@ -184,3 +184,12 @@ publish dates are immutable). Direct deps only (npm package.json+lock / pyprojec
 (young found, or required+unverifiable) | 2 (malformed lockfile/config). Mirrored in both
 validators (`_INT_KEYS`), lockable via `.substrate/required_dep_cooldown` (frozen by the
 trusted-base audit), and surfaced as a go-live deep row.
+
+v3.7.4 closes the Phase-B audit findings + a release-provenance class: required-mode
+cooldown now BLOCKS on ANY unverifiable dep (one verified dep no longer masks a skipped
+one); `package_release.sh` marks `git_commit` as `<commit>-dirty` when the tree has
+uncommitted tracked changes so the manifest never claims a clean commit it isn't; the
+committed BENCHMARK.md is regenerated per release (asserted by a version-match test); full
+`--json`/trace eval `results[]` normalize skipped tasks to `status:"skipped"`/`ok:null`
+(not `ok:true`); and the offline go-live `dep_cooldown` row reports `warn` (enabled, runs
+in `manage.sh check`) rather than overclaiming `pass`.

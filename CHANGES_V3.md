@@ -1532,6 +1532,19 @@ where they are measured, not transcribed into prose that goes stale. This matche
 older entries' "N tests pass from the extracted artifact" phrasing and the kit's
 no-overclaim discipline applied to its own release notes.
 
+## v3.7.7 — Copilot fail-closed on the double-fault (v3.7.6-audit P2)
+
+Closes the last fail-open. v3.7.6 denied parseable shell calls when the policy/containment
+guard couldn't import, but the **malformed / non-object / empty** input paths route through
+`_deny_if_required`, whose `required` came from the fallback `_sandbox_required` stub
+(returns `False`) — so a double fault (broken guard + malformed Copilot JSON) still
+`allow`ed. Now `_deny_if_required` denies whenever the guard import failed, since
+containment cannot be evaluated at all. This covers every shell-path decision (malformed,
+non-object, missing-command, valid-shell); non-shell tools (edit/view) still `allow`, and a
+working guard is unchanged. Regression `test_copilot_guard_import_failure_denies_malformed_json`
+asserts deny for `{bad` / `[]` / empty input under a broken guard. Fail-closed posture is
+now complete across the Copilot hook boundary. No other surface; phases D/E deferred.
+
 ## v3.7.6 — go-live anchor VERIFICATION + memory-isolation + Copilot fail-closed (v3.7.5-audit)
 
 **P1 — go-live overclaimed `pass` on a stale anchor.** The v3.7.5 row checked anchor

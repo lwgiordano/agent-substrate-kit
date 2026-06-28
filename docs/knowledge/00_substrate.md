@@ -211,4 +211,8 @@ so the durable event `capture()` appends leaked into the PROCESS repo — meanin
 the eval suite / go-live silently mutated the host repo's memory and staled its anchor.
 `_root_context` now rebinds `memory_log.ROOT/MEM/EVENTS` too. Also v3.7.6: the Copilot
 adapter now FAILS CLOSED (denies shell tools) when the policy/containment guard can't
-import, instead of failing open.
+import, instead of failing open. v3.7.7 completes that posture: the malformed/non-object/
+empty-input paths (which route through `_deny_if_required`, whose `required` came from a
+fallback stub) also deny when the guard import failed — so a double fault (broken guard +
+malformed Copilot JSON) no longer allows. Non-shell tools still allow; a working guard is
+unchanged.

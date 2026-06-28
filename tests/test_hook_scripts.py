@@ -3416,6 +3416,21 @@ def test_copilot_fail_closed_on_guard_import_failure(tmp_path) -> None:
     assert json.loads(edit.stdout)["permissionDecision"] == "allow", edit.stdout
 
 
+def test_copilot_guard_import_failure_denies_malformed_json(tmp_path) -> None:
+    """v3.7.7 (audit P2): the double-fault — guard import fails AND the Copilot input is
+    malformed / non-object — must DENY (fail-closed), not allow via the fallback stub."""
+    src = SCRIPTS / "copilot_hook_adapter.py"
+    if not src.exists():
+        return
+    s = tmp_path / "scripts"; s.mkdir()
+    (s / "copilot_hook_adapter.py").write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+    (s / "check_exfil_guard.py").write_text("not valid python :::\n", encoding="utf-8")  # break import
+    for payload in ("{bad", "[]", ""):
+        p = subprocess.run([sys.executable, str(s / "copilot_hook_adapter.py")],
+                           input=payload, cwd=str(tmp_path), capture_output=True, text=True, timeout=20)
+        assert json.loads(p.stdout)["permissionDecision"] == "deny", f"payload {payload!r}: {p.stdout}"
+
+
 # --- v3.7.0: satire-derived adversarial coverage (gates ignore persuasion) ---
 
 def test_eval_injection_says_safe_blocks_exfil() -> None:

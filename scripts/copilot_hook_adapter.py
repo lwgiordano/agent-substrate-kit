@@ -131,6 +131,14 @@ def main() -> int:
         root, required = None, False
 
     def _deny_if_required(reason: str) -> int:
+        # FAIL CLOSED (v3.7.7 audit P2): if the policy/containment guard couldn't import,
+        # `required` came from a fallback stub that returns False — so the malformed /
+        # non-object / no-command paths would ALLOW under a double fault (broken guard +
+        # bad input). When the guard is unavailable we cannot evaluate containment at all,
+        # so deny here too. (Non-shell tools already returned `allow` before this point.)
+        if _GUARD_IMPORT_FAILED:
+            return _decide("deny", f"substrate: policy/containment guard unavailable "
+                           f"({_GUARD_IMPORT_ERROR}) — denying fail-closed; {reason}")
         return _decide("deny", reason) if required else _decide("allow")
 
     try:

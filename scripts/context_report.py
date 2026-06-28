@@ -264,16 +264,41 @@ def _print(d: dict) -> None:
         print("  - " + r)
 
 
+# Warn-only token budgets (v3.7.8) — defaults; surfaced by `--budget`, never a gate.
+_BUDGETS = {"always_loaded_prompt": 2500, "AGENTS.md": 1500,
+            "skill_index": 1500, "session_current_json": 2000}
+
+
+def _budget(d: dict) -> list:
+    files = d["always_loaded"]["files"]
+    agents = next((v for k, v in files.items() if k == "AGENTS.md"), 0)
+    skill = next((v for k, v in files.items() if k.startswith("skill index")), 0)
+    cur = d["session"]["files"].get(".substrate/memory/tasks/current.json", 0)
+    rows = [("always_loaded_prompt", d["always_loaded"]["est_tokens"]),
+            ("AGENTS.md", _tok(agents)), ("skill_index", _tok(skill)),
+            ("session_current_json", _tok(cur))]
+    return [{"item": item, "est_tokens": tok, "budget": _BUDGETS[item],
+             "status": "warn" if tok > _BUDGETS[item] else "pass"} for item, tok in rows]
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", default=str(_DEFAULT_ROOT))
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--budget", action="store_true", help="evaluate warn-only token budgets")
     a = ap.parse_args()
     d = build(Path(a.root))
+    if a.budget:
+        d["budget"] = _budget(d)
     if a.json:
         print(json.dumps(d, indent=2))
     else:
         _print(d)
+        if a.budget:
+            print("\nTOKEN BUDGETS (warn-only; defaults):")
+            for r in d["budget"]:
+                tag = "WARN " if r["status"] == "warn" else "pass "
+                print(f"  {tag} {r['item']:22} {r['est_tokens']:>6} tok  (budget {r['budget']})")
     return 0
 
 

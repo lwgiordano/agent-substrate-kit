@@ -32,6 +32,7 @@
         "scripts/check_secrets.py",
         "scripts/check_substrate_config.py",
         "scripts/check_validator_input_coverage.py",
+        "scripts/code_shape.py",
         "scripts/command_policy.py",
         "scripts/context_report.py",
         "scripts/copilot_hook_adapter.py",

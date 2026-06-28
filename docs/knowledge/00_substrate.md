@@ -31,6 +31,7 @@ covers:
   - scripts/check_secrets.py
   - scripts/check_substrate_config.py
   - scripts/check_validator_input_coverage.py
+  - scripts/code_shape.py
   - scripts/command_policy.py
   - scripts/context_report.py
   - scripts/copilot_hook_adapter.py
@@ -216,3 +217,14 @@ empty-input paths (which route through `_deny_if_required`, whose `required` cam
 fallback stub) also deny when the guard import failed — so a double fault (broken guard +
 malformed Copilot JSON) no longer allows. Non-shell tools still allow; a working guard is
 unchanged.
+
+v3.7.8 adds engineering-SHAPE governance (the reviewability gap the security gates don't
+cover): `code_shape.py` (`./manage.sh code-shape [--json]`) — a LOCAL, read-only,
+WARN-ONLY, deterministic report (no LLM, no gate, no network, no writes). Repo-wide: the
+largest source files, files over a line threshold (sprawl), and long python functions (AST;
+god-function risk). Diff (vs HEAD + untracked): changed lines, a large-diff warning,
+source-changed-without-tests, and flags for governance/CI + dependency-manifest churn —
+the high-review-value AI-diff failure modes. It does NOT block `check`. Plus
+`context-report --budget`: warn-only token thresholds (always-loaded prompt / AGENTS.md /
+skill index / session current.json) on top of the footprint report. Both are reports, not
+gates — they surface shape so a human/agent decides; no config flag added.

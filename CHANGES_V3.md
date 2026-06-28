@@ -1532,6 +1532,31 @@ where they are measured, not transcribed into prose that goes stale. This matche
 older entries' "N tests pass from the extracted artifact" phrasing and the kit's
 no-overclaim discipline applied to its own release notes.
 
+## v3.7.8 — engineering-shape report (code-shape) + context-report --budget
+
+The security gates cover the substrate's own threat model; real vibe-coded repos fail in a
+different, non-security way the reviewer named: bloated unreviewable diffs, sprawling files,
+god-functions, AI changes that touch source without tests, silent governance/dependency
+churn. v3.7.8 adds deterministic, **warn-only**, read-only governance for that — reports,
+not gates (no LLM, no network, no writes, no `check` blocking).
+
+New `scripts/code_shape.py` (`./manage.sh code-shape [--json]`):
+- **Repo-wide:** largest source files; files over a line threshold (default 400); long
+  python functions via AST (default > 80 lines = god-function risk).
+- **Diff (vs HEAD + untracked):** changed lines, a large-diff warning (default > 500),
+  **source-changed-without-tests** (and tests-without-source), and flags for
+  governance/CI + dependency-manifest churn — the high-review-value AI-diff failure modes.
+- Thresholds are overridable (`--file-lines/--func-lines/--diff-lines`); it dogfoods the
+  kit itself (flags the kit's own 3.7k-line test file and long `main()`/`_go_live`).
+
+New `context-report --budget`: warn-only token thresholds (always-loaded prompt 2500 /
+AGENTS.md 1500 / skill index 1500 / session current.json 2000) on top of the footprint
+report — moves token efficiency from measurement toward governance, still without gating.
+
+No config flag, no gate wiring — both are read-only reports surfaced on demand. Routed
+side-effect-light (`run_py_system`). Phases D/E (MCP pinning, scanner tier) deferred; the
+highest-leverage move remains dogfooding on a real repo.
+
 ## v3.7.7 — Copilot fail-closed on the double-fault (v3.7.6-audit P2)
 
 Closes the last fail-open. v3.7.6 denied parseable shell calls when the policy/containment

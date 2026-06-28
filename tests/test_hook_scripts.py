@@ -2671,6 +2671,75 @@ def test_manage_wires_context_report() -> None:
         assert "context-report) run_py_system scripts/context_report.py" in t, rel
 
 
+# --- v3.7.8: code-shape report + context-report --budget (warn-only engineering shape) ---
+
+def test_code_shape_json_contract() -> None:
+    cs = SCRIPTS / "code_shape.py"
+    if not cs.exists():
+        return
+    p = subprocess.run([sys.executable, "-I", str(cs), "--json"], capture_output=True, text=True, timeout=60)
+    assert p.returncode == 0, p.stdout + p.stderr
+    d = json.loads(p.stdout)
+    for k in ("repo", "diff", "recommendations"):
+        assert k in d
+    assert "largest_files" in d["repo"] and "long_functions" in d["repo"] and "files_over_threshold" in d["repo"]
+
+
+def test_code_shape_flags_sprawl(tmp_path) -> None:
+    """A file over the line threshold and a function over the function threshold are flagged."""
+    cs = SCRIPTS / "code_shape.py"
+    if not cs.exists():
+        return
+    (tmp_path / "big.py").write_text("x = 1\n" * 500 + "\ndef huge():\n" + "    y = 1\n" * 120 + "    return y\n",
+                                     encoding="utf-8")
+    p = subprocess.run([sys.executable, "-I", str(cs), "--root", str(tmp_path), "--json",
+                        "--file-lines", "400", "--func-lines", "80"], capture_output=True, text=True, timeout=30)
+    d = json.loads(p.stdout)
+    assert any(f["path"] == "big.py" for f in d["repo"]["files_over_threshold"])
+    assert any(fn["name"] == "huge" for fn in d["repo"]["long_functions"])
+
+
+def test_code_shape_source_without_tests_warns(tmp_path) -> None:
+    """A diff that changes source but no test file produces a warning."""
+    cs = SCRIPTS / "code_shape.py"
+    if not cs.exists():
+        return
+    repo = tmp_path
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "x@x"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "x"], cwd=repo, check=True)
+    (repo / "a.py").write_text("print(1)\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "init"], cwd=repo, check=True, capture_output=True)
+    (repo / "a.py").write_text("print(1)\nprint(2)\n", encoding="utf-8")  # source change, no test
+    p = subprocess.run([sys.executable, "-I", str(cs), "--root", str(repo), "--json"],
+                       capture_output=True, text=True, timeout=30)
+    d = json.loads(p.stdout)
+    assert d["diff"]["available"] and any("no test" in w.lower() for w in d["diff"]["warnings"]), d["diff"]
+
+
+def test_context_report_budget_flags_oversize(tmp_path) -> None:
+    """v3.7.8: --budget flags an oversized always-loaded surface (warn-only)."""
+    cr = SCRIPTS / "context_report.py"
+    if not cr.exists():
+        return
+    (tmp_path / "AGENTS.md").write_text("# A\n" + "word " * 3000, encoding="utf-8")
+    (tmp_path / "CLAUDE.md").write_text("@AGENTS.md\n", encoding="utf-8")
+    p = subprocess.run([sys.executable, "-I", str(cr), "--root", str(tmp_path), "--budget", "--json"],
+                       capture_output=True, text=True, timeout=30)
+    d = json.loads(p.stdout)
+    row = next(r for r in d["budget"] if r["item"] == "AGENTS.md")
+    assert row["status"] == "warn", row
+
+
+def test_manage_wires_code_shape() -> None:
+    for rel in ("manage.sh", "templates/manage.sh.template"):
+        p = ROOT / rel
+        if not p.is_file():
+            continue
+        assert "code-shape) run_py_system scripts/code_shape.py" in p.read_text(encoding="utf-8"), rel
+
+
 def test_sandbox_env_is_secretless(tmp_path) -> None:
     """v3.5.2: a sandboxed command runs under a SCRUBBED env — secrets stripped,
     SUBSTRATE_SANDBOXED marker set. Skips where no backend is available."""

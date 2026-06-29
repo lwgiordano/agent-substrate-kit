@@ -77,10 +77,13 @@ _KIT_TEST_FILES = {"tests/conftest.py", "tests/test_doc_consistency.py", "tests/
 # --- governance / agent-control surfaces (flag CHURN regardless of ownership): the
 #     highest-review-value files an agent might casually edit in a broad patch. (v3.7.9)
 _GOV_PREFIXES = (".github/", ".substrate/", ".claude/", ".codex/", ".agents/",
-                 "scripts/", "docs/knowledge/", "docs/decisions/")
+                 "scripts/", "docs/knowledge/", "docs/decisions/",
+                 "docs/blind-spot-checklists/", "docs/templates/", "docs/postmortems/",
+                 "design-system/")
 _GOV_FILES = {"AGENTS.md", "CLAUDE.md", "GEMINI.md", "DESIGN.md", "CODEOWNERS",
               ".pre-commit-config.yaml", ".mcp.json", "Dockerfile",
-              ".github/copilot-instructions.md", ".github/dependabot.yml"}
+              ".github/copilot-instructions.md", ".github/dependabot.yml",
+              "docs/HISTORY.md", "docs/README.md", "docs/ARCHITECTURE.md", "docs/INTENT.md"}
 
 
 def _norm(rel):
@@ -216,10 +219,19 @@ def _diff_shape(root: Path, diff_lines: int, include_substrate: bool) -> dict:
     if buckets["tests"] and not buckets["project_source"] and not install_dominated:
         warnings.append("test file(s) changed but no project source — verify the test asserts a real "
                         "requirement, not just current behavior")
-    if buckets["governance"] and project_lines > 0 and not install_dominated:
+    # Governance churn is warned whenever it is not part of a bulk substrate install — an
+    # agent editing its OWN rules/config (AGENTS.md, .substrate/config, …) with no source
+    # change is exactly the case the substrate cares about, so a governance-ONLY diff must
+    # surface too (v3.7.10 audit P2). Split wording by whether project code also changed.
+    if buckets["governance"] and not install_dominated:
         gov = buckets["governance"]
-        warnings.append(f"agent/governance control files changed ({', '.join(gov[:5])}"
-                        f"{' …' if len(gov) > 5 else ''}) — review carefully (CI/config/agent-rules churn)")
+        names = f"{', '.join(gov[:5])}{' …' if len(gov) > 5 else ''}"
+        if project_lines > 0:
+            warnings.append(f"agent/governance control files changed alongside project code ({names}) — "
+                            "review carefully (CI/config/agent-rules churn)")
+        else:
+            warnings.append(f"governance-only change ({names}) — an agent/config/rules edit with no project "
+                            "code; review separately (did the agent change its own operating rules?)")
     if buckets["dependencies"]:
         warnings.append(f"dependency manifest changed ({', '.join(buckets['dependencies'][:5])}) — "
                         "review new/updated deps (see dep-cooldown)")

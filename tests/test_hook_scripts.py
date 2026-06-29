@@ -2810,6 +2810,32 @@ def test_code_shape_flags_agent_governance_churn(tmp_path) -> None:
     assert any("governance control files changed" in w for w in d["diff"]["warnings"]), d["diff"]["warnings"]
 
 
+def test_code_shape_flags_governance_only_churn(tmp_path) -> None:
+    """v3.7.10 (audit P2): a governance-ONLY change (agent edits its own rules, no project
+    source) must still warn — the 'agent changed the rules' case the substrate cares about."""
+    if not (ROOT / "bootstrap.sh").exists():
+        return
+    repo = _bootstrap_repo_for_shape(tmp_path)
+    with (repo / "AGENTS.md").open("a", encoding="utf-8") as f:
+        f.write("\nagent changed its own rules\n")
+    d = _shape(repo)
+    assert "AGENTS.md" in d["diff"]["buckets"].get("governance", []), d["diff"]["buckets"]
+    assert any("governance-only" in w for w in d["diff"]["warnings"]), d["diff"]["warnings"]
+
+
+def test_code_shape_flags_context_surface_churn(tmp_path) -> None:
+    """v3.7.10 (audit P2): canonical context surfaces (docs/HISTORY.md, docs/ARCHITECTURE.md,
+    docs/blind-spot-checklists/**, …) count as governance churn, not silent substrate edits."""
+    if not (ROOT / "bootstrap.sh").exists():
+        return
+    repo = _bootstrap_repo_for_shape(tmp_path)
+    with (repo / "docs" / "HISTORY.md").open("a", encoding="utf-8") as f:
+        f.write("\nagent changed context\n")
+    d = _shape(repo)
+    assert "docs/HISTORY.md" in d["diff"]["buckets"].get("governance", []), d["diff"]["buckets"]
+    assert any("governance" in w.lower() for w in d["diff"]["warnings"]), d["diff"]["warnings"]
+
+
 def test_sandbox_env_is_secretless(tmp_path) -> None:
     """v3.5.2: a sandboxed command runs under a SCRUBBED env — secrets stripped,
     SUBSTRATE_SANDBOXED marker set. Skips where no backend is available."""

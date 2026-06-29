@@ -240,3 +240,10 @@ substrate install, not a large project diff (the large-diff + source-without-tes
 key off PROJECT lines only). Governance-churn detection was extended to the agent/control
 surfaces it missed (`.substrate/**`, AGENTS.md/CLAUDE.md/GEMINI.md, `.claude`/`.codex`,
 CODEOWNERS, `.mcp.json`, `docs/knowledge|decisions`, `scripts/**`).
+
+v3.7.10 completes governance churn: a governance-ONLY diff (an agent edits AGENTS.md /
+.substrate/config with no project source — the "agent changed its own rules" case) now
+warns (v3.7.9 only warned when project code also changed), and the classifier was extended
+to the canonical context surfaces it missed (docs/HISTORY.md, docs/README.md,
+docs/ARCHITECTURE.md, docs/INTENT.md, docs/blind-spot-checklists/**, docs/templates/**,
+docs/postmortems/**, design-system/**).

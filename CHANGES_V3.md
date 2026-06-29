@@ -1532,6 +1532,26 @@ where they are measured, not transcribed into prose that goes stale. This matche
 older entries' "N tests pass from the extracted artifact" phrasing and the kit's
 no-overclaim discipline applied to its own release notes.
 
+## v3.7.10 — code-shape governance-churn polish (v3.7.9-audit P2)
+
+Two quality-reporting gaps in code-shape's governance detection (not security; the gates
+still govern these files):
+
+- **Governance-ONLY churn now warns.** v3.7.9 only flagged governance churn when project
+  source ALSO changed (`project_lines > 0`), so a pure edit to `AGENTS.md` / `.substrate/
+  config` / `.claude/settings.json` — the "an agent changed its own operating rules"
+  case the substrate most cares about — was silent. Now governance churn warns whenever it
+  is not part of a bulk substrate install, with split wording: "alongside project code" vs
+  "governance-only change (did the agent change its own rules?)".
+- **Governance classifier extended** to the canonical context/control surfaces it missed:
+  `docs/HISTORY.md`, `docs/README.md`, `docs/ARCHITECTURE.md`, `docs/INTENT.md`,
+  `docs/blind-spot-checklists/**`, `docs/templates/**`, `docs/postmortems/**`,
+  `design-system/**`.
+
+Regressions for AGENTS.md-only and docs/HISTORY.md-only changes. This completes code-shape
+for its stated purpose: project shape (not substrate), install diff separated, project
+sprawl detected, agent/governance churn surfaced even when isolated. Phases D/E deferred.
+
 ## v3.7.9 — code-shape measures the PROJECT, not the substrate (v3.7.8-audit)
 
 P1/P2: in a bootstrapped/user repo, v3.7.8's `code-shape` reported the substrate's OWN

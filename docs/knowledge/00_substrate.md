@@ -228,3 +228,15 @@ the high-review-value AI-diff failure modes. It does NOT block `check`. Plus
 `context-report --budget`: warn-only token thresholds (always-loaded prompt / AGENTS.md /
 skill index / session current.json) on top of the footprint report. Both are reports, not
 gates — they surface shape so a human/agent decides; no config flag added.
+
+v3.7.9 makes code-shape measure the USER's PROJECT, not the substrate it is installed into
+(the v3.7.8 bug: a fresh install read as "your repo has sprawl + a huge diff", which was
+the harness). Substrate-owned files are classified via the canonical
+`_substrate_surfaces` inventory (+ `extras/`; `tests/` is mixed so only the kit's specific
+shipped test files are owned) and EXCLUDED from the project shape by default — they appear
+in a separate substrate-owned summary; `--include-substrate` dogfoods the kit. An
+install-dominated diff (substrate lines dominate / fresh bootstrap) is reported as a
+substrate install, not a large project diff (the large-diff + source-without-tests warnings
+key off PROJECT lines only). Governance-churn detection was extended to the agent/control
+surfaces it missed (`.substrate/**`, AGENTS.md/CLAUDE.md/GEMINI.md, `.claude`/`.codex`,
+CODEOWNERS, `.mcp.json`, `docs/knowledge|decisions`, `scripts/**`).

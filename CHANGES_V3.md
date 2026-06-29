@@ -1532,6 +1532,35 @@ where they are measured, not transcribed into prose that goes stale. This matche
 older entries' "N tests pass from the extracted artifact" phrasing and the kit's
 no-overclaim discipline applied to its own release notes.
 
+## v3.7.9 — code-shape measures the PROJECT, not the substrate (v3.7.8-audit)
+
+P1/P2: in a bootstrapped/user repo, v3.7.8's `code-shape` reported the substrate's OWN
+vendored files (the kit's 3.7k-line test, `scripts/`, `extras/`) as the user's project
+sprawl, and the initial install read as a "large project diff". Same measurement-semantics
+class as the v3.6.2 context-report bug — the command ran but measured the wrong thing for
+the user. Fixed: code-shape now separates **project code from substrate-owned code**.
+
+- **Substrate-owned classifier** reuses the CANONICAL owned-surface inventory
+  (`_substrate_surfaces.OWNED_DIRS/OWNED_FILES`, + `extras/`) so it can't drift from the
+  CODEOWNERS/harness view. `tests/` is mixed, so only the kit's specific shipped test files
+  are owned — a user's own tests stay project.
+- **Project shape excludes substrate-owned files by default** (largest files, sprawl, long
+  functions). They appear in a separate substrate-owned summary (count + lines). On the
+  shipped kit, the project view is now empty (the kit qua project has no project code);
+  `--include-substrate` dogfoods the kit (surfaces its 3.7k-line test + long functions).
+- **Initial/install-dominated diff** (substrate lines dominate, e.g. a fresh bootstrap with
+  no project commit) reports "substrate install/update detected — commit separately", NOT a
+  large-project-diff warning. The large-diff / source-without-tests warnings now key off
+  PROJECT lines only.
+- **Governance churn extended** to the agent/control surfaces the v3.7.8 report missed:
+  `.substrate/**`, `AGENTS.md`/`CLAUDE.md`/`GEMINI.md`/`DESIGN.md`, `.claude/**`, `.codex/**`,
+  `CODEOWNERS`, `.mcp.json`, `docs/knowledge|decisions`, `scripts/**` — a real change that
+  also edits these is flagged for review (suppressed on a pure install).
+
+Bootstrapped-repo regressions assert the kit's files are NOT project sprawl by default, the
+install diff is install-dominated (no "large project diff"), and AGENTS.md/.substrate/config
+churn is surfaced. Phases D/E deferred; dogfooding remains the highest-leverage move.
+
 ## v3.7.8 — engineering-shape report (code-shape) + context-report --budget
 
 The security gates cover the substrate's own threat model; real vibe-coded repos fail in a

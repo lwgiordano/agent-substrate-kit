@@ -2740,6 +2740,76 @@ def test_manage_wires_code_shape() -> None:
         assert "code-shape) run_py_system scripts/code_shape.py" in p.read_text(encoding="utf-8"), rel
 
 
+# --- v3.7.9: code-shape measures the PROJECT, not the substrate it is installed into ---
+
+def _bootstrap_repo_for_shape(tmp_path, commit=True):
+    repo = tmp_path / "proj"; repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "x@x"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "x"], cwd=repo, check=True)
+    subprocess.run(["bash", str(ROOT / "bootstrap.sh"), "--target", str(repo), "--profile",
+                    "standard", "--lang", "none", "--no-doctor"], check=True,
+                   capture_output=True, text=True, timeout=120)
+    if commit:
+        subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+        subprocess.run(["git", "commit", "-qm", "init"], cwd=repo, check=True, capture_output=True)
+    return repo
+
+
+def _shape(repo, *extra):
+    p = subprocess.run([sys.executable, "-I", str(repo / "scripts" / "code_shape.py"),
+                        "--root", str(repo), "--json", *extra], capture_output=True, text=True, timeout=60)
+    return json.loads(p.stdout)
+
+
+def test_code_shape_excludes_substrate_owned_in_bootstrapped_repo(tmp_path) -> None:
+    """v3.7.9 (audit P1): in a bootstrapped/user repo, code-shape must NOT report the
+    substrate's own vendored files (kit tests, scripts/) as the user's project sprawl —
+    they belong to a separate substrate-owned summary."""
+    if not (ROOT / "bootstrap.sh").exists():
+        return
+    repo = _bootstrap_repo_for_shape(tmp_path)
+    d = _shape(repo)
+    proj = {f["path"] for f in d["repo"]["largest_files"]} | {f["path"] for f in d["repo"]["files_over_threshold"]}
+    assert "tests/test_hook_scripts.py" not in proj, "kit test file leaked into project shape"
+    assert "scripts/run_substrate_evals.py" not in proj, "substrate script leaked into project shape"
+    assert d["repo"]["substrate_owned"]["files"] > 0, "substrate-owned files must be counted separately"
+    # with --include-substrate, dogfooding the kit DOES surface them
+    d2 = _shape(repo, "--include-substrate")
+    proj2 = {f["path"] for f in d2["repo"]["files_over_threshold"]}
+    assert "tests/test_hook_scripts.py" in proj2, "--include-substrate must surface substrate files"
+
+
+def test_code_shape_initial_install_not_large_project_diff(tmp_path) -> None:
+    """v3.7.9 (audit P2): a fresh substrate install (no project commit) must read as a
+    substrate install, NOT a 'large project diff' warning."""
+    if not (ROOT / "bootstrap.sh").exists():
+        return
+    repo = _bootstrap_repo_for_shape(tmp_path, commit=False)
+    d = _shape(repo)
+    assert d["diff"]["install_dominated"] is True, d["diff"]
+    assert not any("large project diff" in w for w in d["diff"]["warnings"]), d["diff"]["warnings"]
+    assert any("substrate install" in w for w in d["diff"]["warnings"]), d["diff"]["warnings"]
+
+
+def test_code_shape_flags_agent_governance_churn(tmp_path) -> None:
+    """v3.7.9 (audit P2): changing agent/governance control files (AGENTS.md, .substrate/
+    config) alongside real project work is surfaced as governance churn."""
+    if not (ROOT / "bootstrap.sh").exists():
+        return
+    repo = _bootstrap_repo_for_shape(tmp_path)
+    (repo / "src").mkdir(exist_ok=True)
+    (repo / "src" / "app.py").write_text("print(1)\n", encoding="utf-8")  # real project change
+    with (repo / "AGENTS.md").open("a", encoding="utf-8") as f:
+        f.write("\nedited by agent\n")
+    with (repo / ".substrate" / "config").open("a", encoding="utf-8") as f:
+        f.write("\n")
+    d = _shape(repo)
+    gov = d["diff"]["buckets"].get("governance", [])
+    assert "AGENTS.md" in gov and ".substrate/config" in gov, gov
+    assert any("governance control files changed" in w for w in d["diff"]["warnings"]), d["diff"]["warnings"]
+
+
 def test_sandbox_env_is_secretless(tmp_path) -> None:
     """v3.5.2: a sandboxed command runs under a SCRUBBED env — secrets stripped,
     SUBSTRATE_SANDBOXED marker set. Skips where no backend is available."""

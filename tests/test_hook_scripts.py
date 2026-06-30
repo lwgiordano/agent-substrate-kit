@@ -122,6 +122,54 @@ def test_consumer_strip_tests_is_subset_of_kit_tests() -> None:
     assert "test_smoke.py" not in strip and "conftest.py" not in strip
 
 
+def test_ci_and_setup_install_dev_tooling_robustly(tmp_path) -> None:
+    """v3.7.12 (real-repo trial #1 fix #2): dev tooling must install regardless of how
+    the project declares it — [project.optional-dependencies] dev OR PEP 735
+    [dependency-groups] dev. `uv sync --group dev` silently no-ops on the former."""
+    if not _bootstrapped(tmp_path):
+        return
+    for rel in (".github/workflows/ci.yml", ".github/workflows/scheduled-audit.yml", "manage.sh"):
+        p = tmp_path / rel
+        if not p.is_file():
+            continue
+        txt = p.read_text(encoding="utf-8")
+        assert "uv sync --all-extras" in txt, f"{rel} lost the robust dev-install"
+        assert "uv sync --group dev" not in txt, f"{rel} still uses PEP-735-only --group dev"
+
+
+def test_pytest_ini_supports_src_layout(tmp_path) -> None:
+    """v3.7.12 (real-repo trial #1 fix #3): the shipped pytest.ini must make a src/-layout
+    project importable from tests/ WITHOUT the consumer editing this substrate-owned file."""
+    if not _bootstrapped(tmp_path):
+        return
+    ini = (tmp_path / "pytest.ini").read_text(encoding="utf-8")
+    pp = [ln for ln in ini.splitlines() if ln.strip().startswith("pythonpath")]
+    assert pp, f"pytest.ini has no pythonpath:\n{ini}"
+    assert "src" in pp[0], f"pythonpath does not cover src-layout: {pp[0]}"
+
+
+def test_bootstrap_warns_on_preexisting_scripts_dir(tmp_path) -> None:
+    """v3.7.12 (real-repo trial #1 fix #4): scripts/ is reserved; a target that already
+    has its own scripts/ files gets an advisory warning (nothing is moved or clobbered)."""
+    boot = None
+    for cand in (ROOT / "bootstrap.sh", ROOT.parent / "agent_substrate_kit_v3" / "bootstrap.sh"):
+        if cand.exists():
+            boot = cand
+            break
+    if boot is None:
+        return
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "my_project_tool.py").write_text("print('mine')\n", encoding="utf-8")
+    p = subprocess.run(["bash", str(boot), "--no-doctor"], cwd=tmp_path,
+                       capture_output=True, text=True, timeout=120)
+    out = p.stdout + p.stderr
+    assert "reserved by the substrate" in out, out
+    assert "my_project_tool.py" in out, out
+    # advisory only — the project's own file is left untouched
+    assert (tmp_path / "scripts" / "my_project_tool.py").read_text(encoding="utf-8") == "print('mine')\n"
+
+
 def test_config_forbids_command_substitution(tmp_path) -> None:
     if not _bootstrapped(tmp_path):
         return

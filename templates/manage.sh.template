@@ -56,9 +56,11 @@ setup(){
     # truncated install), force-recreate it.
     [ -x "$SUBVENV/bin/pre-commit" ] || "$SUBPY" -m pip install --quiet --force-reinstall --no-deps pre-commit
   fi
-  # 2. Python projects: install project + dev toolchain too.
+  # 2. Python projects: install project + dev toolchain too. --all-extras covers BOTH
+  #    dev-declaration styles (optional-dependencies + PEP 735 dependency-groups); the
+  #    old `--group dev` silently installed nothing for optional-dependencies (trial #1).
   if [ "$SUBSTRATE_LANG" = python ]; then
-    if command -v uv >/dev/null 2>&1; then uv sync --group dev || true
+    if command -v uv >/dev/null 2>&1; then uv sync --all-extras || true
     else "$SUBPY" -m pip install --quiet pytest pytest-cov pytest-randomly pytest-rerunfailures hypothesis ruff mypy bandit pip-audit types-PyYAML; fi
   fi
   subtool pre-commit install

@@ -21,7 +21,11 @@ jobs:
           set -euo pipefail
           if [ -f pyproject.toml ]; then
             pipx install uv
-            uv sync --group dev
+            # --all-extras installs dev tooling no matter how the project declares it:
+            # [project.optional-dependencies] dev (via extras) OR PEP 735
+            # [dependency-groups] dev (uv syncs the 'dev' group by default). `--group dev`
+            # alone errors/no-ops on the optional-dependencies style (real-repo trial #1).
+            uv sync --all-extras
           else
             python -m pip install --upgrade pip PyYAML pre-commit
           fi

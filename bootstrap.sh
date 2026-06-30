@@ -80,6 +80,23 @@ render_precommit(){ local s="$1" d="$2"; mkdir -p "$(dirname "$d")"
   grep -v '^ *# >>> \|^ *# <<< ' "$tmp" > "$d"; rm -f "$tmp"; echo "    +    ${d#./}"
 }
 echo "==> Installing Agent Substrate Kit v3 into $REPO_ROOT (profile=$PROFILE lang=$LANG_PRIMARY)"
+# scripts/ is RESERVED by the substrate. If the target already has a scripts/ with the
+# project's OWN files, warn + guide migration (advisory — never moves/clobbers anything;
+# the copy below is SKIP-if-exists, so a name collision would otherwise silently leave
+# the project's file shadowed by/mixed with substrate code). Real-repo trial #1.
+if [ -d scripts ]; then
+  _preexisting=""
+  for _pf in scripts/*; do
+    [ -f "$_pf" ] || continue
+    _bn="$(basename "$_pf")"
+    [ -f "$KIT_DIR/scripts/$_bn" ] && continue   # substrate-owned (about to be (re)written)
+    _preexisting="$_preexisting $_bn"
+  done
+  if [ -n "$_preexisting" ]; then
+    echo "    !!   scripts/ is reserved by the substrate; found pre-existing project files:$_preexisting"
+    echo "    !!   move them to tools/ or bin/ to avoid mixing project + substrate code (advisory; nothing was changed)."
+  fi
+fi
 mkdir -p scripts .substrate
 for f in "$KIT_DIR"/scripts/*; do [ -f "$f" ] || continue; copy "$f" "scripts/$(basename "$f")"; chmod +x "scripts/$(basename "$f")" || true; done
 # Extras (heavier ceremony) install only at strict profile.

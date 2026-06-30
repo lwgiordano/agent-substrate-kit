@@ -1532,6 +1532,35 @@ where they are measured, not transcribed into prose that goes stale. This matche
 older entries' "N tests pass from the extracted artifact" phrasing and the kit's
 no-overclaim discipline applied to its own release notes.
 
+## v3.7.12 — onboarding/footprint fixes from real-repo trial #1 (fixes #2–#4)
+
+The three remaining REAL_REPO_TRIALS findings (#1 shipped in v3.7.11). All onboarding/
+footprint, not security:
+
+- **#2 CI dev-bootstrap robustness.** `ci.yml`, `scheduled-audit.yml`, and `manage.sh setup`
+  ran `uv sync --group dev`, which installs only a PEP 735 `[dependency-groups] dev` and
+  **silently no-ops** on a project that declares dev tooling the common older way,
+  `[project.optional-dependencies] dev` (the brand-system-studio breakage: ruff/pytest
+  never installed → CI red). Since `run_python_gate.sh` resolves to `uv run` (the project
+  env) when uv is present, the missing tools fail the gates. Now all four sites use
+  `uv sync --all-extras`: extras cover the optional-dependencies style and uv syncs the
+  `dev` group by default, so both styles install and neither errors.
+- **#3 pytest.ini no longer forces a consumer edit.** The shipped `pytest.ini` set
+  `testpaths = tests` but no `pythonpath`, so a `src/`-layout project's tests couldn't
+  import the package until the operator edited this substrate-owned file. It now ships
+  `pythonpath = . src` (flat OR src layout; pytest ignores non-existent roots), so a
+  src-layout project works out of the box without touching a governed file.
+- **#4 `scripts/` reservation onboarding.** `bootstrap.sh` now detects a pre-existing
+  project `scripts/` containing non-substrate files and prints an advisory warning to move
+  them to `tools/`/`bin/` (the copy is SKIP-if-exists, so a collision would otherwise
+  silently mix project + substrate code). Advisory only — nothing is moved or clobbered.
+
+Regression-gated: `test_ci_and_setup_install_dev_tooling_robustly` (rendered ci.yml +
+scheduled-audit.yml + manage.sh use `--all-extras`, never `--group dev`),
+`test_pytest_ini_supports_src_layout` (shipped pytest.ini's `pythonpath` covers `src`),
+`test_bootstrap_warns_on_preexisting_scripts_dir` (warning fires, project file untouched).
+The first real-repo trial's full backlog (#1–#4) is now closed.
+
 ## v3.7.11 — consumer install omits the kit's heavy self-tests (real-repo trial #1)
 
 The first real-repo dogfood (bootstrapping the substrate into a live FastAPI+Vite app)

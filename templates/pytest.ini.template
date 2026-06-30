@@ -7,3 +7,8 @@
 # `uv run` venv build.
 addopts = -p no:randomly -p no:cacheprovider -q
 testpaths = tests
+# Make the project importable from tests/ for BOTH common layouts without the
+# consumer having to edit this substrate-owned file (real-repo trial #1): "." for a
+# flat/root package, "src" for a src/-layout package. pytest ignores paths that
+# don't exist, so shipping both is harmless. Add your own roots here if needed.
+pythonpath = . src

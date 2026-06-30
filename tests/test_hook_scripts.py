@@ -170,6 +170,93 @@ def test_bootstrap_warns_on_preexisting_scripts_dir(tmp_path) -> None:
     assert (tmp_path / "scripts" / "my_project_tool.py").read_text(encoding="utf-8") == "print('mine')\n"
 
 
+def _ms_fixture():
+    d = ROOT / "tests" / "fixtures" / "minisign"
+    return d / "signer.pub", d / "payload.txt", d / "payload.txt.minisig"
+
+
+def _load_minisign():
+    import importlib
+    sys.path.insert(0, str(SCRIPTS))
+    try:
+        return importlib.import_module("_minisign")
+    finally:
+        sys.path.pop(0)
+
+
+def test_release_signature_verifies_real_minisign_fixture() -> None:
+    """v3.7.13 (installer trust root): the pure-Python verifier accepts a signature
+    produced by the REFERENCE minisign binary (committed fixture) — proving consumer
+    verification needs no minisign binary."""
+    import pytest
+    pytest.importorskip("cryptography")
+    pub, payload, sig = _ms_fixture()
+    if not (pub.is_file() and payload.is_file() and sig.is_file()):
+        pytest.skip("minisign fixture not present")
+    tc = _load_minisign().verify_file(pub, payload, sig)
+    assert isinstance(tc, str) and tc
+
+
+def test_release_signature_tamper_fails(tmp_path) -> None:
+    """A one-byte change to signed content must fail verification (fail-closed)."""
+    import pytest
+    pytest.importorskip("cryptography")
+    pub, payload, sig = _ms_fixture()
+    if not (pub.is_file() and payload.is_file() and sig.is_file()):
+        pytest.skip("minisign fixture not present")
+    ms = _load_minisign()
+    tampered = tmp_path / "payload.txt"
+    tampered.write_bytes(payload.read_bytes() + b"x")
+    with pytest.raises(ms.VerifyError):
+        ms.verify_file(pub, tampered, sig)
+
+
+def test_release_signature_wrong_key_fails() -> None:
+    """Verifying the fixture under a DIFFERENT trusted key (the release pubkey) must fail
+    on key-id mismatch — a signature is only trusted under its own key."""
+    import pytest
+    pytest.importorskip("cryptography")
+    pub, payload, sig = _ms_fixture()
+    relpub = ROOT / ".substrate" / "trust" / "minisign.pub"
+    if not (payload.is_file() and sig.is_file() and relpub.is_file()):
+        pytest.skip("fixture or release pubkey not present")
+    ms = _load_minisign()
+    with pytest.raises(ms.VerifyError):
+        ms.verify_file(relpub, payload, sig)
+
+
+def test_verify_release_cli_failclosed_on_missing_pubkey(tmp_path) -> None:
+    """verify_release.py must exit 2 when the trusted key is absent — a verification
+    that cannot run is NEVER reported as a pass."""
+    vr = SCRIPTS / "verify_release.py"
+    if not vr.is_file():
+        return
+    f = tmp_path / "artifact.bin"
+    f.write_bytes(b"data")
+    p = subprocess.run([sys.executable, "-I", str(vr), str(f), "--pub", str(tmp_path / "nope.pub")],
+                       capture_output=True, text=True, timeout=30)
+    assert p.returncode == 2, (p.returncode, p.stdout, p.stderr)
+
+
+def test_bootstrap_ships_release_trust_anchor(tmp_path) -> None:
+    """v3.7.13: a bootstrapped repo carries the minisign trust anchor so it can verify
+    kit upgrades."""
+    if not _bootstrapped(tmp_path):
+        return
+    if (ROOT / ".substrate" / "trust" / "minisign.pub").is_file():
+        assert (tmp_path / ".substrate" / "trust" / "minisign.pub").is_file(), \
+            "bootstrap did not ship .substrate/trust/minisign.pub"
+
+
+def test_go_live_reports_release_signature_row(tmp_path) -> None:
+    """go-live must surface a release_signature row (offline trust-anchor status)."""
+    if not _bootstrapped(tmp_path):
+        return
+    p = subprocess.run(["./manage.sh", "go-live", "--json"], cwd=tmp_path,
+                       capture_output=True, text=True, timeout=120)
+    assert "release_signature" in p.stdout, (p.returncode, p.stdout[:600], p.stderr[:600])
+
+
 def test_config_forbids_command_substitution(tmp_path) -> None:
     if not _bootstrapped(tmp_path):
         return

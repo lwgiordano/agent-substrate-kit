@@ -91,6 +91,36 @@ ART_SHA="$(shasum -a 256 "$ZIP_VER" | awk '{print $1}')"
 echo "$ART_SHA  ${NAME}-${VER}.zip" > "$ZIP_VER.sha256"
 echo "    $NFILES files, sha256 ${ART_SHA:0:16}…"
 
+# --- release signature (minisign) ---
+# Sign the artifact with the maintainer's minisign secret key when available, so a
+# consumer can verify AUTHENTICITY before applying an upgrade (scripts/_minisign.py is
+# a pure-Python verifier — no minisign binary needed on the consumer side; the trusted
+# comment embeds version+commit+sha256 and is tamper-evident via the global signature).
+# Signing is best-effort: without the key/binary the release is simply UNSIGNED
+# (packaging never fails on it); the consumer-side check fails CLOSED only when a
+# signature is REQUIRED. (v3.7.13 — installer/upgrade trust root, Phase 1a.)
+SIGNED="false"; ART_SIG=""
+if [ -n "${SUBSTRATE_RELEASE_SECKEY:-}" ] && command -v minisign >/dev/null 2>&1; then
+  if minisign -S -s "$SUBSTRATE_RELEASE_SECKEY" -m "$ZIP_VER" \
+       -t "agent_substrate_kit ${VER} ${GIT_COMMIT} sha256:${ART_SHA}" >/dev/null 2>&1; then
+    # Self-verify against the COMMITTED trust pubkey: a release that claims "signed"
+    # but doesn't verify against .substrate/trust/minisign.pub is a key mismatch and
+    # must FAIL the build (worse than honestly unsigned).
+    if python3 "$KITROOT/scripts/_minisign.py" --pub "$KITROOT/.substrate/trust/minisign.pub" \
+         --file "$ZIP_VER" >/dev/null 2>&1; then
+      SIGNED="true"; ART_SIG="${NAME}-${VER}.zip.minisig"
+      echo "    signed + self-verified against trust pubkey: ${ART_SIG}"
+    else
+      echo "    ERROR: signature does not verify against .substrate/trust/minisign.pub (key mismatch)" >&2
+      exit 4
+    fi
+  else
+    echo "    WARN: minisign signing FAILED — release is UNSIGNED"
+  fi
+else
+  echo "    note: release UNSIGNED (set SUBSTRATE_RELEASE_SECKEY + install minisign to sign)"
+fi
+
 # Zip hygiene: no generated/toolchain junk must ride along. Write the listing to
 # a FILE first — piping `unzip -l` straight into `grep -q` is BROKEN under
 # `set -o pipefail`: grep -q closes the pipe on its first match, unzip dies with
@@ -227,6 +257,8 @@ cat > "$DIST/RELEASE_MANIFEST.json" <<JSON
   "artifact": "${NAME}-${VER}.zip",
   "review_bundle": "${NAME}-${VER}-review-bundle.tar.gz",
   "artifact_sha256": "$ART_SHA",
+  "artifact_signature": "$ART_SIG",
+  "signed": $SIGNED,
   "source_tree_sha256": "$SRC_HASH",
   "file_count": $NFILES,
   "verification_mode": "$MODE",
@@ -243,6 +275,10 @@ JSON
 echo "==> Review bundle"
 REVIEW="$DIST/review"; rm -rf "$REVIEW"; mkdir -p "$REVIEW"
 cp "$ZIP_VER" "$ZIP_VER.sha256" "$DIST/RELEASE_MANIFEST.json" "$REVIEW/"
+# Include the signature + trusted public key so a reviewer can verify authenticity
+# (minisign -Vm <zip> -p minisign.pub, or scripts/_minisign.py) — not just the checksum.
+[ -n "$ART_SIG" ] && [ -f "$ZIP_VER.minisig" ] && cp "$ZIP_VER.minisig" "$REVIEW/"
+[ -f "$KITROOT/.substrate/trust/minisign.pub" ] && cp "$KITROOT/.substrate/trust/minisign.pub" "$REVIEW/"
 cat > "$REVIEW/README_REVIEW.md" <<MD
 # Review bundle — ${NAME} ${VER}
 

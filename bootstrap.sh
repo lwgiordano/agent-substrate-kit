@@ -132,6 +132,12 @@ echo "$SANDBOX" > .substrate/required_sandbox; echo "    +    .substrate/require
 # RAISE but never silently DISABLE remote governance (check_substrate_config +
 # trusted-base enforce it). Orthogonal to the profile — decoupled from strict. v3.6.0.
 echo "$REMOTE_GOVERNANCE" > .substrate/required_remote_governance; echo "    +    .substrate/required_remote_governance"
+# Release/upgrade TRUST ANCHOR (v3.7.13): copy the kit maintainer's minisign public key so
+# this repo can VERIFY the authenticity of a kit release before applying an upgrade
+# (scripts/verify_release.py / `./manage.sh verify-release`). Public key only — no secret.
+if [ -f "$KIT_DIR/.substrate/trust/minisign.pub" ]; then
+  mkdir -p .substrate/trust; copy "$KIT_DIR/.substrate/trust/minisign.pub" .substrate/trust/minisign.pub
+fi
 # Sandbox backend policy (DATA, validated fail-closed by scripts/sandbox_detect.py).
 # Written always so it's discoverable + editable; only ENFORCED when SUBSTRATE_SANDBOX=1.
 # backend=auto prefers @anthropic-ai/sandbox-runtime (srt) if present, else the OS-native

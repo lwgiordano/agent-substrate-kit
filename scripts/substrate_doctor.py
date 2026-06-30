@@ -392,6 +392,16 @@ def _go_live(blocks, warns, as_json=False):
                        'reason': '' if eval_ok else 'fast eval suite failed'})
     checks.append({'id': 'sandbox', 'tier': 'local', 'status': sb_status, 'reason': sb_reason})
     checks.append({'id': 'memory_anchor', 'tier': 'local', 'status': mem_status, 'reason': mem_reason})
+    # Release trust anchor (v3.7.13, installer/upgrade Phase 1a): the minisign public key
+    # is what makes a release artifact's authenticity VERIFIABLE before an upgrade is
+    # applied (scripts/verify_release.py, or `minisign -Vm`). Offline-honest: report
+    # whether the anchor is present — pass if so, warn if absent (upgrades unverifiable).
+    _pub = ROOT / '.substrate' / 'trust' / 'minisign.pub'
+    if _pub.is_file():
+        rs_status, rs_reason = 'pass', 'minisign trust anchor present — release artifacts are verifiable (./manage.sh verify-release <zip>)'
+    else:
+        rs_status, rs_reason = 'warn', 'no .substrate/trust/minisign.pub — release/upgrade authenticity cannot be verified'
+    checks.append({'id': 'release_signature', 'tier': 'local', 'status': rs_status, 'reason': rs_reason})
     # --- remote expansion ---
     checks.append({'id': 'remote_connected', 'tier': 'remote',
                    'status': 'pass' if (has_remote and provider == 'github') else 'warn',

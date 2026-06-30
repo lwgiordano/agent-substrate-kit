@@ -1532,6 +1532,50 @@ where they are measured, not transcribed into prose that goes stale. This matche
 older entries' "N tests pass from the extracted artifact" phrasing and the kit's
 no-overclaim discipline applied to its own release notes.
 
+## v3.7.13 — release/upgrade TRUST ROOT (installer spine, Phase 1a)
+
+First piece of the signed installer/upgrade spine (chosen over scanner/MCP tiers as the
+roadmap's #1 architectural gap). Phase 1a delivers **verifiable releases**; Phase 1b adds
+`manage.sh upgrade` (verify → drift-gate → in-place apply); Phase 2 adds the PyPI
+`substrate-init` package that carries the public key out-of-band (fork-proof first install);
+Phase 3 evaluates Copier for 3-way-merge upgrades.
+
+Trust model — **minisign (Ed25519)**. The maintainer signs the release artifact with the
+reference `minisign` binary; a consumer verifies with `scripts/_minisign.py`, a **pure-Python
+verifier** (only dependency: `cryptography`) — no minisign binary needed consumer-side, and a
+paranoid operator can independently re-verify with `minisign -Vm`. Cross-validated against
+minisign 0.12: the Python verifier accepts a real reference-tool signature and fails closed on
+tamper / wrong-key / missing-key.
+
+- `scripts/_minisign.py` — pure-Python minisign signature verifier (prehashed `ED` + legacy
+  `Ed`; checks the content signature AND the global signature over the trusted comment, so an
+  embedded version/commit/sha256 is tamper-evident). FAIL-CLOSED on every parse/alg/key-id/
+  signature error and on a missing `cryptography` (a check that cannot run is never a pass).
+- `scripts/verify_release.py` + `./manage.sh verify-release <artifact>` — verify an artifact
+  against `.substrate/trust/minisign.pub` (exit 2 on any failure).
+- `.substrate/trust/minisign.pub` — the trust anchor, shipped in the repo + copied into every
+  bootstrapped repo so it can verify kit upgrades; `OPTIONAL_FILES` (owned-when-present) so a
+  PR can't swap the verification key without CODEOWNER review. (Secret key is maintainer-held,
+  never committed.)
+- `package_release.sh` — signs the artifact when `SUBSTRATE_RELEASE_SECKEY` + `minisign` are
+  present (else honestly UNSIGNED, packaging never fails); **self-verifies the new signature
+  against the committed trust pubkey and fails the build on a key mismatch**; records
+  `artifact_signature` + `signed` in `RELEASE_MANIFEST.json`; ships the `.minisig` + pubkey in
+  the review bundle.
+- go-live `release_signature` row (local/offline): trust anchor present → pass, absent → warn.
+- `cryptography` added to the substrate venv (`manage.sh setup`) so the trust check is runnable
+  — a trust feature whose dependency is optional-and-therefore-untested is not a trust feature.
+
+NOT done here (honest): the byte-hash self-integrity (`MODULE_SOURCE_SHA256`) is unchanged — a
+release signature proves authenticity at fetch/upgrade; the byte-hash still catches LOCAL
+tampering between upgrades (different threat). And Phase 1a ships the pubkey in-repo, so it does
+not yet realize minisign's fork-proof first-install edge — that lands with the Phase 2 package.
+
+Regression-gated: `test_release_signature_verifies_real_minisign_fixture` (a committed
+reference-tool signature verifies in pure Python), `test_release_signature_tamper_fails`,
+`test_release_signature_wrong_key_fails`, `test_verify_release_cli_failclosed_on_missing_pubkey`,
+`test_bootstrap_ships_release_trust_anchor`, `test_go_live_reports_release_signature_row`.
+
 ## v3.7.12 — onboarding/footprint fixes from real-repo trial #1 (fixes #2–#4)
 
 The three remaining REAL_REPO_TRIALS findings (#1 shipped in v3.7.11). All onboarding/

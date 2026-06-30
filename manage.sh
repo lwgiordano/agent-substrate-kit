@@ -47,11 +47,13 @@ setup(){
   # `setup` is idempotent and repairs a half-initialized environment
   # instead of failing later at pre-commit install.
   need_repair=no
-  "$SUBPY" -c 'import yaml, pytest, pre_commit' >/dev/null 2>&1 || need_repair=yes
+  # cryptography is required by scripts/_minisign.py (release/upgrade signature
+  # verification, v3.7.13); include it so the trust check is actually runnable.
+  "$SUBPY" -c 'import yaml, pytest, pre_commit, cryptography' >/dev/null 2>&1 || need_repair=yes
   [ -x "$SUBVENV/bin/pre-commit" ] || need_repair=yes
   if [ "$need_repair" = yes ]; then
     echo "==> Installing/repairing substrate tools"
-    "$SUBPY" -m pip install --quiet --upgrade pre-commit PyYAML pytest
+    "$SUBPY" -m pip install --quiet --upgrade pre-commit PyYAML pytest cryptography
     # If the import is fine but the console script is missing (e.g. a
     # truncated install), force-recreate it.
     [ -x "$SUBVENV/bin/pre-commit" ] || "$SUBPY" -m pip install --quiet --force-reinstall --no-deps pre-commit
@@ -61,7 +63,7 @@ setup(){
   #    old `--group dev` silently installed nothing for optional-dependencies (trial #1).
   if [ "$SUBSTRATE_LANG" = python ]; then
     if command -v uv >/dev/null 2>&1; then uv sync --all-extras || true
-    else "$SUBPY" -m pip install --quiet pytest pytest-cov pytest-randomly pytest-rerunfailures hypothesis ruff mypy bandit pip-audit types-PyYAML; fi
+    else "$SUBPY" -m pip install --quiet pytest pytest-cov pytest-randomly pytest-rerunfailures hypothesis ruff mypy bandit pip-audit types-PyYAML cryptography; fi
   fi
   subtool pre-commit install
   if [ "$SUBSTRATE_PROFILE" = "strict" ]; then subtool pre-commit install --hook-type commit-msg; fi
@@ -127,6 +129,7 @@ case "$cmd" in
   go-live) run_py_system scripts/substrate_doctor.py --go-live "$@" ;;
   context-report) run_py_system scripts/context_report.py "$@" ;;
   code-shape) run_py_system scripts/code_shape.py "$@" ;;
+  verify-release) run_py_system scripts/verify_release.py "$@" ;;
   enable)
     what="${1:-}"; shift || true
     case "$what" in
@@ -167,7 +170,7 @@ case "$cmd" in
   memory) run_py scripts/memory_log.py "$@" ;;
   design-init) mkdir -p design-system/pages design-system/tokens; echo "design-system/ scaffolded" ;;
   *) cat <<'HELP'
-Usage: ./manage.sh setup|doctor|go-live|context-report|code-shape|enable|check|evals|audit|full-audit|release|manifest|agent-system-audit|handoff|memory|design-init
+Usage: ./manage.sh setup|doctor|go-live|context-report|code-shape|verify-release|enable|check|evals|audit|full-audit|release|manifest|agent-system-audit|handoff|memory|design-init
   evals                                       adversarial behavior evals (block-rate / FP-rate, writes a trace)
   doctor [--quick|--security|--operational]   readiness levels
   go-live [--json]                            local/remote/deep readiness map (offline, side-effect-light)

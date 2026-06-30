@@ -6,6 +6,7 @@ covers:
   - extras/check_license_headers.py
   - extras/check_stale_phrases.py
   - scripts/_doc_common.py
+  - scripts/_minisign.py
   - scripts/_substrate_config.sh
   - scripts/_substrate_root.py
   - scripts/_substrate_surfaces.py
@@ -52,6 +53,7 @@ covers:
   - scripts/substrate_doctor.py
   - scripts/todo_state_hook.py
   - scripts/update_manifest.py
+  - scripts/verify_release.py
 ---
 
 # Substrate

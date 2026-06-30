@@ -57,7 +57,7 @@ _DEP_MANIFESTS = {"package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.l
 #     specific test files there; users add their own), so only the kit's specific test
 #     files are owned — not the whole dir. (v3.7.9)
 try:
-    from _substrate_surfaces import OWNED_DIRS, OWNED_FILES, OPTIONAL_DIRS, OPTIONAL_FILES
+    from _substrate_surfaces import OWNED_DIRS, OWNED_FILES, OPTIONAL_DIRS, OPTIONAL_FILES, KIT_TEST_FILES
     # +extras/ (strict-profile substrate code; not in the inventory's coverage dirs).
     _OWNED_DIRS = tuple(d.rstrip("/") + "/" for d in (OWNED_DIRS + OPTIONAL_DIRS) if d != "tests") + ("extras/",)
     _OWNED_FILES = set(OWNED_FILES) | set(OPTIONAL_FILES)
@@ -69,10 +69,11 @@ except Exception:
     _OWNED_FILES = {"AGENTS.md", "CLAUDE.md", "GEMINI.md", "DESIGN.md", "manage.sh", "pytest.ini",
                     ".pre-commit-config.yaml", ".gitattributes", ".gitignore",
                     ".github/copilot-instructions.md", ".github/dependabot.yml", ".mcp.json"}
+    KIT_TEST_FILES = {"tests/conftest.py", "tests/test_doc_consistency.py", "tests/test_hook_scripts.py",
+                      "tests/test_smoke.py", "tests/test_substrate_files.py"}
 # kit-source-only files + the kit's own test files (shipped into user repos by name).
 _OWNED_FILES |= {"bootstrap.sh", "package_release.sh", "BENCHMARK.md", "CHANGES_V3.md"}
-_KIT_TEST_FILES = {"tests/conftest.py", "tests/test_doc_consistency.py", "tests/test_hook_scripts.py",
-                   "tests/test_smoke.py", "tests/test_substrate_files.py"}
+_KIT_TEST_FILES = set(KIT_TEST_FILES)
 
 # --- governance / agent-control surfaces (flag CHURN regardless of ownership): the
 #     highest-review-value files an agent might casually edit in a broad patch. (v3.7.9)

@@ -72,6 +72,56 @@ def test_manage_does_not_source_config_as_shell(tmp_path) -> None:
     assert "invalid line" in (p.stdout + p.stderr).lower()
 
 
+def test_consumer_install_omits_heavy_selftests(tmp_path) -> None:
+    """v3.7.11: a consumer install must NOT vendor the kit's heavy behavioral
+    self-tests — on byte-identical vendored code they re-prove what the kit's own
+    CI already proves, costing ~2 min/CI run per consumer for ~zero marginal
+    safety. The cheap install-integrity smoke IS kept. The kit's own tests/ dir
+    (where THIS test runs) is untouched."""
+    if not _bootstrapped(tmp_path):
+        return
+    td = tmp_path / "tests"
+    assert not (td / "test_hook_scripts.py").exists(), "heavy self-test vendored into consumer"
+    assert not (td / "test_doc_consistency.py").exists(), "heavy self-test vendored into consumer"
+    assert (td / "test_substrate_files.py").exists(), "install-integrity test missing"
+    assert (td / "test_smoke.py").exists(), "exit-5 guard test missing"
+    assert (td / "conftest.py").exists(), "test fixtures missing"
+
+
+def test_dev_tests_flag_vendors_full_suite(tmp_path) -> None:
+    """--dev-tests opts back into the full self-test suite (dogfooding the kit
+    inside a real repo)."""
+    boot = None
+    for cand in (ROOT / "bootstrap.sh", ROOT.parent / "agent_substrate_kit_v3" / "bootstrap.sh"):
+        if cand.exists():
+            boot = cand
+            break
+    if boot is None:
+        return
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["bash", str(boot), "--no-doctor", "--dev-tests"], cwd=tmp_path,
+                   capture_output=True, timeout=120)
+    if not (tmp_path / "manage.sh").exists():
+        return
+    assert (tmp_path / "tests" / "test_hook_scripts.py").exists(), "--dev-tests must vendor full suite"
+
+
+def test_consumer_strip_tests_is_subset_of_kit_tests() -> None:
+    """SSOT sanity: the strip list names only real kit test files, and never the
+    cheap install-integrity tests kept on install."""
+    import importlib
+    sys.path.insert(0, str(SCRIPTS))
+    try:
+        surf = importlib.import_module("_substrate_surfaces")
+    finally:
+        sys.path.pop(0)
+    strip = surf.CONSUMER_STRIP_TESTS
+    kit = {p.split("/")[-1] for p in surf.KIT_TEST_FILES}
+    assert strip <= kit, "strip list names a non-kit test file"
+    assert "test_substrate_files.py" not in strip, "must keep install-integrity test"
+    assert "test_smoke.py" not in strip and "conftest.py" not in strip
+
+
 def test_config_forbids_command_substitution(tmp_path) -> None:
     if not _bootstrapped(tmp_path):
         return
@@ -2742,14 +2792,16 @@ def test_manage_wires_code_shape() -> None:
 
 # --- v3.7.9: code-shape measures the PROJECT, not the substrate it is installed into ---
 
-def _bootstrap_repo_for_shape(tmp_path, commit=True):
+def _bootstrap_repo_for_shape(tmp_path, commit=True, dev_tests=False):
     repo = tmp_path / "proj"; repo.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
     subprocess.run(["git", "config", "user.email", "x@x"], cwd=repo, check=True)
     subprocess.run(["git", "config", "user.name", "x"], cwd=repo, check=True)
-    subprocess.run(["bash", str(ROOT / "bootstrap.sh"), "--target", str(repo), "--profile",
-                    "standard", "--lang", "none", "--no-doctor"], check=True,
-                   capture_output=True, text=True, timeout=120)
+    cmd = ["bash", str(ROOT / "bootstrap.sh"), "--target", str(repo), "--profile",
+           "standard", "--lang", "none", "--no-doctor"]
+    if dev_tests:  # vendor the kit's full test suite so shape tests can assert on kit test files
+        cmd.append("--dev-tests")
+    subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=120)
     if commit:
         subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
         subprocess.run(["git", "commit", "-qm", "init"], cwd=repo, check=True, capture_output=True)
@@ -2768,7 +2820,10 @@ def test_code_shape_excludes_substrate_owned_in_bootstrapped_repo(tmp_path) -> N
     they belong to a separate substrate-owned summary."""
     if not (ROOT / "bootstrap.sh").exists():
         return
-    repo = _bootstrap_repo_for_shape(tmp_path)
+    # --dev-tests so the kit's own test files are present in the install (a default
+    # install strips the heavy ones, v3.7.11) — otherwise the exclusion assertions
+    # below would pass vacuously.
+    repo = _bootstrap_repo_for_shape(tmp_path, dev_tests=True)
     d = _shape(repo)
     proj = {f["path"] for f in d["repo"]["largest_files"]} | {f["path"] for f in d["repo"]["files_over_threshold"]}
     assert "tests/test_hook_scripts.py" not in proj, "kit test file leaked into project shape"

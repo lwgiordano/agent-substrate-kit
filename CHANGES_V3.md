@@ -1532,6 +1532,38 @@ where they are measured, not transcribed into prose that goes stale. This matche
 older entries' "N tests pass from the extracted artifact" phrasing and the kit's
 no-overclaim discipline applied to its own release notes.
 
+## v3.7.11 — consumer install omits the kit's heavy self-tests (real-repo trial #1)
+
+The first real-repo dogfood (bootstrapping the substrate into a live FastAPI+Vite app)
+surfaced an onboarding/footprint defect the synthetic audit loop structurally could not: a
+bootstrapped repo vendored the kit's **entire** self-test suite, so the consumer's CI ran
+~255 substrate self-tests against **11** of the project's own — ~96% of every CI run, ~2
+min, spent re-proving the substrate on byte-identical vendored code that the kit's OWN CI
+already proves. That is ~zero marginal safety: content-pins (`source_tree_sha256`,
+`MODULE_SOURCE_SHA256`) already detect vendored-file tampering more cheaply than running
+3877 lines of behavioral tests.
+
+v3.7.11: `bootstrap.sh` now OMITS the heavy behavioral self-tests
+(`tests/test_hook_scripts.py`, `tests/test_doc_consistency.py`) from a consumer install,
+while KEEPING the cheap install-integrity smoke — `tests/test_substrate_files.py` (a
+contract test that only runs in an installed repo, giving env coverage the pins cannot),
+`tests/test_smoke.py` (always-green so pytest never exit-5s before the project adds tests),
+and `tests/conftest.py` (the watchdog/hermetic fixtures those rely on). The kit's OWN
+`tests/` dir is untouched — the full suite still runs here, so the kit is developed and
+tested from source exactly as before. `bootstrap.sh --dev-tests` opts a consumer back into
+the full suite for dogfooding the kit inside a real repo.
+
+The strip list is a single source of truth in `scripts/_substrate_surfaces.py`
+(`CONSUMER_STRIP_TESTS`, emitted via `--consumer-strip-tests`); `code_shape.py`'s kit-test
+classification now derives `KIT_TEST_FILES` from the same inventory instead of a duplicated
+literal. Regression-gated: a consumer install must omit the heavy tests and keep the smoke
+(`test_consumer_install_omits_heavy_selftests`), `--dev-tests` must vendor the full suite
+(`test_dev_tests_flag_vendors_full_suite`), and the strip list must stay a subset of the
+kit's test files (`test_consumer_strip_tests_is_subset_of_kit_tests`).
+
+Evidence: real-repo trial #1 — measured 255 self-tests vs 11 project tests in a bootstrapped
+app's CI (the dogfood of `lwgiordano/brand-system-studio`).
+
 ## v3.7.10 — code-shape governance-churn polish (v3.7.9-audit P2)
 
 Two quality-reporting gaps in code-shape's governance detection (not security; the gates

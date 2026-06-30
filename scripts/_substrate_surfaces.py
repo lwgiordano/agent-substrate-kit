@@ -82,6 +82,30 @@ OPTIONAL_DIRS = [".github/skills", "docs/postmortems", "design-system"]
 # Generated runtime/toolchain state that is NOT governance source.
 COVERAGE_SKIP_PARTS = {"__pycache__", "venv", "node_modules", ".pytest_cache", ".ruff_cache", ".mypy_cache"}
 
+# --- tests/ classification ---------------------------------------------------
+# tests/ is required-OWNED as a dir, but a CONSUMER repo's tests/ is MIXED (the
+# kit's self-tests + the project's own tests), so tooling that must tell them
+# apart (code_shape shape report, bootstrap install) keys off the kit's own test
+# FILENAMES — named here as the single source of truth.
+KIT_TEST_FILES = {
+    "tests/conftest.py", "tests/test_doc_consistency.py", "tests/test_hook_scripts.py",
+    "tests/test_smoke.py", "tests/test_substrate_files.py",
+}
+# Heavy behavioral self-tests STRIPPED from a consumer install (bootstrap): on
+# byte-identical vendored code they re-prove what the kit's OWN CI already proves,
+# adding ~2 min to every consumer CI run for ~zero marginal safety (content-pins
+# already detect vendored-file tampering more cheaply). KEPT on install is the
+# cheap install-integrity smoke — test_substrate_files.py (a contract test that
+# only runs in an installed repo), test_smoke.py (always-green so pytest never
+# exit-5s before the project adds tests), and conftest.py (the watchdog/hermetic
+# fixtures those rely on). The kit's OWN tests/ dir is untouched — the full suite
+# still runs here. `bootstrap.sh --dev-tests` vendors the full suite (dogfooding).
+# (v3.7.11)
+CONSUMER_STRIP_TESTS = {
+    "test_hook_scripts.py",
+    "test_doc_consistency.py",
+}
+
 # --- agent-config-audit workflow trigger paths (CI must watch the same set) ---
 def audit_trigger_paths():
     paths = set()
@@ -104,4 +128,11 @@ def audit_trigger_paths():
 
 if __name__ == "__main__":
     import json
-    print(json.dumps(audit_trigger_paths(), indent=2))
+    import sys
+    if "--consumer-strip-tests" in sys.argv:
+        # Emit the bootstrap strip list (one filename per line) so bootstrap.sh
+        # derives it from this single source of truth instead of duplicating it.
+        for _n in sorted(CONSUMER_STRIP_TESTS):
+            print(_n)
+    else:
+        print(json.dumps(audit_trigger_paths(), indent=2))

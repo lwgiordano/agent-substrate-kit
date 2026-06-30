@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 KIT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TARGET="$(pwd)"; RUNNER="auto"; WORKFLOW="superpowers"; UI_ENABLED="no"; PROFILE="standard"; LANG_PRIMARY="auto"; FORCE="no"; INSTALL_TOOLS="no"; RUN_DOCTOR="yes"; SANDBOX="0"; REMOTE_GOVERNANCE="0"
+TARGET="$(pwd)"; RUNNER="auto"; WORKFLOW="superpowers"; UI_ENABLED="no"; PROFILE="standard"; LANG_PRIMARY="auto"; FORCE="no"; INSTALL_TOOLS="no"; RUN_DOCTOR="yes"; SANDBOX="0"; REMOTE_GOVERNANCE="0"; DEV_TESTS="no"
 usage(){ cat <<'HELP'
 Agent Substrate Kit v3 bootstrap
 Options:
@@ -14,9 +14,11 @@ Options:
   --force
   --install-tools
   --no-doctor
+  --dev-tests   (vendor the kit's FULL self-test suite for dogfooding; default
+                omits the heavy behavioral self-tests from the install)
 HELP
 }
-while [[ $# -gt 0 ]]; do case "$1" in --target) TARGET="$2"; shift 2;; --runner) RUNNER="$2"; shift 2;; --workflow) WORKFLOW="$2"; shift 2;; --ui) UI_ENABLED="$2"; shift 2;; --profile) PROFILE="$2"; shift 2;; --lang) LANG_PRIMARY="$2"; shift 2;; --force) FORCE="yes"; shift;; --install-tools) INSTALL_TOOLS="yes"; shift;; --no-doctor) RUN_DOCTOR="no"; shift;; -h|--help) usage; exit 0;; *) echo "Unknown option $1"; usage; exit 1;; esac; done
+while [[ $# -gt 0 ]]; do case "$1" in --target) TARGET="$2"; shift 2;; --runner) RUNNER="$2"; shift 2;; --workflow) WORKFLOW="$2"; shift 2;; --ui) UI_ENABLED="$2"; shift 2;; --profile) PROFILE="$2"; shift 2;; --lang) LANG_PRIMARY="$2"; shift 2;; --force) FORCE="yes"; shift;; --install-tools) INSTALL_TOOLS="yes"; shift;; --no-doctor) RUN_DOCTOR="no"; shift;; --dev-tests) DEV_TESTS="yes"; shift;; -h|--help) usage; exit 0;; *) echo "Unknown option $1"; usage; exit 1;; esac; done
 case "$RUNNER" in auto|uv|python|poetry) ;; *) echo "invalid runner"; exit 1;; esac
 case "$WORKFLOW" in superpowers|gsd|none) ;; *) echo "invalid workflow"; exit 1;; esac
 # `+`-separated suffixes are CLI ALIASES, not new config enums: `strict+sandbox`,
@@ -170,7 +172,28 @@ TODO.' > docs/ARCHITECTURE.md; echo "    +    docs/ARCHITECTURE.md"; }
 
 TODO.' > docs/INTENT.md; echo "    +    docs/INTENT.md"; }
 if [ ! -e docs/knowledge/00_substrate.md ] || [ "$FORCE" == "yes" ]; then { echo '---'; echo 'purpose: Universal Agent Substrate Kit v3 files installed in this repo.'; echo "last_human_reviewed: $TODAY"; echo 'covers:'; find scripts -maxdepth 1 -type f \( -name '*.py' -o -name '*.sh' \) | sort | while read -r p; do echo "  - $p"; done; echo '---'; echo; echo '# Substrate'; echo; echo 'This document covers the installed AI/self-audit substrate scripts.'; } > docs/knowledge/00_substrate.md; echo "    +    docs/knowledge/00_substrate.md"; fi
-mkdir -p tests; for f in "$KIT_DIR"/tests/*.py; do [ -f "$f" ] && copy "$f" "tests/$(basename "$f")"; done
+# Consumer install OMITS the kit's heavy behavioral self-tests (test_hook_scripts,
+# test_doc_consistency): on byte-identical vendored code they re-prove what the kit's
+# OWN CI already proves, adding ~2 min to every consumer CI run for ~zero marginal
+# safety (content-pins already detect vendored-file tampering more cheaply). The cheap
+# install-integrity tests are KEPT — test_substrate_files.py runs only in an installed
+# repo, test_smoke.py keeps pytest off exit-5 before the project adds tests, and
+# conftest.py carries their fixtures. The kit's own tests/ dir is untouched. --dev-tests
+# vendors the full suite (dogfooding). Strip list = scripts/_substrate_surfaces.py (SSOT).
+mkdir -p tests
+STRIP_TESTS=""
+if [[ "$DEV_TESTS" != "yes" ]]; then
+  STRIP_TESTS="$(python3 "$KIT_DIR/scripts/_substrate_surfaces.py" --consumer-strip-tests 2>/dev/null \
+              || python "$KIT_DIR/scripts/_substrate_surfaces.py" --consumer-strip-tests 2>/dev/null || true)"
+fi
+for f in "$KIT_DIR"/tests/*.py; do
+  [ -f "$f" ] || continue
+  bn="$(basename "$f")"
+  if [[ -n "$STRIP_TESTS" ]] && printf '%s\n' "$STRIP_TESTS" | grep -qxF "$bn"; then
+    echo "    -    tests/$bn  (kit self-test; omitted from install — see --dev-tests)"; continue
+  fi
+  copy "$f" "tests/$bn"
+done
 copy "$KIT_DIR/templates/pytest.ini.template" pytest.ini   # deterministic, hermetic test runs in the installed repo too
 mkdir -p .github/workflows; render "$KIT_DIR/workflows/ci.yml.template" .github/workflows/ci.yml; render "$KIT_DIR/workflows/scheduled-audit.yml.template" .github/workflows/scheduled-audit.yml; render "$KIT_DIR/workflows/agent-config-audit.yml.template" .github/workflows/agent-config-audit.yml
 # Stage the trusted-base template under .substrate/ ALWAYS (like .substrate/sandbox.json)

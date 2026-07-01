@@ -1532,6 +1532,39 @@ where they are measured, not transcribed into prose that goes stale. This matche
 older entries' "N tests pass from the extracted artifact" phrasing and the kit's
 no-overclaim discipline applied to its own release notes.
 
+## v3.7.17 — security-scanner tier (`enable security`, deferred tier E)
+
+Composes best-in-class scanners behind the substrate's opt-in profile/lock/skip-honest
+discipline — the substrate stays the JUDGE, scanners are INPUTS (never a new root of trust).
+Same 9-step integration pattern as sandbox / dep-cooldown / remote-governance.
+
+- `scripts/run_security_scanners.py` composes **gitleaks** (secrets, incl. git history),
+  **trivy** (`fs --exit-code 1`, deps/vulns/misconfig), and **osv-scanner** (dependency CVEs).
+  A finding (nonzero exit) BLOCKS; a missing binary is SKIPPED with a reason — never silently
+  passed. In REQUIRED mode a skipped/missing scanner BLOCKS (you asked for the tier). Results
+  recorded under `.substrate/audits/security/<run>/`. Networked (trivy/osv vuln DBs) → a
+  DEEP-tier gate, never part of the offline base.
+- Flag `SUBSTRATE_SECURITY_SCANNERS` (0|1) — mirrored in BOTH validators
+  (`check_substrate_config.py` `_ENUMS` + `_substrate_config.sh`; the allowlist-agree test
+  enforces parity) + lock `.substrate/required_security_scanners` (frozen by trusted-base:
+  a PR can't disable the tier once required).
+- `./manage.sh enable security [--plan|--write|--check]` (mirrors `enable remote`) +
+  `./manage.sh security scan`. `manage.sh check` runs the scanners only when the flag is on,
+  so the offline base check is unchanged.
+- go-live `security_scanners` deep row now reflects the built tier (flag state + which
+  binaries are installed); like `dep_cooldown` it reports `warn` when enabled because offline
+  go-live does NOT run the networked scan (no overclaim).
+- Honest caveat (documented in the runner): trivy/osv REQUIRE network for their vuln DBs,
+  which conflicts with the default deny-egress sandbox, so scanners run OUTSIDE containment
+  even under `SUBSTRATE_SANDBOX=1` — stated plainly rather than silently failing them.
+
+Regression-gated: `test_security_scanners_disabled_is_noop`,
+`test_security_scanners_skip_honest_when_absent`, `test_security_scanners_required_missing_blocks`,
+`test_security_scanner_key_mirrored_in_both_validators`, `test_go_live_reports_security_scanners_row`,
+`test_security_scanners_gitleaks_finds_planted_secret` (real gitleaks finding → block; skips
+where gitleaks absent). Deferred tiers remaining: D = MCP declaration-pinning; plus Scorecard /
+DeepSec / AgentDojo / runtime-detect / workflow-packs, all flag-when-feature-lands.
+
 ## v3.7.16 — installer/upgrade correctness patch (v3.7.15 audit: 1 P1 + 2 P2)
 
 Focused correctness pass on the installer spine before any further tiers. All three

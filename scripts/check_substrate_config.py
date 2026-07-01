@@ -43,7 +43,8 @@ except Exception as _e:  # pragma: no cover - exercised via staged broken module
 
 _ALLOWED_KEYS = {"SUBSTRATE_PROFILE", "SUBSTRATE_LANG", "SUBSTRATE_RUNNER",
                  "LINT_CMD", "TYPECHECK_CMD", "TEST_CMD", "SUBSTRATE_CODE_SUFFIXES",
-                 "SUBSTRATE_SANDBOX", "SUBSTRATE_REMOTE_GOVERNANCE", "SUBSTRATE_DEP_COOLDOWN"}
+                 "SUBSTRATE_SANDBOX", "SUBSTRATE_REMOTE_GOVERNANCE", "SUBSTRATE_DEP_COOLDOWN",
+                 "SUBSTRATE_SECURITY_SCANNERS"}
 # Non-negative-integer keys (validated numerically, not against a fixed enum domain).
 # SUBSTRATE_DEP_COOLDOWN=N opts into the dependency-cooldown tier — flag direct deps
 # whose resolved version published < N days ago (a fresh-version risk signal). 0 = off. v3.7.2.
@@ -58,6 +59,9 @@ _ENUMS = {
     # coverage, trusted-base authority) — orthogonal to the governance PROFILE so a
     # repo can be strict-LOCAL (no remote) or standard+remote. v3.6.0.
     "SUBSTRATE_REMOTE_GOVERNANCE": {"0", "1"},
+    # SUBSTRATE_SECURITY_SCANNERS=1 opts into the DEEP scanner tier (gitleaks/trivy/osv,
+    # composed + skip-honest). Networked (vuln DBs) — never part of the offline base. v3.7.17.
+    "SUBSTRATE_SECURITY_SCANNERS": {"0", "1"},
 }
 
 
@@ -146,6 +150,20 @@ def _required_dep_cooldown():
     '0'/'1' or None. When '1', the cooldown tier may not be disabled (flag set to 0).
     Frozen by the trusted-base guard, like the other locks. v3.7.2."""
     p = ROOT / ".substrate" / "required_dep_cooldown"
+    if not p.is_file():
+        return None
+    try:
+        val = p.read_text(encoding="utf-8").strip()
+    except Exception:
+        return None
+    return val if val in {"0", "1"} else None
+
+
+def _required_security_scanners():
+    """The pinned security-scanner requirement (.substrate/required_security_scanners):
+    '0'/'1' or None. When '1', the scanner tier may not be disabled. Frozen by the
+    trusted-base guard, like the other locks. v3.7.17."""
+    p = ROOT / ".substrate" / "required_security_scanners"
     if not p.is_file():
         return None
     try:
@@ -254,6 +272,14 @@ def main() -> int:
     if req_dc == "1" and vals.get("SUBSTRATE_DEP_COOLDOWN", "0") == "0":
         print('check-substrate-config: SUBSTRATE_DEP_COOLDOWN must be > 0 — the dependency-'
               "cooldown tier is a required minimum (.substrate/required_dep_cooldown=1); "
+              "a PR may not disable it", file=sys.stderr)
+        return 2
+    # SECURITY-SCANNER LOCK (v3.7.17). When .substrate/required_security_scanners=1, the
+    # scanner tier may not be silently disabled — SUBSTRATE_SECURITY_SCANNERS must be "1".
+    req_ss = _required_security_scanners()
+    if req_ss == "1" and vals.get("SUBSTRATE_SECURITY_SCANNERS", "0") != "1":
+        print('check-substrate-config: SUBSTRATE_SECURITY_SCANNERS must be "1" — the scanner '
+              "tier is a required minimum (.substrate/required_security_scanners=1); "
               "a PR may not disable it", file=sys.stderr)
         return 2
     sbx_det = Path(__file__).resolve().parent / "sandbox_detect.py"

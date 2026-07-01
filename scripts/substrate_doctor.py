@@ -439,8 +439,24 @@ def _go_live(blocks, warns, as_json=False):
                    'reason': (f'enabled ({_dc}d) — runs in `manage.sh check` (networked), not by offline go-live'
                               if _dc > 0 else
                               'not enabled — set SUBSTRATE_DEP_COOLDOWN=N to flag direct deps published < N days ago')})
-    checks.append({'id': 'security_scanners', 'tier': 'deep', 'status': 'available',
-                   'reason': 'Semgrep/Gitleaks/Trivy not wired — future `enable security` rung'})
+    # Security-scanner tier (v3.7.17): composed gitleaks/trivy/osv, opt-in + skip-honest.
+    # Offline go-live reports the flag + which scanner binaries are present, but (like
+    # dep_cooldown) does NOT run the networked scan, so 'warn' not 'pass' when enabled.
+    _ss_cfg = "0"
+    _cfgp = ROOT / '.substrate' / 'config'
+    if _cfgp.is_file():
+        for _ln in _cfgp.read_text(encoding='utf-8', errors='replace').splitlines():
+            _ln = _ln.split('#', 1)[0].strip()
+            if _ln.startswith('SUBSTRATE_SECURITY_SCANNERS='):
+                _ss_cfg = _ln.split('=', 1)[1].strip().strip('"\'')
+    _present = [b for b in ('gitleaks', 'trivy', 'osv-scanner') if shutil.which(b)]
+    if _ss_cfg == '1':
+        _ss_reason = (f"enabled — runs in `manage.sh check` (networked), not by offline go-live; "
+                      f"installed: {', '.join(_present) if _present else 'none (all skip-honest)'}")
+        checks.append({'id': 'security_scanners', 'tier': 'deep', 'status': 'warn', 'reason': _ss_reason})
+    else:
+        checks.append({'id': 'security_scanners', 'tier': 'deep', 'status': 'available',
+                       'reason': 'not enabled — `./manage.sh enable security` composes gitleaks/trivy/osv-scanner'})
     checks.append({'id': 'deep_audit', 'tier': 'deep', 'status': 'available',
                    'reason': 'DeepSec/AgentDojo deep audit available as a manual/scheduled tier'})
     repo_pass = repo_ok and eval_ok is not False

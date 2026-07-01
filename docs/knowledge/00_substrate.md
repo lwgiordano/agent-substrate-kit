@@ -43,6 +43,7 @@ covers:
   - scripts/release_gate.sh
   - scripts/remote_detect.py
   - scripts/run_python_gate.sh
+  - scripts/run_security_scanners.py
   - scripts/run_smoke_verification.py
   - scripts/run_substrate_evals.py
   - scripts/sandbox_detect.py

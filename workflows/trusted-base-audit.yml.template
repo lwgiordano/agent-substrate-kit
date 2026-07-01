@@ -42,7 +42,7 @@ jobs:
           # profile). NOT the audited DATA/content — harness_patterns.json is
           # .json (data) and AGENTS.md / docs / .substrate/config (command
           # values) may change. (v3.2.19/20 findings.)
-          TRUSTED="scripts manage.sh .pre-commit-config.yaml .github/workflows .substrate/required_profile .substrate/required_sandbox .substrate/required_remote_governance .substrate/required_dep_cooldown .substrate/trusted-base-audit.yml.template"
+          TRUSTED="scripts manage.sh .pre-commit-config.yaml .github/workflows .substrate/required_profile .substrate/required_sandbox .substrate/required_remote_governance .substrate/required_dep_cooldown .substrate/required_security_scanners .substrate/trusted-base-audit.yml.template"
           # carve the one DATA file back out of scripts/ (PRs may extend it; the
           # frozen check_harness_patterns.py validates it against pinned hashes).
           changed="$(git diff --name-only "origin/${{ github.base_ref }}...HEAD" -- $TRUSTED \
@@ -95,7 +95,16 @@ jobs:
             echo "::error::Disabling it must route through the release process."
             exit 1
           fi
-          echo "freeze-guard: ok — no frozen policy/validator/CI/profile/sandbox/remote-governance/cooldown change"
+          # Security-scanner authority (v3.7.17): frozen when required_security_scanners=1 —
+          # a PR must not silently disable the composed scanner tier.
+          if git diff "origin/${{ github.base_ref }}...HEAD" -- .substrate/config \
+               | grep -Eq '^[+-]\s*SUBSTRATE_SECURITY_SCANNERS='; then
+            echo "::error::This PR changes SUBSTRATE_SECURITY_SCANNERS in .substrate/config."
+            echo "::error::The scanner tier is frozen when .substrate/required_security_scanners=1."
+            echo "::error::Disabling it must route through the release process."
+            exit 1
+          fi
+          echo "freeze-guard: ok — no frozen policy/validator/CI/profile/sandbox/remote-governance/cooldown/scanner change"
       - name: Run the (frozen) validators + strict governance against PR content
         run: |
           set -euo pipefail

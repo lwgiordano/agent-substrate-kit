@@ -123,6 +123,42 @@ PLAN
     *) echo "usage: ./manage.sh enable remote [--plan|--write|--check]" >&2; exit 2 ;;
   esac
 }
+enable_security(){
+  local mode="${1:---plan}"
+  case "$mode" in
+    --check) exec run_py_system scripts/run_security_scanners.py --scan ;;
+    --plan)
+      cat <<'PLAN'
+`enable security` turns on the DEEP SCANNER tier (composed, opt-in, skip-honest):
+  - sets SUBSTRATE_SECURITY_SCANNERS="1" in .substrate/config
+  - writes .substrate/required_security_scanners=1 (frozen minimum; a PR may not disable it)
+  - `check` then runs scripts/run_security_scanners.py (gitleaks / trivy / osv-scanner)
+
+The substrate is the JUDGE, scanners are INPUTS: a scanner FINDING blocks; a MISSING scanner
+is SKIPPED honestly (and, because the tier is required once enabled, a skip BLOCKS — install
+the tool or it fails). Networked (trivy/osv vuln DBs) → never part of the offline base.
+Install the tools you want first (e.g. `brew install gitleaks trivy osv-scanner`).
+
+Apply the local config changes with:  ./manage.sh enable security --write
+Run a scan any time with:             ./manage.sh security scan
+PLAN
+      ;;
+    --write)
+      local cfg=".substrate/config"
+      [ -f "$cfg" ] || { echo "no $cfg — run bootstrap first" >&2; exit 2; }
+      if grep -q '^SUBSTRATE_SECURITY_SCANNERS=' "$cfg"; then
+        local tmp; tmp="$(mktemp)"
+        awk '/^SUBSTRATE_SECURITY_SCANNERS=/{print "SUBSTRATE_SECURITY_SCANNERS=\"1\""; next}{print}' "$cfg" > "$tmp" && mv "$tmp" "$cfg"
+      else
+        printf 'SUBSTRATE_SECURITY_SCANNERS="1"\n' >> "$cfg"
+      fi
+      echo "1" > .substrate/required_security_scanners
+      echo "security-scanner tier ENABLED (SUBSTRATE_SECURITY_SCANNERS=1, required_security_scanners=1)."
+      echo "next: install gitleaks/trivy/osv-scanner, then ./manage.sh security scan"
+      ;;
+    *) echo "usage: ./manage.sh enable security [--plan|--write|--check]" >&2; exit 2 ;;
+  esac
+}
 case "$cmd" in
   setup) setup ;;
   doctor) run_py_system scripts/substrate_doctor.py "$@" ;;
@@ -135,7 +171,14 @@ case "$cmd" in
     what="${1:-}"; shift || true
     case "$what" in
       remote) enable_remote "${1:---plan}" ;;
-      *) echo "usage: ./manage.sh enable remote [--plan|--write|--check]" >&2; exit 2 ;;
+      security) enable_security "${1:---plan}" ;;
+      *) echo "usage: ./manage.sh enable remote|security [--plan|--write|--check]" >&2; exit 2 ;;
+    esac ;;
+  security)
+    what="${1:-scan}"; shift || true
+    case "$what" in
+      scan) run_py_system scripts/run_security_scanners.py --scan "$@" ;;
+      *) echo "usage: ./manage.sh security scan" >&2; exit 2 ;;
     esac ;;
   check)
     # Remote governance (CODEOWNERS coverage + trusted-base authority) is enforced as
@@ -157,6 +200,9 @@ case "$cmd" in
     # Dependency-cooldown tier (v3.7.2): opt-in fresh-version risk signal. Networked +
     # skip-honest; only runs when SUBSTRATE_DEP_COOLDOWN>0, so the base check stays offline.
     if [ "${SUBSTRATE_DEP_COOLDOWN:-0}" != "0" ]; then run_py scripts/check_dep_cooldown.py; fi
+    # Security-scanner tier (v3.7.17): opt-in composed gitleaks/trivy/osv. Networked +
+    # skip-honest; only runs when SUBSTRATE_SECURITY_SCANNERS=1, so the base check stays offline.
+    if [ "${SUBSTRATE_SECURITY_SCANNERS:-0}" = "1" ]; then run_py scripts/run_security_scanners.py; fi
     run_lang "lint" "$LINT_CMD"
     run_lang "typecheck" "$TYPECHECK_CMD"
     run_lang "test" "$TEST_CMD"
@@ -171,7 +217,7 @@ case "$cmd" in
   memory) run_py scripts/memory_log.py "$@" ;;
   design-init) mkdir -p design-system/pages design-system/tokens; echo "design-system/ scaffolded" ;;
   *) cat <<'HELP'
-Usage: ./manage.sh setup|doctor|go-live|context-report|code-shape|verify-release|upgrade|enable|check|evals|audit|full-audit|release|manifest|agent-system-audit|handoff|memory|design-init
+Usage: ./manage.sh setup|doctor|go-live|context-report|code-shape|verify-release|upgrade|enable|security|check|evals|audit|full-audit|release|manifest|agent-system-audit|handoff|memory|design-init
   evals                                       adversarial behavior evals (block-rate / FP-rate, writes a trace)
   doctor [--quick|--security|--operational]   readiness levels
   go-live [--json]                            local/remote/deep readiness map (offline, side-effect-light)

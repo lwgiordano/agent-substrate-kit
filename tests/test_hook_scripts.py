@@ -170,6 +170,83 @@ def test_bootstrap_warns_on_preexisting_scripts_dir(tmp_path) -> None:
     assert (tmp_path / "scripts" / "my_project_tool.py").read_text(encoding="utf-8") == "print('mine')\n"
 
 
+def _run_scanners(root, *args, env=None):
+    return subprocess.run([sys.executable, "-I", str(SCRIPTS / "run_security_scanners.py"),
+                           "--root", str(root), *args],
+                          capture_output=True, text=True, timeout=180, env=env)
+
+
+def test_security_scanners_disabled_is_noop(tmp_path) -> None:
+    """v3.7.17: with the flag off and no --scan/--require, the tier is a clean no-op."""
+    p = _run_scanners(tmp_path, "--json")
+    assert p.returncode == 0, (p.stdout, p.stderr)
+    assert '"enabled": false' in p.stdout.lower() or "not enabled" in p.stdout
+
+
+def test_security_scanners_skip_honest_when_absent(tmp_path) -> None:
+    """A scanner whose binary is absent is SKIPPED (never silently passed); with none present
+    and the tier not required, the run is clean (rc 0)."""
+    import os
+    empty = tmp_path / "emptybin"
+    empty.mkdir()
+    env = os.environ.copy()
+    env["PATH"] = str(empty)  # no scanner binaries resolvable
+    p = _run_scanners(tmp_path, "--scan", "--json", env=env)
+    assert p.returncode == 0, (p.stdout, p.stderr)
+    d = json.loads(p.stdout)
+    assert d["results"] and all(r["status"] == "skipped" for r in d["results"]), d
+
+
+def test_security_scanners_required_missing_blocks(tmp_path) -> None:
+    """REQUIRED tier + a missing scanner must BLOCK (rc 1): you asked for the tier, so an
+    unavailable scanner is a failure, not a pass."""
+    import os
+    empty = tmp_path / "emptybin2"
+    empty.mkdir()
+    env = os.environ.copy()
+    env["PATH"] = str(empty)
+    p = _run_scanners(tmp_path, "--require", "--json", env=env)
+    assert p.returncode == 1, (p.stdout, p.stderr)
+
+
+def test_security_scanner_key_mirrored_in_both_validators() -> None:
+    """The new flag must be in BOTH the Python and shell config validators (the generic
+    allowlist-agree test enforces this; assert explicitly for the new key)."""
+    py = (SCRIPTS / "check_substrate_config.py").read_text(encoding="utf-8")
+    sh = (SCRIPTS / "_substrate_config.sh").read_text(encoding="utf-8")
+    assert "SUBSTRATE_SECURITY_SCANNERS" in py and "SUBSTRATE_SECURITY_SCANNERS" in sh
+
+
+def test_go_live_reports_security_scanners_row(tmp_path) -> None:
+    """go-live must surface a security_scanners deep-tier row."""
+    if not _bootstrapped(tmp_path):
+        return
+    p = subprocess.run(["./manage.sh", "go-live", "--json"], cwd=tmp_path,
+                       capture_output=True, text=True, timeout=120)
+    assert "security_scanners" in p.stdout, (p.returncode, p.stdout[:600], p.stderr[:600])
+
+
+def test_security_scanners_gitleaks_finds_planted_secret(tmp_path) -> None:
+    """When gitleaks IS present, a planted secret is a finding → the tier blocks (rc 1).
+    Skips where gitleaks is not installed (hermetic)."""
+    import pytest
+    import shutil as _sh
+    if _sh.which("gitleaks") is None:
+        pytest.skip("gitleaks not installed")
+    # A non-example AWS key: gitleaks allowlists the canonical AKIAIOSFODNN7EXAMPLE docs key.
+    (tmp_path / "creds.txt").write_text('aws_access_key_id = "AKIAZ3XK7HGN2QER5TWQ"\n', encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "x@x"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "x"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "seed"], cwd=tmp_path, check=True, capture_output=True)
+    p = _run_scanners(tmp_path, "--scan", "--json")
+    d = json.loads(p.stdout)
+    gl = [r for r in d["results"] if r["scanner"] == "gitleaks"]
+    assert gl and gl[0]["status"] == "findings", d
+    assert p.returncode == 1, (p.returncode, d)
+
+
 def test_upgrade_same_version_twice_does_not_self_drift(tmp_path) -> None:
     """v3.7.16 P1: .substrate/install.json is excluded from its own drift baseline, so a
     second no-op upgrade must NOT false-report it as locally-modified machinery."""

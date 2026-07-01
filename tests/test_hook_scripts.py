@@ -170,6 +170,75 @@ def test_bootstrap_warns_on_preexisting_scripts_dir(tmp_path) -> None:
     assert (tmp_path / "scripts" / "my_project_tool.py").read_text(encoding="utf-8") == "print('mine')\n"
 
 
+def test_bootstrap_writes_install_json(tmp_path) -> None:
+    """v3.7.14 (Phase 1b): bootstrap records .substrate/install.json (provenance + drift
+    baseline) with a version, the answer set, and owned-file hashes."""
+    if not _bootstrapped(tmp_path):
+        return
+    ij = tmp_path / ".substrate" / "install.json"
+    assert ij.is_file(), "bootstrap did not write .substrate/install.json"
+    data = json.loads(ij.read_text(encoding="utf-8"))
+    assert data.get("kit_version"), data
+    assert data.get("answers", {}).get("profile"), data
+    assert isinstance(data.get("owned_file_sha256"), dict) and data["owned_file_sha256"], data
+
+
+def test_upgrade_failclosed_on_unverified_dir_source(tmp_path) -> None:
+    """A directory source is unverified — upgrade must refuse it without --allow-unverified
+    (the signed .zip is the trusted path)."""
+    if not _bootstrapped(tmp_path):
+        return
+    p = subprocess.run(["./manage.sh", "upgrade", "--from", str(ROOT), "--write"],
+                       cwd=tmp_path, capture_output=True, text=True, timeout=60)
+    assert p.returncode == 2, (p.returncode, p.stdout, p.stderr)
+
+
+def test_upgrade_plan_mutates_nothing(tmp_path) -> None:
+    """--plan (default) verifies + reports but changes no files."""
+    if not _bootstrapped(tmp_path):
+        return
+    agents = tmp_path / "AGENTS.md"
+    before = agents.read_bytes()
+    doctor_before = (tmp_path / "scripts" / "substrate_doctor.py").read_bytes()
+    p = subprocess.run(["./manage.sh", "upgrade", "--from", str(ROOT), "--allow-unverified"],
+                       cwd=tmp_path, capture_output=True, text=True, timeout=120)
+    assert "substrate upgrade:" in p.stdout, (p.stdout, p.stderr)
+    assert agents.read_bytes() == before, "plan mutated AGENTS.md"
+    assert (tmp_path / "scripts" / "substrate_doctor.py").read_bytes() == doctor_before, "plan mutated a machinery file"
+
+
+def test_upgrade_drift_gate_blocks_modified_machinery(tmp_path) -> None:
+    """A locally-modified machinery file blocks --write without --force."""
+    if not _bootstrapped(tmp_path):
+        return
+    tgt = tmp_path / "scripts" / "context_report.py"
+    if not tgt.is_file():
+        return
+    tgt.write_text(tgt.read_text(encoding="utf-8") + "\n# local edit\n", encoding="utf-8")
+    p = subprocess.run(["./manage.sh", "upgrade", "--from", str(ROOT), "--allow-unverified", "--write"],
+                       cwd=tmp_path, capture_output=True, text=True, timeout=120)
+    assert p.returncode == 2 and "DRIFT" in (p.stdout + p.stderr), (p.returncode, p.stdout, p.stderr)
+
+
+def test_upgrade_write_preserves_user_content(tmp_path) -> None:
+    """--write refreshes machinery via bootstrap --force but preserves user content
+    (AGENTS.md) and never touches project files."""
+    if not _bootstrapped(tmp_path):
+        return
+    agents = tmp_path / "AGENTS.md"
+    sentinel = "\n<!-- PROJECT SENTINEL do-not-lose -->\n"
+    agents.write_text(agents.read_text(encoding="utf-8") + sentinel, encoding="utf-8")
+    proj = tmp_path / "src" / "app.py"
+    proj.parent.mkdir(parents=True, exist_ok=True)
+    proj.write_text("print('mine')\n", encoding="utf-8")
+    p = subprocess.run(["./manage.sh", "upgrade", "--from", str(ROOT), "--allow-unverified",
+                        "--write", "--force"], cwd=tmp_path, capture_output=True, text=True, timeout=180)
+    assert p.returncode == 0, (p.returncode, p.stdout[-800:], p.stderr[-800:])
+    assert sentinel in agents.read_text(encoding="utf-8"), "upgrade clobbered user content in AGENTS.md"
+    assert proj.read_text(encoding="utf-8") == "print('mine')\n", "upgrade touched a project file"
+    assert (tmp_path / ".substrate" / "install.json").is_file(), "upgrade did not refresh install.json"
+
+
 def _ms_fixture():
     d = ROOT / "tests" / "fixtures" / "minisign"
     return d / "signer.pub", d / "payload.txt", d / "payload.txt.minisig"

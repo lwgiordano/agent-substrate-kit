@@ -402,6 +402,19 @@ def _go_live(blocks, warns, as_json=False):
     else:
         rs_status, rs_reason = 'warn', 'no .substrate/trust/minisign.pub — release/upgrade authenticity cannot be verified'
     checks.append({'id': 'release_signature', 'tier': 'local', 'status': rs_status, 'reason': rs_reason})
+    # Install provenance / upgrade baseline (v3.7.14, Phase 1b): .substrate/install.json records
+    # the kit version this repo was installed/upgraded from + a drift baseline for `manage.sh
+    # upgrade`. Offline-honest: present → pass (with version), absent → warn (upgrade needs --force).
+    _ij = ROOT / '.substrate' / 'install.json'
+    if _ij.is_file():
+        try:
+            _ijv = json.loads(_ij.read_text(encoding='utf-8')).get('kit_version', '?')
+        except Exception:
+            _ijv = '?'
+        ip_status, ip_reason = 'pass', f'installed from kit {_ijv}; `./manage.sh upgrade --from <signed-zip> --plan` to preview an upgrade'
+    else:
+        ip_status, ip_reason = 'warn', 'no .substrate/install.json — provenance/drift baseline absent (pre-1b install); upgrades need --force'
+    checks.append({'id': 'install_provenance', 'tier': 'local', 'status': ip_status, 'reason': ip_reason})
     # --- remote expansion ---
     checks.append({'id': 'remote_connected', 'tier': 'remote',
                    'status': 'pass' if (has_remote and provider == 'github') else 'warn',

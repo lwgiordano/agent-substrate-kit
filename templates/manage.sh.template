@@ -130,6 +130,7 @@ case "$cmd" in
   context-report) run_py_system scripts/context_report.py "$@" ;;
   code-shape) run_py_system scripts/code_shape.py "$@" ;;
   verify-release) run_py_system scripts/verify_release.py "$@" ;;
+  upgrade) run_py_system scripts/substrate_upgrade.py "$@" ;;
   enable)
     what="${1:-}"; shift || true
     case "$what" in
@@ -170,7 +171,7 @@ case "$cmd" in
   memory) run_py scripts/memory_log.py "$@" ;;
   design-init) mkdir -p design-system/pages design-system/tokens; echo "design-system/ scaffolded" ;;
   *) cat <<'HELP'
-Usage: ./manage.sh setup|doctor|go-live|context-report|code-shape|verify-release|enable|check|evals|audit|full-audit|release|manifest|agent-system-audit|handoff|memory|design-init
+Usage: ./manage.sh setup|doctor|go-live|context-report|code-shape|verify-release|upgrade|enable|check|evals|audit|full-audit|release|manifest|agent-system-audit|handoff|memory|design-init
   evals                                       adversarial behavior evals (block-rate / FP-rate, writes a trace)
   doctor [--quick|--security|--operational]   readiness levels
   go-live [--json]                            local/remote/deep readiness map (offline, side-effect-light)

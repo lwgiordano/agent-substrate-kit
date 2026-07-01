@@ -79,7 +79,7 @@ OWNED_FILES = [
 # Optional agent-control surfaces: required-owned ONLY when present.
 # .substrate/trust/minisign.pub is the release/upgrade TRUST ANCHOR — owned-when-present
 # so a PR can't swap the verification key without CODEOWNER review (v3.7.13).
-OPTIONAL_FILES = [".mcp.json", ".substrate/trust/minisign.pub"]
+OPTIONAL_FILES = [".mcp.json", ".substrate/trust/minisign.pub", ".substrate/install.json"]
 OPTIONAL_DIRS = [".github/skills", "docs/postmortems", "design-system"]
 # Generated runtime/toolchain state that is NOT governance source.
 COVERAGE_SKIP_PARTS = {"__pycache__", "venv", "node_modules", ".pytest_cache", ".ruff_cache", ".mypy_cache"}

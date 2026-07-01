@@ -253,6 +253,15 @@ if [ ! -e .gitattributes ] || ! grep -q 'docs/HISTORY.md' .gitattributes; then e
 [ -e .gitignore ] || touch .gitignore; for line in docs/CURRENT_SESSION.md docs/.todo_state.json .substrate/memory/tasks/ .substrate/traces/ .substrate/venv/ .substrate/dep_cooldown_cache.json 'ai/audits/*/audit-report.json' __pycache__/ .venv/ .pytest_cache/ .ruff_cache/ .mypy_cache/ node_modules/ dist/ build/; do grep -qxF "$line" .gitignore || echo "$line" >> .gitignore; done
 [ -e docs/.todo_state.json ] || echo '{"version":1,"items":[]}' > docs/.todo_state.json
 python3 scripts/update_manifest.py --fix >/dev/null || python scripts/update_manifest.py --fix >/dev/null
+# Provenance + drift baseline for `./manage.sh upgrade` (v3.7.14): record the kit
+# version/commit/source, the FULL answer set, and a hash of every owned file.
+KIT_VER="$(tr -d '[:space:]' < "$KIT_DIR/VERSION" 2>/dev/null || echo 0.0.0)"
+KIT_COMMIT="$(git -C "$KIT_DIR" rev-parse --short HEAD 2>/dev/null || echo none)"
+KIT_SRC="$(git -C "$KIT_DIR" remote get-url origin 2>/dev/null || echo "$KIT_DIR")"
+python3 scripts/write_install_json.py --root . --version "$KIT_VER" --commit "$KIT_COMMIT" \
+  --source "$KIT_SRC" --installed-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --profile "$PROFILE" --lang "$LANG_PRIMARY" --runner "$RUNNER" --ui "$UI_ENABLED" \
+  --workflow "$WORKFLOW" --sandbox "$SANDBOX" --remote-governance "$REMOTE_GOVERNANCE" >/dev/null 2>&1 || true
 [ "$INSTALL_TOOLS" == "yes" ] && ./manage.sh setup || true
 # Default post-bootstrap check is --quick: the substrate venv does not
 # exist until `./manage.sh setup`, so an operational/full doctor here

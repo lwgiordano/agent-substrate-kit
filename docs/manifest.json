@@ -52,11 +52,13 @@
         "scripts/setup_branch_protection.sh",
         "scripts/substrate_audit.py",
         "scripts/substrate_doctor.py",
+        "scripts/substrate_upgrade.py",
         "scripts/todo_state_hook.py",
         "scripts/update_manifest.py",
-        "scripts/verify_release.py"
+        "scripts/verify_release.py",
+        "scripts/write_install_json.py"
       ],
-      "last_human_reviewed": "2026-06-30",
+      "last_human_reviewed": "2026-07-01",
       "path": "docs/knowledge/00_substrate.md",
       "purpose": "Universal Agent Substrate Kit v3 files installed in this repo."
     }

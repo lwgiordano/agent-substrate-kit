@@ -1532,6 +1532,43 @@ where they are measured, not transcribed into prose that goes stale. This matche
 older entries' "N tests pass from the extracted artifact" phrasing and the kit's
 no-overclaim discipline applied to its own release notes.
 
+## v3.7.14 — in-place `upgrade` engine (installer spine, Phase 1b)
+
+Second piece of the installer/upgrade spine: consumers can now UPGRADE the substrate in
+place, verified, without a destructive re-bootstrap. (Phase 1a = verifiable releases;
+Phase 2 = PyPI `substrate-init` package w/ out-of-band pubkey; Phase 3 = Copier merge.)
+
+- `scripts/write_install_json.py` — writes `.substrate/install.json`: the kit version/commit/
+  source this repo was installed or upgraded from, the FULL bootstrap answer set (profile/
+  lang/runner/ui/workflow/sandbox/remote — ui+workflow are NOT in `.substrate/config`, so a
+  faithful re-render needs them recorded here), a SHA-256 of every owned file (the drift
+  baseline), and a timestamp. Called by `bootstrap.sh` at install and after each upgrade.
+- `scripts/substrate_upgrade.py` + `./manage.sh upgrade --from <signed-zip|dir> [--plan|--write]
+  [--force] [--allow-unverified]`:
+  1. VERIFY the source — a `.zip` is checked with `verify_release.py` against the trusted key
+     BEFORE anything is read from it (fail-closed; `--allow-unverified` only for a local dir or
+     a deliberately unsigned build, and it warns).
+  2. DRIFT-GATE — a machinery file whose local hash no longer matches the `install.json`
+     baseline is refused for overwrite without `--force` (surfaces "someone edited a substrate
+     file"). No baseline (pre-1b install) → `--write` requires `--force`.
+  3. APPLY — via the NEW kit's own `bootstrap.sh --force` (the real, correct renderer) wrapped
+     in BACKUP → force → RESTORE of the user-content set (AGENTS.md, CLAUDE.md, pyproject.toml,
+     `.substrate/config`, the `required_*` LOCKS, sandbox.json, docs narrative), so machinery
+     refreshes while user content and locks are never clobbered and project (non-substrate)
+     files are never touched at all. Then re-records `install.json`.
+  `--plan` (default) mutates nothing — it verifies, shows the version delta + drift + preserve
+  list. Managed-region merge of AGENTS.md/CLAUDE.md is deferred to Phase 3 (Copier); 1b
+  preserves those files whole (so an upgrade never loses project content, but also does not yet
+  auto-update the governance region — an honest, conservative default).
+- go-live `install_provenance` row (offline): install.json present (with version) → pass,
+  absent → warn.
+- `.substrate/install.json` is `OPTIONAL_FILES` (owned-when-present) so a PR can't forge the
+  provenance/drift baseline without CODEOWNER review.
+
+Regression-gated: `test_bootstrap_writes_install_json`,
+`test_upgrade_failclosed_on_unverified_dir_source`, `test_upgrade_plan_mutates_nothing`,
+`test_upgrade_drift_gate_blocks_modified_machinery`, `test_upgrade_write_preserves_user_content`.
+
 ## v3.7.13 — release/upgrade TRUST ROOT (installer spine, Phase 1a)
 
 First piece of the signed installer/upgrade spine (chosen over scanner/MCP tiers as the

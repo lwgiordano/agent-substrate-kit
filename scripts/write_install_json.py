@@ -1,0 +1,103 @@
+#!/usr/bin/env python3
+"""Write .substrate/install.json — the provenance + drift baseline the upgrade engine
+reads (v3.7.14, installer/upgrade Phase 1b).
+
+Records: the kit version/commit/source this repo was installed or upgraded from, the FULL
+bootstrap answer set (profile/lang/runner/ui/workflow/sandbox/remote — ui+workflow are NOT
+in .substrate/config, so a faithful re-render on upgrade needs them here), a SHA-256 of every
+substrate-owned file present (the drift baseline: an upgrade refuses to overwrite a machinery
+file whose local hash no longer matches, unless --force), and a timestamp.
+
+Called by bootstrap.sh at install and by substrate_upgrade.py after applying an upgrade.
+Read-only w.r.t. everything except .substrate/install.json. Stdlib only.
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+try:
+    from _substrate_surfaces import (
+        COVERAGE_SKIP_PARTS, OPTIONAL_DIRS, OPTIONAL_FILES, OWNED_DIRS, OWNED_FILES,
+    )
+except Exception:  # fail-soft: a baseline is a safety aid, not a gate
+    OWNED_DIRS = ["scripts", "tests", ".claude", ".codex", ".agents", "docs/knowledge",
+                  ".github/hooks", ".github/instructions", ".github/workflows"]
+    OWNED_FILES = ["AGENTS.md", "CLAUDE.md", "manage.sh", "pytest.ini",
+                   ".pre-commit-config.yaml", ".substrate/config"]
+    OPTIONAL_FILES, OPTIONAL_DIRS = [".mcp.json"], []
+    COVERAGE_SKIP_PARTS = {"__pycache__", "venv", "node_modules", ".pytest_cache",
+                           ".ruff_cache", ".mypy_cache"}
+
+
+def owned_files(root: Path) -> list[str]:
+    """Every substrate-owned file present under root (repo-relative, sorted)."""
+    out: set[str] = set()
+    for f in OWNED_FILES + OPTIONAL_FILES:
+        if (root / f).is_file():
+            out.add(f)
+    for d in OWNED_DIRS + OPTIONAL_DIRS:
+        base = root / d
+        if not base.is_dir():
+            continue
+        for p in base.rglob("*"):
+            if p.is_file() and not any(part in COVERAGE_SKIP_PARTS for part in p.parts):
+                out.add(str(p.relative_to(root)).replace("\\", "/"))
+    return sorted(out)
+
+
+def hash_owned(root: Path) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for rel in owned_files(root):
+        try:
+            result[rel] = hashlib.sha256((root / rel).read_bytes()).hexdigest()
+        except OSError:
+            pass
+    return result
+
+
+def build(root: Path, version: str, commit: str, source: str, answers: dict,
+          installed_at: str) -> dict:
+    return {
+        "schema": 1,
+        "kit_version": version,
+        "kit_commit": commit,
+        "source": source,
+        "answers": answers,
+        "owned_file_sha256": hash_owned(root),
+        "installed_at": installed_at,
+    }
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description="Write .substrate/install.json provenance.")
+    ap.add_argument("--root", default=".")
+    ap.add_argument("--version", required=True)
+    ap.add_argument("--commit", default="none")
+    ap.add_argument("--source", default="")
+    ap.add_argument("--installed-at", required=True, help="ISO-8601 UTC timestamp (caller-supplied)")
+    for k in ("profile", "lang", "runner", "ui", "workflow", "sandbox", "remote-governance"):
+        ap.add_argument(f"--{k}", default="")
+    a = ap.parse_args(argv)
+    root = Path(a.root).resolve()
+    answers = {
+        "profile": a.profile, "lang": a.lang, "runner": a.runner, "ui": a.ui,
+        "workflow": a.workflow, "sandbox": a.sandbox,
+        "remote_governance": getattr(a, "remote_governance"),
+    }
+    data = build(root, a.version, a.commit, a.source, answers, a.installed_at)
+    dest = root / ".substrate" / "install.json"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    print(f"write_install_json: wrote {dest.relative_to(root)} "
+          f"({len(data['owned_file_sha256'])} owned files, kit {a.version})")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -32,7 +32,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _minisign import VerifyError, commit_from_trusted_comment, verify_file  # noqa: E402
+from _verify_backends import verify  # noqa: E402  (shared multi-backend verifier — same policy everywhere)
 
 # User-content / operator-owned surfaces: NEVER overwritten by an upgrade (backed up
 # then restored around the bootstrap --force). Includes the required_* LOCKS so an
@@ -119,15 +119,15 @@ def _resolve_kit(src: Path, root: Path, allow_unverified: bool, tmp: Path) -> tu
     # a file → treat as a release zip
     commit = None
     if not allow_unverified:
+        # Multi-backend, fail-closed — same policy as verify_release / substrate-init (v3.7.19),
+        # so the upgrade engine verifies FOR ITSELF (the auto-upgrade workflow no longer needs
+        # --allow-unverified). minisign yields a commit from the trusted comment; keyless doesn't.
         pub = root / ".substrate" / "trust" / "minisign.pub"
-        if not pub.is_file():
-            raise SystemExit("upgrade: no .substrate/trust/minisign.pub to verify against (fail-closed).")
-        try:
-            tc = verify_file(pub, src)
-        except VerifyError as e:
-            raise SystemExit(f"upgrade: signature verification FAILED (fail-closed): {e}")
-        commit = commit_from_trusted_comment(tc)
-        note = "verified (minisign)"
+        r = verify(src, minisign_pub=pub, root=root, require=True)
+        if r.rc != 0:
+            raise SystemExit(f"upgrade: signature verification FAILED (fail-closed): {r.detail}")
+        commit = r.commit
+        note = f"verified ({r.backend})"
     else:
         note = "UNVERIFIED (--allow-unverified)"
     ex = tmp / "extract"

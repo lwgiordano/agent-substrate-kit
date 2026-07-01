@@ -43,8 +43,9 @@ jobs:
           ZIP="$(ls dist/*.zip | grep -v -- '-review-bundle' | head -1)"
           gh release create "${GITHUB_REF_NAME}" \
             "$ZIP" "$ZIP.sha256" "$ZIP.minisig" .substrate/trust/minisign.pub \
+            dist/RELEASE_MANIFEST.json dist/*-review-bundle.tar.gz \
             --title "${GITHUB_REF_NAME}" \
-            --notes "Signed release (minisign). Verify: \`minisign -Vm <zip> -p minisign.pub\` or \`scripts/verify_release.py <zip>\`."
+            --notes "Signed release (minisign). Verify: \`minisign -Vm <zip> -p minisign.pub\` or \`scripts/verify_release.py <zip>\`. The review bundle carries zip+sha+manifest+sig+pubkey for one-file audit."
       - name: Scrub the signing key
         if: always()
         run: rm -f "$RUNNER_TEMP/substrate.key"

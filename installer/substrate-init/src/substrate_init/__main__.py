@@ -22,10 +22,11 @@ import urllib.request
 from pathlib import Path
 
 from . import __version__
-from ._minisign import VerifyError, commit_from_trusted_comment, verify_file
+from ._verify_backends import verify
 
 PKG = Path(__file__).resolve().parent
 EMBEDDED_PUB = PKG / "trust" / "minisign.pub"
+EMBEDDED_IDENTITY = PKG / "trust" / "sigstore_identity.json"  # present only when the kit signs keyless
 
 
 def _download(url: str, dest: Path) -> None:
@@ -90,46 +91,42 @@ def main(argv=None) -> int:
             print("substrate-init: WARNING using UNVERIFIED directory source", file=sys.stderr)
         else:
             zip_path = tmp / "kit.zip"
-            sig_path = tmp / "kit.zip.minisig"
+            # Fetch BOTH sidecars (best effort) so the shared verifier can auto-detect the
+            # backend — minisign (.minisig) OR keyless Sigstore (.sigstore). (v3.7.19)
             if a.url:
                 try:
                     _download(a.url, zip_path)
-                    _download(a.url + ".minisig", sig_path)
                 except Exception as e:
                     print(f"substrate-init: download failed: {e}", file=sys.stderr)
                     return 2
+                for ext in (".minisig", ".sigstore"):
+                    try:
+                        _download(a.url + ext, tmp / ("kit.zip" + ext))
+                    except Exception:
+                        pass  # sidecar for the OTHER backend simply won't exist
             else:
                 src = Path(a.src)
                 if not src.is_file():
                     print(f"substrate-init: source not found: {src}", file=sys.stderr)
                     return 2
                 shutil.copy2(src, zip_path)
-                cand = Path(str(src) + ".minisig")
-                if cand.is_file():
-                    shutil.copy2(cand, sig_path)
-            # 2. verify against the EMBEDDED key (fail-closed)
+                for ext in (".minisig", ".sigstore"):
+                    cand = Path(str(src) + ext)
+                    if cand.is_file():
+                        shutil.copy2(cand, tmp / ("kit.zip" + ext))
+            # 2. verify with the SAME multi-backend policy as the kit (fail-closed) against the
+            #    EMBEDDED trust anchors — minisign pubkey + (if the kit signs keyless) identity.
             if not a.allow_unverified:
-                if not sig_path.is_file():
-                    print(
-                        "substrate-init: signature (.minisig) not found — refusing (fail-closed).",
-                        file=sys.stderr,
-                    )
+                r = verify(zip_path, minisign_pub=EMBEDDED_PUB,
+                           sigstore_identity=(EMBEDDED_IDENTITY if EMBEDDED_IDENTITY.is_file() else None),
+                           root=tmp, require=True)
+                if r.rc != 0:
+                    print(f"substrate-init: verification FAILED — {r.detail} (fail-closed)", file=sys.stderr)
                     return 2
-                try:
-                    tc = verify_file(EMBEDDED_PUB, zip_path, sig_path)
-                except VerifyError as e:
-                    print(
-                        f"substrate-init: signature verification FAILED — {e} (fail-closed)",
-                        file=sys.stderr,
-                    )
-                    return 2
-                print(f"substrate-init: verified against embedded key — {tc}")
-                verified_commit = commit_from_trusted_comment(tc)
+                print(f"substrate-init: verified ({r.backend}) against embedded trust anchor — {r.detail}")
+                verified_commit = r.commit
             else:
-                print(
-                    "substrate-init: WARNING --allow-unverified — signature NOT checked",
-                    file=sys.stderr,
-                )
+                print("substrate-init: WARNING --allow-unverified — signature NOT checked", file=sys.stderr)
             ex = tmp / "extract"
             ex.mkdir()
             shutil.unpack_archive(str(zip_path), str(ex))

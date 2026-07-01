@@ -28,12 +28,13 @@ jobs:
         run: |
           mkdir -p _upgrade && cd _upgrade
           gh release download --repo "$KIT_REPO" --pattern '*.zip' --pattern '*.minisig' --pattern '*.sigstore' --pattern '*.sha256' || true
-      - name: Verify the release (fail-closed) then upgrade in place
+      - name: Upgrade in place (the engine verifies the signature itself, fail-closed)
         run: |
           python3 -m pip install --quiet cryptography
           ZIP="$(ls _upgrade/*.zip | grep -v -- '-review-bundle' | head -1)"
-          python3 -I scripts/verify_release.py "$ZIP" --require        # multi-backend; blocks on bad/absent sig
-          ./manage.sh upgrade --from "$ZIP" --write --allow-unverified # already verified above
+          # `upgrade` runs the SAME multi-backend verifier internally (fail-closed), so the
+          # consume path never bypasses the engine's own trust check (v3.7.19).
+          ./manage.sh upgrade --from "$ZIP" --write
       - name: Open an upgrade PR if anything changed
         env: {GH_TOKEN: "${{ github.token }}"}
         run: |

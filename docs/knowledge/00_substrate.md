@@ -10,6 +10,7 @@ covers:
   - scripts/_substrate_config.sh
   - scripts/_substrate_root.py
   - scripts/_substrate_surfaces.py
+  - scripts/_verify_backends.py
   - scripts/agent_system_audit.sh
   - scripts/append_history.py
   - scripts/check_agent_harness.py

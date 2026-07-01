@@ -1,6 +1,8 @@
-# DORMANT TEMPLATE — activate with `./manage.sh enable release --keyless` (copies this into
-# .github/workflows/). Tag-triggered release, signed KEYLESS with Sigstore/cosign via the
-# workflow's OIDC identity. NO signing key is stored anywhere — the strongest tier.
+# DORMANT + EXPERIMENTAL TEMPLATE — activate with `./manage.sh enable release --keyless`.
+# Tag-triggered release, signed KEYLESS with Sigstore/cosign via the workflow's OIDC identity;
+# NO signing key stored anywhere — the strongest tier. Marked experimental until validated on a
+# real keyless release end-to-end (package_release builds the artifact UNSIGNED, then cosign
+# signs it and this workflow patches the manifest to reflect the Sigstore signature).
 #
 # One-time setup (see DISTRIBUTION.md):
 #   - consumers must carry .substrate/trust/sigstore_identity.json
@@ -32,6 +34,19 @@ jobs:
         run: |
           ZIP="$(ls dist/*.zip | grep -v -- '-review-bundle' | head -1)"
           COSIGN_EXPERIMENTAL=1 cosign sign-blob --yes --bundle "$ZIP.sigstore" "$ZIP"
+      - name: Record the keyless signature in the manifest (package_release built it unsigned)
+        run: |
+          ZIP="$(ls dist/*.zip | grep -v -- '-review-bundle' | head -1)"
+          python3 - "$ZIP" <<'PY'
+          import json, pathlib, sys
+          z = pathlib.Path(sys.argv[1]).name
+          m = pathlib.Path("dist/RELEASE_MANIFEST.json")
+          d = json.loads(m.read_text())
+          d["signed"] = True
+          d["artifact_signature"] = z + ".sigstore"
+          d["signature_backend"] = "sigstore"
+          m.write_text(json.dumps(d, indent=2) + "\n")
+          PY
       - name: Verify the keyless signature (fail-closed)
         run: |
           ZIP="$(ls dist/*.zip | grep -v -- '-review-bundle' | head -1)"
@@ -42,6 +57,7 @@ jobs:
           ZIP="$(ls dist/*.zip | grep -v -- '-review-bundle' | head -1)"
           gh release create "${GITHUB_REF_NAME}" \
             "$ZIP" "$ZIP.sha256" "$ZIP.sigstore" .substrate/trust/sigstore_identity.json \
+            dist/RELEASE_MANIFEST.json \
             --title "${GITHUB_REF_NAME}" \
             --notes "Keyless (Sigstore) release. Verify: \`scripts/verify_release.py <zip>\` (needs cosign + the trusted identity)."
       # - name: Publish substrate-init to PyPI (Trusted Publishing / OIDC — no token)

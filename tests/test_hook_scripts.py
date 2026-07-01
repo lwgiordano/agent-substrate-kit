@@ -183,6 +183,62 @@ def test_release_backend_key_mirrored_both_validators() -> None:
         assert tok in py and tok in sh, tok
 
 
+def test_installer_vendored_verify_backends_matches_kit() -> None:
+    """v3.7.19: the installer's vendored multi-backend verifier must match the kit's, so
+    substrate-init applies the SAME verification policy as verify_release/upgrade."""
+    emb = _installer_src() / "substrate_init" / "_verify_backends.py"
+    if not emb.is_file():
+        import pytest
+        pytest.skip("installer absent")
+    assert emb.read_bytes() == (SCRIPTS / "_verify_backends.py").read_bytes(), "vendored _verify_backends drifted"
+
+
+def test_verify_release_explicit_sig_dispatches_by_suffix(tmp_path) -> None:
+    """v3.7.19 P2a: an explicit --sig ending .sigstore takes the SIGSTORE path (fail-closed
+    without an identity), NOT the minisign path."""
+    f = tmp_path / "art.zip"
+    f.write_bytes(b"data")
+    ss = tmp_path / "art.zip.sigstore"
+    ss.write_text("{}", encoding="utf-8")
+    p = subprocess.run([sys.executable, "-I", str(SCRIPTS / "verify_release.py"), str(f),
+                        "--sig", str(ss)], capture_output=True, text=True, timeout=30, cwd=str(tmp_path))
+    assert p.returncode == 2, (p.returncode, p.stdout, p.stderr)
+    assert "sigstore" in (p.stdout + p.stderr).lower(), (p.stdout, p.stderr)
+
+
+def test_verify_release_finds_flat_sigstore_identity(tmp_path) -> None:
+    """v3.7.19 P2b: a flat sigstore_identity.json (as uploaded to a release) is found — the
+    failure is then 'cosign not installed', proving the identity search moved past the anchor
+    check rather than reporting 'no identity'."""
+    f = tmp_path / "art.zip"
+    f.write_bytes(b"data")
+    (tmp_path / "art.zip.sigstore").write_text("{}", encoding="utf-8")
+    (tmp_path / "sigstore_identity.json").write_text(
+        '{"identity_regexp": "x", "issuer": "y"}', encoding="utf-8")
+    p = subprocess.run([sys.executable, "-I", str(SCRIPTS / "verify_release.py"), str(f)],
+                       capture_output=True, text=True, timeout=30, cwd=str(tmp_path))
+    import shutil as _sh
+    out = (p.stdout + p.stderr).lower()
+    if _sh.which("cosign") is None:
+        assert p.returncode == 2 and "cosign" in out, (p.returncode, out)
+    # (if cosign IS present the verify will still fail on the dummy bundle — also rc 2)
+    assert "no sigstore_identity" not in out and "no signature" not in out, out
+
+
+def test_auto_upgrade_template_does_not_bypass_verification() -> None:
+    """v3.7.19 P1b: the consume-side workflow must NOT pass --allow-unverified — the upgrade
+    engine verifies for itself now."""
+    t = ROOT / "workflows" / "auto-upgrade.yml.template"
+    if not t.is_file():
+        import pytest
+        pytest.skip("template kit-source-only")
+    # check COMMAND lines only (a comment may legitimately mention the flag)
+    for ln in t.read_text(encoding="utf-8").splitlines():
+        if ln.lstrip().startswith("#"):
+            continue
+        assert "--allow-unverified" not in ln, f"auto-upgrade bypasses verification: {ln!r}"
+
+
 def test_verify_release_unsigned_exit3_and_require_exit2(tmp_path) -> None:
     """v3.7.18: an artifact with NO signature sidecar is unsigned (exit 3), and fail-closed
     (exit 2) under --require — never a silent pass."""

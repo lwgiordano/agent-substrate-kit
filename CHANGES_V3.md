@@ -1532,6 +1532,42 @@ where they are measured, not transcribed into prose that goes stale. This matche
 older entries' "N tests pass from the extracted artifact" phrasing and the kit's
 no-overclaim discipline applied to its own release notes.
 
+## v3.7.19 — distribution-tier correctness patch (v3.7.18 audit: 2 P1 + 3 P2)
+
+Makes every distribution rung obey the SAME provenance contract as the local minisign path.
+Root fix: one shared verifier so every trust boundary verifies identically.
+
+- **`scripts/_verify_backends.py` — one multi-backend verifier**, used by `verify_release.py`,
+  `substrate_upgrade.py`, AND (vendored, drift-tested) `substrate-init`. minisign (.minisig) +
+  Sigstore/cosign (.sigstore); fail-closed; explicit `--sig` dispatched by suffix; Sigstore
+  identity searched explicit → `.substrate/trust/sigstore_identity.json` → flat
+  `./sigstore_identity.json`.
+- **P1a — substrate-init is now multi-backend.** It fetches both sidecars (`--url`) / copies both
+  (`--from`) and verifies via the shared helper against its EMBEDDED trust anchors (minisign
+  pubkey + optional Sigstore identity). A keyless release is now installable when the kit signs
+  keyless — the "verify any tier out of the box" claim holds at the installer layer too.
+- **P1b — the upgrade engine verifies for itself.** `substrate_upgrade` now runs the shared
+  multi-backend verifier (fail-closed) instead of a minisign-only path, so the `auto-upgrade`
+  workflow no longer passes `--allow-unverified` — no split-trust, no bypass of the engine's own
+  check. minisign still yields a trusted-comment commit for provenance; keyless yields none.
+- **P2a — `verify_release --sig` dispatches by suffix** (`.minisig` → minisign, `.sigstore` →
+  Sigstore), instead of always treating an explicit sig as minisign.
+- **P2b — flat `sigstore_identity.json` is found** (as uploaded to a release), plus a
+  `--sigstore-identity` flag; keyless verify no longer requires re-creating `.substrate/trust/`.
+- **P2c — CI release templates upload `RELEASE_MANIFEST.json` + the review bundle**, preserving
+  the one-file audit path at the CI tiers (not just local).
+- **P2/P3 — keyless template records the signature.** After `cosign sign-blob` it patches the
+  manifest to `signed=true` / `artifact_signature=<zip>.sigstore` / `signature_backend=sigstore`
+  (package_release built the artifact unsigned). The keyless template is labelled EXPERIMENTAL
+  until validated on a real keyless release end-to-end.
+
+Regression-gated: `test_installer_vendored_verify_backends_matches_kit`,
+`test_verify_release_explicit_sig_dispatches_by_suffix`,
+`test_verify_release_finds_flat_sigstore_identity`,
+`test_auto_upgrade_template_does_not_bypass_verification` (+ the existing installer/upgrade/
+verify suites now exercise the shared helper). Self-caught: the naive substring test tripped on
+its own explanatory comment → check command lines only.
+
 ## v3.7.18 — distribution-tier spine (ready out-of-the-box, scale by one command)
 
 Makes release/publish/consume a **tiered capability** in the substrate's own idiom (flag →

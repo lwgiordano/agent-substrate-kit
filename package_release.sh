@@ -225,7 +225,11 @@ if [ "$MODE" = "full" ]; then
   echo "==> Full: complete pytest suite from the artifact"
   EARLY_DUMP="${SUBSTRATE_ARTIFACT_EARLY_DUMP:-30}"
   DUMP_AFTER="${SUBSTRATE_ARTIFACT_DUMP_AFTER:-90}"
-  HARD_CAP="${SUBSTRATE_ARTIFACT_HARD_CAP:-300}"
+  # 900s (was 300): the suite legitimately grew to ~290 tests with 20+ subprocess-bootstrap
+  # cases across v3.7.x (install/upgrade/scanner/distribution tiers); local full-run ~240s, so
+  # a cold artifact extract needs headroom. The 30s/90s watchdog dumps still surface a real hang.
+  # FOLLOW-UP: a session-scoped bootstrapped-repo fixture would cut most of this runtime.
+  HARD_CAP="${SUBSTRATE_ARTIFACT_HARD_CAP:-900}"
   PLOG="$WORK/pytest.log"
   ( cd "$APP" && exec env PYTHONNOUSERSITE=1 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
       python3 -m pytest -v -p no:randomly -p no:cacheprovider > "$PLOG" 2>&1 ) &

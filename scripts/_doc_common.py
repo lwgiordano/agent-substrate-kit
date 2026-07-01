@@ -165,6 +165,11 @@ DEFAULT_EXCLUDES: tuple[str, ...] = (
     # production module is documented; tests document themselves via
     # docstrings + assertions.
     "tests",
+    # The substrate-init installer is a SEPARATE distributable package (its own
+    # pyproject/version), not a knowledge-covered governance module of this repo. Its
+    # integrity is guarded by drift tests (embedded pubkey/_minisign == kit), not by a
+    # 00_substrate covers: entry. (v3.7.15)
+    "installer",
 )
 
 

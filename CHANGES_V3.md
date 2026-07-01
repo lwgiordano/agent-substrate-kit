@@ -1532,6 +1532,41 @@ where they are measured, not transcribed into prose that goes stale. This matche
 older entries' "N tests pass from the extracted artifact" phrasing and the kit's
 no-overclaim discipline applied to its own release notes.
 
+## v3.7.15 — `substrate-init` installer package (installer spine, Phase 2)
+
+The fork-proof first-install channel: a small PyPI package under `installer/substrate-init/`
+whose whole reason to exist is that the minisign **trust key is embedded in the package**,
+out-of-band from the repository being bootstrapped. A forked/tampered kit repo therefore
+cannot substitute its own key — first-install authenticity is anchored on the package's
+integrity (PyPI), not trust-on-first-use of a cloned repo. This is the property that makes
+minisign worth choosing over repo-local signing (flagged as "conditional on Phase 2" in 1a).
+
+- `installer/substrate-init/` — a standalone `hatchling` package (`substrate-init` console
+  script) with `src/substrate_init/{__main__,_minisign}.py` and the embedded
+  `trust/minisign.pub`. The wheel ships the key (`[tool.hatch.build.targets.wheel] artifacts`).
+- CLI: `uvx substrate-init --url <release-zip-url> --target .` (fetches the `.zip` + its
+  `.minisig`) or `--from <local-zip> --target . -- <bootstrap args>`. It VERIFIES the artifact
+  against the EMBEDDED key (fail-closed — a bad/missing signature is never extracted or run),
+  extracts, and runs the kit's `bootstrap.sh`. `--allow-unverified` (a local dir / unsigned
+  build, dev only) is the sole escape and warns.
+- The embedded key + verifier are byte-identical COPIES of the kit's
+  `.substrate/trust/minisign.pub` and `scripts/_minisign.py`; drift tests enforce the match so
+  the installer can never verify against a stale/wrong key. (The authoritative anchor remains
+  the kit's owned+frozen `.substrate/trust/minisign.pub`; `installer/` is excluded from
+  knowledge-doc coverage as a separate distributable.)
+- Publishing is a maintainer step (`uv build && uv publish`, needs a PyPI token) — documented
+  in `installer/substrate-init/README.md`, not automated here. The wheel was built + inspected
+  (embedded key + entrypoint present) as part of this release.
+
+Regression-gated: `test_installer_vendored_pubkey_matches_kit`,
+`test_installer_vendored_minisign_matches_kit`, `test_installer_verifies_and_bootstraps` (a
+release-key-signed stub kit is verified against the embedded key and bootstrapped, end to end),
+`test_installer_failclosed_on_tampered_zip`.
+
+Phases 1a (trust root) + 1b (upgrade engine) + 2 (fork-proof installer) are complete. Phase 3
+(Copier 3-way merge) is intentionally NOT pursued — the 1b backup→force→restore + drift-gate
+covers in-place upgrades without the extra dependency.
+
 ## v3.7.14 — in-place `upgrade` engine (installer spine, Phase 1b)
 
 Second piece of the installer/upgrade spine: consumers can now UPGRADE the substrate in

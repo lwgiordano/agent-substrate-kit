@@ -170,6 +170,75 @@ def test_bootstrap_warns_on_preexisting_scripts_dir(tmp_path) -> None:
     assert (tmp_path / "scripts" / "my_project_tool.py").read_text(encoding="utf-8") == "print('mine')\n"
 
 
+def _installer_src():
+    return ROOT / "installer" / "substrate-init" / "src"
+
+
+def _installer_fixture():
+    return ROOT / "installer" / "substrate-init" / "tests" / "fixtures" / "fixture-kit.zip"
+
+
+def _load_installer_main():
+    import importlib
+    sys.path.insert(0, str(_installer_src()))
+    try:
+        return importlib.import_module("substrate_init.__main__")
+    finally:
+        sys.path.pop(0)
+
+
+def test_installer_vendored_pubkey_matches_kit() -> None:
+    """v3.7.15 (Phase 2): the pubkey embedded in substrate-init must be byte-identical to
+    the kit's trust anchor — else the installer would verify against a wrong/stale key."""
+    emb = _installer_src() / "substrate_init" / "trust" / "minisign.pub"
+    kit = ROOT / ".substrate" / "trust" / "minisign.pub"
+    if not (emb.is_file() and kit.is_file()):
+        import pytest
+        pytest.skip("installer or kit pubkey absent")
+    assert emb.read_bytes() == kit.read_bytes(), "embedded installer pubkey drifted from kit trust anchor"
+
+
+def test_installer_vendored_minisign_matches_kit() -> None:
+    """The vendored verifier must not drift from scripts/_minisign.py."""
+    emb = _installer_src() / "substrate_init" / "_minisign.py"
+    if not emb.is_file():
+        import pytest
+        pytest.skip("installer absent")
+    assert emb.read_bytes() == (SCRIPTS / "_minisign.py").read_bytes(), "vendored _minisign.py drifted"
+
+
+def test_installer_verifies_and_bootstraps(tmp_path) -> None:
+    """substrate-init verifies a release-key-signed kit against its EMBEDDED key and runs
+    bootstrap (proving the fork-proof, out-of-band-key install path end to end)."""
+    import pytest
+    pytest.importorskip("cryptography")
+    fix = _installer_fixture()
+    if not fix.is_file():
+        pytest.skip("installer fixture absent")
+    si = _load_installer_main()
+    target = tmp_path / "repo"
+    rc = si.main(["--from", str(fix), "--target", str(target)])
+    assert rc == 0, rc
+    assert (target / "INSTALLED_BY_STUB").is_file(), "verified kit was not bootstrapped"
+
+
+def test_installer_failclosed_on_tampered_zip(tmp_path) -> None:
+    """A tampered kit .zip must never be extracted or bootstrapped (fail-closed)."""
+    import pytest
+    pytest.importorskip("cryptography")
+    fix = _installer_fixture()
+    if not fix.is_file():
+        pytest.skip("installer fixture absent")
+    z = tmp_path / "kit.zip"
+    z.write_bytes(fix.read_bytes() + b"x")  # corrupt the archive
+    (tmp_path / "kit.zip.minisig").write_bytes((fix.parent / "fixture-kit.zip.minisig").read_bytes())
+    si = _load_installer_main()
+    target = tmp_path / "repo"
+    rc = si.main(["--from", str(z), "--target", str(target)])
+    assert rc == 2, rc
+    assert not (target / "INSTALLED_BY_STUB").exists(), "tampered kit was bootstrapped (must fail closed)"
+
+
 def test_bootstrap_writes_install_json(tmp_path) -> None:
     """v3.7.14 (Phase 1b): bootstrap records .substrate/install.json (provenance + drift
     baseline) with a version, the answer set, and owned-file hashes."""

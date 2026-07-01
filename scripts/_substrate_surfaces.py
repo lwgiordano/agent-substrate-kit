@@ -81,6 +81,11 @@ OWNED_FILES = [
 # so a PR can't swap the verification key without CODEOWNER review (v3.7.13).
 OPTIONAL_FILES = [".mcp.json", ".substrate/trust/minisign.pub", ".substrate/install.json"]
 OPTIONAL_DIRS = [".github/skills", "docs/postmortems", "design-system"]
+# NOTE: the substrate-init installer (installer/) carries a COPY of the trust key, but the
+# authoritative anchor is .substrate/trust/minisign.pub (OPTIONAL_FILES, owned + frozen). The
+# installer copy is guarded against drift by test_installer_vendored_pubkey_matches_kit rather
+# than by owning installer/ here — owning it would wrongly demand knowledge-doc coverage of a
+# separate package's modules. (v3.7.15)
 # Generated runtime/toolchain state that is NOT governance source.
 COVERAGE_SKIP_PARTS = {"__pycache__", "venv", "node_modules", ".pytest_cache", ".ruff_cache", ".mypy_cache"}
 

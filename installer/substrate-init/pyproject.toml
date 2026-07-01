@@ -1,0 +1,21 @@
+[project]
+name = "substrate-init"
+version = "0.1.0"
+description = "Verify-then-install bootstrapper for the Agent Substrate Kit — the minisign trust key is embedded in this package (fork-proof first install)."
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+dependencies = ["cryptography>=3.4"]
+
+[project.scripts]
+substrate-init = "substrate_init.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/substrate_init"]
+# Force the embedded trust key (a non-.py data file) into the wheel — without it the
+# package cannot verify anything and every install would fail closed.
+artifacts = ["src/substrate_init/trust/minisign.pub"]

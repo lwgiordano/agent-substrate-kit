@@ -32,7 +32,10 @@ target-version = "py311"
 # stops the kit's own shipped scripts/tests from failing a consuming repo's pre-commit.
 # `--force-exclude` in run_python_gate.sh makes this bind even when pre-commit passes the
 # filenames explicitly.
-extend-exclude = ["scripts", "extras", "tests"]
+# installer/ is excluded too: it vendors byte-identical copies of scripts/_minisign.py +
+# the trust key, and a drift test asserts the match — letting ruff reformat only the copy
+# (scripts/ is excluded) would break that invariant. (v3.7.15)
+extend-exclude = ["scripts", "extras", "tests", "installer"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "SIM", "C4"]

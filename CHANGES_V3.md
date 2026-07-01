@@ -1532,6 +1532,35 @@ where they are measured, not transcribed into prose that goes stale. This matche
 older entries' "N tests pass from the extracted artifact" phrasing and the kit's
 no-overclaim discipline applied to its own release notes.
 
+## v3.7.16 — installer/upgrade correctness patch (v3.7.15 audit: 1 P1 + 2 P2)
+
+Focused correctness pass on the installer spine before any further tiers. All three
+audit findings confirmed against the code and fixed at the class level.
+
+- **P1 — install.json self-drift (upgrade-engine correctness).** `.substrate/install.json`
+  is an `OPTIONAL_FILES` (owned) surface, so `write_install_json.py` hashed it into its own
+  `owned_file_sha256` baseline — a hash-of-itself that can never match after rewrite. Result:
+  a second no-op `upgrade --write` false-reported it as locally-modified machinery and
+  blocked. Fixed: `write_install_json._BASELINE_EXCLUDE` skips it from the baseline, and
+  `substrate_upgrade._DRIFT_EXCLUDE` skips it in the drift gate defensively. It stays a
+  governed/owned surface; it is just never part of its own drift baseline.
+- **P2a — signed review bundle lost the authenticity proof.** The one-file review tarball +
+  its hygiene check hardcoded exactly four files, so the `.minisig` + trust pubkey (copied
+  into the review dir) never made it into the bundle. Now `package_release.sh` drives the
+  tarball, the hygiene expected-list, AND `README_REVIEW.md` from one `REVIEW_FILES` array
+  that includes `<zip>.minisig` + `minisign.pub` when the release is signed (four files when
+  unsigned, stated plainly). README_REVIEW now documents `minisign -Vm` / `verify_release.py`.
+- **P2b — install.json recorded `kit_commit: none` for zip installs.** A `.zip` extract has no
+  `.git`, so `git rev-parse` returned `none` even though the verified, tamper-evident trusted
+  comment carries the commit. Fixed: `_minisign.commit_from_trusted_comment()` parses it;
+  `substrate_upgrade` verifies via `_minisign` directly (capturing the comment) and records
+  that commit; `substrate-init` passes it to bootstrap via `SUBSTRATE_KIT_COMMIT`/`_SOURCE`,
+  which `bootstrap.sh` honors over `git rev-parse`.
+
+Regression-gated: `test_upgrade_same_version_twice_does_not_self_drift`,
+`test_commit_from_trusted_comment`, `test_bootstrap_honors_kit_commit_env`,
+`test_review_bundle_includes_signature_when_signed`.
+
 ## v3.7.15 — `substrate-init` installer package (installer spine, Phase 2)
 
 The fork-proof first-install channel: a small PyPI package under `installer/substrate-init/`

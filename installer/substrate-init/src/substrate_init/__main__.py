@@ -13,6 +13,7 @@ build, dev only) is the sole escape and warns loudly.
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import subprocess
 import sys
@@ -21,7 +22,7 @@ import urllib.request
 from pathlib import Path
 
 from . import __version__
-from ._minisign import VerifyError, verify_file
+from ._minisign import VerifyError, commit_from_trusted_comment, verify_file
 
 PKG = Path(__file__).resolve().parent
 EMBEDDED_PUB = PKG / "trust" / "minisign.pub"
@@ -73,6 +74,7 @@ def main(argv=None) -> int:
         return 2
 
     extra = [x for x in a.bootstrap_args if x != "--"]
+    verified_commit = None  # parsed from the verified trusted comment (provenance, v3.7.16 P2b)
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         # 1. resolve source
@@ -122,6 +124,7 @@ def main(argv=None) -> int:
                     )
                     return 2
                 print(f"substrate-init: verified against embedded key — {tc}")
+                verified_commit = commit_from_trusted_comment(tc)
             else:
                 print(
                     "substrate-init: WARNING --allow-unverified — signature NOT checked",
@@ -136,8 +139,15 @@ def main(argv=None) -> int:
         target = Path(a.target).resolve()
         target.mkdir(parents=True, exist_ok=True)
         cmd = ["bash", str(kit_root / "bootstrap.sh"), "--target", str(target)] + extra
+        # Pass verified provenance to bootstrap → write_install_json (a .zip extract has no
+        # .git, so bootstrap would otherwise record kit_commit=none — v3.7.16 P2b). The commit
+        # comes from the VERIFIED, tamper-evident trusted comment.
+        env = os.environ.copy()
+        if verified_commit:
+            env["SUBSTRATE_KIT_COMMIT"] = verified_commit
+        env["SUBSTRATE_KIT_SOURCE"] = a.url or (str(Path(a.src)) if a.src else "")
         print(f"substrate-init: bootstrapping into {target} …")
-        r = subprocess.run(cmd)
+        r = subprocess.run(cmd, env=env)
         return r.returncode
 
 

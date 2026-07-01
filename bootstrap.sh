@@ -256,8 +256,11 @@ python3 scripts/update_manifest.py --fix >/dev/null || python scripts/update_man
 # Provenance + drift baseline for `./manage.sh upgrade` (v3.7.14): record the kit
 # version/commit/source, the FULL answer set, and a hash of every owned file.
 KIT_VER="$(tr -d '[:space:]' < "$KIT_DIR/VERSION" 2>/dev/null || echo 0.0.0)"
-KIT_COMMIT="$(git -C "$KIT_DIR" rev-parse --short HEAD 2>/dev/null || echo none)"
-KIT_SRC="$(git -C "$KIT_DIR" remote get-url origin 2>/dev/null || echo "$KIT_DIR")"
+# SUBSTRATE_KIT_COMMIT/SOURCE let a verified installer (substrate-init) pass the commit parsed
+# from the signed trusted comment — a .zip extract has no .git, so git rev-parse would record
+# 'none' (v3.7.16 P2b). Env override wins; else fall back to the kit's own git metadata.
+KIT_COMMIT="${SUBSTRATE_KIT_COMMIT:-$(git -C "$KIT_DIR" rev-parse --short HEAD 2>/dev/null || echo none)}"
+KIT_SRC="${SUBSTRATE_KIT_SOURCE:-$(git -C "$KIT_DIR" remote get-url origin 2>/dev/null || echo "$KIT_DIR")}"
 python3 scripts/write_install_json.py --root . --version "$KIT_VER" --commit "$KIT_COMMIT" \
   --source "$KIT_SRC" --installed-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   --profile "$PROFILE" --lang "$LANG_PRIMARY" --runner "$RUNNER" --ui "$UI_ENABLED" \

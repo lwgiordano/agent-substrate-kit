@@ -51,9 +51,18 @@ def owned_files(root: Path) -> list[str]:
     return sorted(out)
 
 
+# install.json must NOT be part of its own baseline: it records the hash map, so hashing
+# it would embed a hash-of-itself that can never match after the file is rewritten — every
+# subsequent upgrade would then false-report .substrate/install.json as "locally modified"
+# (v3.7.16 P1). It stays a governed/owned surface; it is just excluded from the DRIFT baseline.
+_BASELINE_EXCLUDE = {".substrate/install.json"}
+
+
 def hash_owned(root: Path) -> dict[str, str]:
     result: dict[str, str] = {}
     for rel in owned_files(root):
+        if rel in _BASELINE_EXCLUDE:
+            continue
         try:
             result[rel] = hashlib.sha256((root / rel).read_bytes()).hexdigest()
         except OSError:

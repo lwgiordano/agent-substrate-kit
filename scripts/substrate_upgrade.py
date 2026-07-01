@@ -31,6 +31,9 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _minisign import VerifyError, commit_from_trusted_comment, verify_file  # noqa: E402
+
 # User-content / operator-owned surfaces: NEVER overwritten by an upgrade (backed up
 # then restored around the bootstrap --force). Includes the required_* LOCKS so an
 # upgrade can never silently lower a profile/sandbox/remote requirement.
@@ -42,6 +45,10 @@ PRESERVE_FILES = [
     "docs/ARCHITECTURE.md", "docs/INTENT.md", "docs/HISTORY.md", "docs/README.md",
 ]
 PRESERVE_DIRS = ["design-system", "docs/decisions", "docs/postmortems"]
+
+# Never drift-check the provenance file itself — it is rewritten every upgrade and is
+# excluded from its own baseline (see write_install_json._BASELINE_EXCLUDE). v3.7.16 P1.
+_DRIFT_EXCLUDE = {".substrate/install.json"}
 
 
 def _run(cmd, cwd=None):
@@ -92,8 +99,10 @@ def _sha256(p: Path) -> str:
     return hashlib.sha256(p.read_bytes()).hexdigest()
 
 
-def _resolve_kit(src: Path, root: Path, allow_unverified: bool, tmp: Path) -> tuple[Path, str]:
-    """Return (kit_dir, verify_note). Verifies a .zip against the trusted key first."""
+def _resolve_kit(src: Path, root: Path, allow_unverified: bool, tmp: Path) -> tuple[Path, str, str | None]:
+    """Return (kit_dir, verify_note, verified_commit). Verifies a .zip against the trusted
+    key first; the commit is parsed from the VERIFIED trusted comment (tamper-evident) so a
+    .zip install/upgrade records exact provenance even with no .git tree (v3.7.16 P2b)."""
     if src.is_dir():
         if not allow_unverified:
             raise SystemExit("upgrade: a directory source is unverified — pass --allow-unverified "
@@ -106,14 +115,18 @@ def _resolve_kit(src: Path, root: Path, allow_unverified: bool, tmp: Path) -> tu
                     break
         if kit is None:
             raise SystemExit(f"upgrade: no bootstrap.sh found under {src}")
-        return kit, "UNVERIFIED (directory source)"
+        return kit, "UNVERIFIED (directory source)", None
     # a file → treat as a release zip
+    commit = None
     if not allow_unverified:
-        vr = root / "scripts" / "verify_release.py"
-        rc = subprocess.run([sys.executable, "-I", str(vr), str(src)],
-                            capture_output=True, text=True)
-        if rc.returncode != 0:
-            raise SystemExit(f"upgrade: signature verification FAILED (fail-closed):\n{rc.stderr.strip()}")
+        pub = root / ".substrate" / "trust" / "minisign.pub"
+        if not pub.is_file():
+            raise SystemExit("upgrade: no .substrate/trust/minisign.pub to verify against (fail-closed).")
+        try:
+            tc = verify_file(pub, src)
+        except VerifyError as e:
+            raise SystemExit(f"upgrade: signature verification FAILED (fail-closed): {e}")
+        commit = commit_from_trusted_comment(tc)
         note = "verified (minisign)"
     else:
         note = "UNVERIFIED (--allow-unverified)"
@@ -121,7 +134,7 @@ def _resolve_kit(src: Path, root: Path, allow_unverified: bool, tmp: Path) -> tu
     ex.mkdir(parents=True, exist_ok=True)
     shutil.unpack_archive(str(src), str(ex))
     for d in ex.rglob("bootstrap.sh"):
-        return d.parent, note
+        return d.parent, note, commit
     raise SystemExit("upgrade: extracted archive has no bootstrap.sh")
 
 
@@ -133,7 +146,7 @@ def _drifted(root: Path, baseline: dict | None) -> list[str]:
     preserve = set(PRESERVE_FILES)
     out = []
     for rel, want in baseline.get("owned_file_sha256", {}).items():
-        if rel in preserve or any(rel.startswith(d + "/") for d in PRESERVE_DIRS):
+        if rel in preserve or rel in _DRIFT_EXCLUDE or any(rel.startswith(d + "/") for d in PRESERVE_DIRS):
             continue
         p = root / rel
         if p.is_file() and _sha256(p) != want:
@@ -192,7 +205,7 @@ def main(argv=None) -> int:
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         try:
-            kit, vnote = _resolve_kit(src, root, a.allow_unverified, tmp)
+            kit, vnote, verified_commit = _resolve_kit(src, root, a.allow_unverified, tmp)
         except SystemExit as e:
             print(str(e), file=sys.stderr)
             return 2
@@ -240,10 +253,14 @@ def main(argv=None) -> int:
 
         # consistency + fresh provenance
         _run([sys.executable, "-I", str(root / "scripts" / "update_manifest.py"), "--fix"], cwd=root)
-        commit = "none"
-        gc = _run(["git", "rev-parse", "--short", "HEAD"], cwd=kit)
-        if gc.returncode == 0:
-            commit = gc.stdout.strip()
+        # Prefer the commit parsed from the VERIFIED trusted comment (a .zip extract has no
+        # .git, so git rev-parse would record 'none' — v3.7.16 P2b). Fall back to git for a
+        # directory source that IS a checkout.
+        commit = verified_commit or "none"
+        if commit == "none":
+            gc = _run(["git", "rev-parse", "--short", "HEAD"], cwd=kit)
+            if gc.returncode == 0:
+                commit = gc.stdout.strip()
         _run([sys.executable, "-I", str(root / "scripts" / "write_install_json.py"),
               "--root", str(root), "--version", new_ver, "--commit", commit,
               "--source", str(src), "--installed-at", datetime.now(timezone.utc).isoformat(),

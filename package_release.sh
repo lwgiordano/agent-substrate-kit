@@ -279,20 +279,40 @@ cp "$ZIP_VER" "$ZIP_VER.sha256" "$DIST/RELEASE_MANIFEST.json" "$REVIEW/"
 # (minisign -Vm <zip> -p minisign.pub, or scripts/_minisign.py) — not just the checksum.
 [ -n "$ART_SIG" ] && [ -f "$ZIP_VER.minisig" ] && cp "$ZIP_VER.minisig" "$REVIEW/"
 [ -f "$KITROOT/.substrate/trust/minisign.pub" ] && cp "$KITROOT/.substrate/trust/minisign.pub" "$REVIEW/"
-cat > "$REVIEW/README_REVIEW.md" <<MD
-# Review bundle — ${NAME} ${VER}
-
-Three files, verifiable provenance:
-
-1. Verify the checksum (run in this directory):
-       shasum -a 256 -c ${NAME}-${VER}.zip.sha256
-2. Confirm the printed SHA equals artifact_sha256 in RELEASE_MANIFEST.json.
-3. Extract and audit ${NAME}-${VER}.zip.
-
-If your audit environment accepts only ONE upload, upload
-${NAME}-${VER}-review-bundle.tar.gz (it contains all of the above, with names
-that line up so \`shasum -c\` works after extraction).
-MD
+{
+  echo "# Review bundle — ${NAME} ${VER}"
+  echo
+  if [ "$SIGNED" = "true" ]; then
+    echo "SIGNED release — verifiable AUTHENTICITY + integrity (run in this directory):"
+    echo
+    echo "1. Verify the checksum:"
+    echo "       shasum -a 256 -c ${NAME}-${VER}.zip.sha256"
+    echo "2. Verify the signature against the bundled trust key:"
+    echo "       minisign -Vm ${NAME}-${VER}.zip -p minisign.pub"
+    echo "   (or from a kit checkout: python3 -I scripts/verify_release.py \\"
+    echo "        --pub minisign.pub --sig ${NAME}-${VER}.zip.minisig ${NAME}-${VER}.zip)"
+    echo "3. Confirm artifact_sha256 in RELEASE_MANIFEST.json matches, and the signature's"
+    echo "   trusted comment carries the same version + git_commit."
+    echo "4. Extract and audit ${NAME}-${VER}.zip."
+  else
+    echo "UNSIGNED build — checksum-only provenance (no .minisig/pubkey in this bundle):"
+    echo
+    echo "1. Verify the checksum:"
+    echo "       shasum -a 256 -c ${NAME}-${VER}.zip.sha256"
+    echo "2. Confirm the printed SHA equals artifact_sha256 in RELEASE_MANIFEST.json."
+    echo "3. Extract and audit ${NAME}-${VER}.zip."
+  fi
+  echo
+  echo "If your audit environment accepts only ONE upload, upload"
+  echo "${NAME}-${VER}-review-bundle.tar.gz — it carries all of the above with names that"
+  echo "line up so \`shasum -c\` works after extraction."
+} > "$REVIEW/README_REVIEW.md"
+# The review bundle's file list — signature + trust key included WHEN the release is signed,
+# so the one-file upload path preserves authenticity proof, not just the checksum (v3.7.16 P2a).
+REVIEW_FILES=( "${NAME}-${VER}.zip" "${NAME}-${VER}.zip.sha256" "RELEASE_MANIFEST.json" "README_REVIEW.md" )
+if [ "$SIGNED" = "true" ] && [ -f "$REVIEW/${NAME}-${VER}.zip.minisig" ] && [ -f "$REVIEW/minisign.pub" ]; then
+  REVIEW_FILES+=( "${NAME}-${VER}.zip.minisig" "minisign.pub" )
+fi
 BUNDLE="$DIST/${NAME}-${VER}-review-bundle.tar.gz"
 # Build the review bundle with Python tarfile, NOT platform tar. macOS bsdtar
 # embeds com.apple.provenance as a LIBARCHIVE.xattr PAX header even after
@@ -301,12 +321,11 @@ BUNDLE="$DIST/${NAME}-${VER}-review-bundle.tar.gz"
 # elsewhere. tarfile never reads xattrs, and we normalize every TarInfo
 # (mtime/mode/uid/gid/uname/gname) in USTAR format, so the bundle is
 # deterministic + metadata-clean on every platform (v3.3.11 reviewer).
-python3 - "$REVIEW" "$BUNDLE" "$NAME" "$VER" <<'PY'
+python3 - "$REVIEW" "$BUNDLE" "${REVIEW_FILES[@]}" <<'PY'
 import io, sys, tarfile
 from pathlib import Path
-review, bundle, name, ver = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3], sys.argv[4]
-files = [f"{name}-{ver}.zip", f"{name}-{ver}.zip.sha256",
-         "RELEASE_MANIFEST.json", "README_REVIEW.md"]
+review, bundle = Path(sys.argv[1]), Path(sys.argv[2])
+files = sys.argv[3:]
 with tarfile.open(bundle, "w:gz", format=tarfile.USTAR_FORMAT) as tf:
     for rel in files:
         data = (review / rel).read_bytes()
@@ -317,8 +336,8 @@ with tarfile.open(bundle, "w:gz", format=tarfile.USTAR_FORMAT) as tf:
 PY
 # Bundle hygiene (pipefail-safe): listing must SUCCEED, emit NO warnings (a stray
 # xattr/metadata header prints a tar warning), contain no ._*/.DS_Store, and be
-# EXACTLY the four review files. Listings go to files so grep/diff status is
-# authoritative (the v3.3.9 SIGPIPE lesson).
+# EXACTLY the expected review files (4, or 6 when signed). Listings go to files so
+# grep/diff status is authoritative (the v3.3.9 SIGPIPE lesson).
 _BLIST="$(mktemp)"; _BERR="$(mktemp)"
 if ! tar -tzf "$BUNDLE" > "$_BLIST" 2>"$_BERR"; then
   echo "release: BLOCK — review bundle cannot be listed" >&2; cat "$_BERR" >&2
@@ -333,11 +352,10 @@ if grep -Eq '(^|/)\._|(^|/)\.DS_Store$' "$_BLIST"; then
   grep -E '(^|/)\._|(^|/)\.DS_Store$' "$_BLIST" >&2; rm -f "$_BLIST" "$_BERR"; exit 1
 fi
 _EXP="$(mktemp)"; _ACT="$(mktemp)"
-printf '%s\n' "${NAME}-${VER}.zip" "${NAME}-${VER}.zip.sha256" \
-  RELEASE_MANIFEST.json README_REVIEW.md | LC_ALL=C sort > "$_EXP"
+printf '%s\n' "${REVIEW_FILES[@]}" | LC_ALL=C sort > "$_EXP"
 LC_ALL=C sort "$_BLIST" > "$_ACT"
 if ! diff -q "$_EXP" "$_ACT" >/dev/null; then
-  echo "release: BLOCK — review bundle is not exactly the four review files:" >&2
+  echo "release: BLOCK — review bundle is not exactly the expected review files:" >&2
   cat "$_BLIST" >&2; rm -f "$_BLIST" "$_BERR" "$_EXP" "$_ACT"; exit 1
 fi
 rm -f "$_BLIST" "$_BERR" "$_EXP" "$_ACT"

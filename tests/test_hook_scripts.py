@@ -170,6 +170,67 @@ def test_bootstrap_warns_on_preexisting_scripts_dir(tmp_path) -> None:
     assert (tmp_path / "scripts" / "my_project_tool.py").read_text(encoding="utf-8") == "print('mine')\n"
 
 
+def test_upgrade_same_version_twice_does_not_self_drift(tmp_path) -> None:
+    """v3.7.16 P1: .substrate/install.json is excluded from its own drift baseline, so a
+    second no-op upgrade must NOT false-report it as locally-modified machinery."""
+    if not _bootstrapped(tmp_path):
+        return
+    a1 = subprocess.run(["./manage.sh", "upgrade", "--from", str(ROOT), "--allow-unverified", "--write", "--force"],
+                        cwd=tmp_path, capture_output=True, text=True, timeout=180)
+    assert a1.returncode == 0, (a1.stdout[-800:], a1.stderr[-800:])
+    a2 = subprocess.run(["./manage.sh", "upgrade", "--from", str(ROOT), "--allow-unverified", "--write"],
+                        cwd=tmp_path, capture_output=True, text=True, timeout=180)
+    assert a2.returncode == 0, (a2.stdout[-800:], a2.stderr[-800:])
+    assert ".substrate/install.json" not in a2.stdout, ("install.json self-drift", a2.stdout[-800:])
+
+
+def test_commit_from_trusted_comment() -> None:
+    """v3.7.16 P2b: the release commit is parsed from a verified trusted comment; a
+    non-matching comment yields None (never guesses)."""
+    ms = _load_minisign()
+    assert ms.commit_from_trusted_comment("agent_substrate_kit 3.7.16 abc1234 sha256:deadbeef") == "abc1234"
+    assert ms.commit_from_trusted_comment("some other comment") is None
+    assert ms.commit_from_trusted_comment("agent_substrate_kit 3.7.16 abc1234") is None
+
+
+def test_bootstrap_honors_kit_commit_env(tmp_path) -> None:
+    """v3.7.16 P2b: a verified installer passes SUBSTRATE_KIT_COMMIT/SOURCE (parsed from the
+    signed trusted comment) — bootstrap must record them in install.json instead of 'none'
+    (a .zip extract has no .git)."""
+    import os
+    boot = None
+    for cand in (ROOT / "bootstrap.sh", ROOT.parent / "agent_substrate_kit_v3" / "bootstrap.sh"):
+        if cand.exists():
+            boot = cand
+            break
+    if boot is None:
+        return
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    env = os.environ.copy()
+    env["SUBSTRATE_KIT_COMMIT"] = "deadbee1"
+    env["SUBSTRATE_KIT_SOURCE"] = "https://example.invalid/kit.zip"
+    subprocess.run(["bash", str(boot), "--no-doctor"], cwd=tmp_path, capture_output=True, timeout=120, env=env)
+    ij = tmp_path / ".substrate" / "install.json"
+    if not ij.is_file():
+        return
+    data = json.loads(ij.read_text(encoding="utf-8"))
+    assert data["kit_commit"] == "deadbee1", data
+    assert data["source"] == "https://example.invalid/kit.zip", data
+
+
+def test_review_bundle_includes_signature_when_signed() -> None:
+    """v3.7.16 P2a: the signed review bundle must carry the .minisig + trust pubkey (not just
+    the checksum) and README_REVIEW must document signature verification."""
+    pr = ROOT / "package_release.sh"
+    if not pr.is_file():
+        import pytest
+        pytest.skip("package_release.sh is kit-source-only")
+    txt = pr.read_text(encoding="utf-8")
+    assert "REVIEW_FILES+=" in txt and ".zip.minisig" in txt and "minisign.pub" in txt, \
+        "signed review bundle must add .minisig + minisign.pub"
+    assert "minisign -Vm" in txt, "README_REVIEW must document signature verification for signed releases"
+
+
 def _installer_src():
     return ROOT / "installer" / "substrate-init" / "src"
 
@@ -2189,7 +2250,7 @@ def test_package_release_review_bundle_metadata_clean_creation() -> None:
     text = pr.read_text(encoding="utf-8")
     assert "tarfile.open" in text and "TarInfo" in text and "info.mtime = 0" in text
     assert "review bundle emits tar warnings" in text
-    assert "not exactly the four review files" in text
+    assert "not exactly the expected review files" in text  # 4, or 6 when signed (v3.7.16 P2a)
 
 
 def test_package_release_excludes_local_venv_end_to_end() -> None:

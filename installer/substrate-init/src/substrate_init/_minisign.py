@@ -113,6 +113,20 @@ def verify_bytes(pubkey_text: str, content: bytes, sig_text: str) -> str:
     return trusted_comment
 
 
+def commit_from_trusted_comment(tc: str) -> str | None:
+    """Extract the git commit from a release trusted comment.
+
+    package_release.sh signs with the trusted comment shape:
+        agent_substrate_kit <version> <commit> sha256:<hash>
+    The global signature makes this tamper-evident, so a commit parsed from a VERIFIED
+    signature is trustworthy provenance even for a .zip install with no .git tree. Returns
+    None if the comment does not match (never guesses)."""
+    parts = tc.split()
+    if len(parts) >= 4 and parts[0] == "agent_substrate_kit" and parts[3].startswith("sha256:"):
+        return parts[2]
+    return None
+
+
 def verify_file(pubkey_path: Path | str, file_path: Path | str,
                 sig_path: Path | str | None = None) -> str:
     pub = Path(pubkey_path).read_text(encoding="utf-8")

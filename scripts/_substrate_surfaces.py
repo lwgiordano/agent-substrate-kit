@@ -77,9 +77,11 @@ OWNED_FILES = [
     "docs/HISTORY.md", "docs/README.md", "docs/ARCHITECTURE.md", "docs/INTENT.md",
 ]
 # Optional agent-control surfaces: required-owned ONLY when present.
-# .substrate/trust/minisign.pub is the release/upgrade TRUST ANCHOR — owned-when-present
-# so a PR can't swap the verification key without CODEOWNER review (v3.7.13).
-OPTIONAL_FILES = [".mcp.json", ".substrate/trust/minisign.pub", ".substrate/install.json"]
+# .substrate/trust/* are the release/upgrade TRUST ANCHORS — owned-when-present so a PR can't
+# swap a verification key/identity without CODEOWNER review (v3.7.13; sigstore_identity v3.7.20).
+# They are ALSO frozen by trusted-base (the release root of trust).
+OPTIONAL_FILES = [".mcp.json", ".substrate/trust/minisign.pub",
+                  ".substrate/trust/sigstore_identity.json", ".substrate/install.json"]
 OPTIONAL_DIRS = [".github/skills", "docs/postmortems", "design-system"]
 # NOTE: the substrate-init installer (installer/) carries a COPY of the trust key, but the
 # authoritative anchor is .substrate/trust/minisign.pub (OPTIONAL_FILES, owned + frozen). The

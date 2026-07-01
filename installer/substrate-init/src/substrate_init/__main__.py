@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""substrate-init CLI: obtain a signed Agent Substrate Kit release, VERIFY it against the
-public key embedded in THIS package (fork-proof), then run its bootstrap.sh into the target.
+"""substrate-init CLI: obtain a signed Agent Substrate Kit release, VERIFY it against the trust
+anchors embedded in THIS package (fork-proof, multi-backend), then run bootstrap.sh into target.
 
   uvx substrate-init --url https://…/agent_substrate_kit_v3-X.Y.Z.zip --target .
   uvx substrate-init --from ./agent_substrate_kit_v3-X.Y.Z.zip --target . -- --profile strict
 
-FAIL-CLOSED: a .zip whose minisign signature does not verify against the embedded key is
-never extracted or run. `--allow-unverified` (a local directory / deliberately unsigned
-build, dev only) is the sole escape and warns loudly.
+Verification is the SAME multi-backend policy as the kit (minisign .minisig / Sigstore .sigstore).
+FAIL-CLOSED: a .zip whose signature does not verify against the embedded anchor is never
+extracted or run. `--allow-unverified` (a local directory / deliberately unsigned build, dev
+only) is the sole escape and warns loudly.
 """
 
 from __future__ import annotations
@@ -50,7 +51,7 @@ def main(argv=None) -> int:
         dest="src",
         help="local signed kit .zip (expects <zip>.minisig alongside) OR a kit directory",
     )
-    ap.add_argument("--url", help="URL of a signed kit .zip (also fetches <url>.minisig)")
+    ap.add_argument("--url", help="URL of a signed kit .zip (also fetches <url>.minisig / <url>.sigstore)")
     ap.add_argument("--target", default=".", help="repo to bootstrap into (default: .)")
     ap.add_argument(
         "--allow-unverified",

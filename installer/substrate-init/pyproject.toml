@@ -16,6 +16,7 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/substrate_init"]
-# Force the embedded trust key (a non-.py data file) into the wheel — without it the
-# package cannot verify anything and every install would fail closed.
-artifacts = ["src/substrate_init/trust/minisign.pub"]
+# Force the embedded trust anchors (non-.py data) into the wheel — the minisign pubkey AND,
+# when the kit signs keyless, sigstore_identity.json. Without them the package cannot verify
+# and every install fails closed. Glob so a later keyless identity ships automatically. (v3.7.20)
+artifacts = ["src/substrate_init/trust/*"]

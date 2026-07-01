@@ -42,7 +42,10 @@ jobs:
           # profile). NOT the audited DATA/content — harness_patterns.json is
           # .json (data) and AGENTS.md / docs / .substrate/config (command
           # values) may change. (v3.2.19/20 findings.)
-          TRUSTED="scripts manage.sh .pre-commit-config.yaml .github/workflows .substrate/required_profile .substrate/required_sandbox .substrate/required_remote_governance .substrate/required_dep_cooldown .substrate/required_security_scanners .substrate/trusted-base-audit.yml.template"
+          # .substrate/trust + the installer's embedded trust dir are the RELEASE ROOT OF TRUST
+          # (v3.7.20): the keys/identities that verify future upgrades. A PR must not swap them —
+          # rotation routes through the release process, like the profile/scanner locks.
+          TRUSTED="scripts manage.sh .pre-commit-config.yaml .github/workflows .substrate/required_profile .substrate/required_sandbox .substrate/required_remote_governance .substrate/required_dep_cooldown .substrate/required_security_scanners .substrate/trust installer/substrate-init/src/substrate_init/trust .substrate/trusted-base-audit.yml.template"
           # carve the one DATA file back out of scripts/ (PRs may extend it; the
           # frozen check_harness_patterns.py validates it against pinned hashes).
           changed="$(git diff --name-only "origin/${{ github.base_ref }}...HEAD" -- $TRUSTED \

@@ -170,6 +170,49 @@ def test_bootstrap_warns_on_preexisting_scripts_dir(tmp_path) -> None:
     assert (tmp_path / "scripts" / "my_project_tool.py").read_text(encoding="utf-8") == "print('mine')\n"
 
 
+def test_trusted_base_freezes_trust_anchors() -> None:
+    """v3.7.20 P1: the release trust anchors (keys/identities that verify future upgrades) must
+    be in the trusted-base freeze set — a PR can't swap the root of trust."""
+    t = ROOT / "workflows" / "trusted-base-audit.yml.template"
+    if not t.is_file():
+        import pytest
+        pytest.skip("kit-source-only")
+    txt = t.read_text(encoding="utf-8")
+    assert ".substrate/trust" in txt, "trust dir not frozen by trusted-base"
+    assert "installer/substrate-init/src/substrate_init/trust" in txt, "installer trust anchor not frozen"
+
+
+def test_sigstore_identity_is_governed_surface() -> None:
+    """v3.7.20 P1: sigstore_identity.json is an owned-when-present trust anchor."""
+    import importlib
+    sys.path.insert(0, str(SCRIPTS))
+    try:
+        surf = importlib.import_module("_substrate_surfaces")
+    finally:
+        sys.path.pop(0)
+    assert ".substrate/trust/sigstore_identity.json" in surf.OPTIONAL_FILES
+
+
+def test_installer_wheel_ships_all_trust_anchors() -> None:
+    """v3.7.20 P2c: the wheel must force ALL trust anchors (glob), not just minisign.pub."""
+    pp = _installer_src().parent / "pyproject.toml"
+    if not pp.is_file():
+        import pytest
+        pytest.skip("installer absent")
+    assert "src/substrate_init/trust/*" in pp.read_text(encoding="utf-8")
+
+
+def test_keyless_template_rebuilds_and_uploads_review_bundle() -> None:
+    """v3.7.20 P2a/P2b: the keyless release uploads a review bundle rebuilt AFTER signing."""
+    t = ROOT / "workflows" / "release-keyless.yml.template"
+    if not t.is_file():
+        import pytest
+        pytest.skip("kit-source-only")
+    txt = t.read_text(encoding="utf-8")
+    assert "review-bundle.tar.gz" in txt, "keyless release must upload the review bundle"
+    assert "Rebuild the review bundle" in txt, "keyless must rebuild the bundle after signing"
+
+
 def _verify_release(file, *args, cwd=None):
     return subprocess.run([sys.executable, "-I", str(SCRIPTS / "verify_release.py"), str(file), *args],
                           capture_output=True, text=True, timeout=60, cwd=cwd)

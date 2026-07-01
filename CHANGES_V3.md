@@ -1532,6 +1532,31 @@ where they are measured, not transcribed into prose that goes stale. This matche
 older entries' "N tests pass from the extracted artifact" phrasing and the kit's
 no-overclaim discipline applied to its own release notes.
 
+## v3.7.20 — trust-anchor governance + keyless completeness (v3.7.19 audit: 1 P1 + 3 P2 + P3)
+
+- **P1 — the release trust anchors are now FROZEN by trusted-base.** The keys/identities that
+  verify FUTURE upgrades are the root of trust, not ordinary config. `trusted-base-audit.yml`'s
+  frozen set now includes `.substrate/trust` (minisign.pub + sigstore_identity.json) AND
+  `installer/substrate-init/src/substrate_init/trust` — a PR can't swap the verification
+  key/identity; rotation routes through the release process (like the profile/scanner locks).
+  `.substrate/trust/sigstore_identity.json` is also added to `OPTIONAL_FILES` (owned-when-present).
+- **P2a/P2b — keyless release now carries a coherent review bundle.** `package_release` builds the
+  bundle before cosign runs (unsigned); the keyless template now REBUILDS it after signing +
+  patching the manifest (carrying the `.sigstore` + identity + `signed=true` manifest) and uploads
+  it, so the one-file audit path matches the minisign tier. (The load-bearing minisign
+  `package_release` bundle path is untouched — the rebuild lives in the experimental keyless
+  template.)
+- **P2c — the substrate-init wheel ships ALL trust anchors.** `artifacts` is now
+  `src/substrate_init/trust/*` (glob), so a keyless-capable installer carries `sigstore_identity.json`
+  automatically, not just `minisign.pub`.
+- **P3 — docstrings/help updated** to say multi-backend (minisign + Sigstore), not minisign-only,
+  in `substrate-init`'s package + CLI docs and the `--url` help.
+
+Regression-gated: `test_trusted_base_freezes_trust_anchors`, `test_sigstore_identity_is_governed_surface`,
+`test_installer_wheel_ships_all_trust_anchors`, `test_keyless_template_rebuilds_and_uploads_review_bundle`.
+Keyless remains labelled EXPERIMENTAL until validated on a real keyless run; the minisign/local +
+ci-minisign + auto-upgrade + minisign-install paths are the supported, A-range tiers.
+
 ## v3.7.19 — distribution-tier correctness patch (v3.7.18 audit: 2 P1 + 3 P2)
 
 Makes every distribution rung obey the SAME provenance contract as the local minisign path.

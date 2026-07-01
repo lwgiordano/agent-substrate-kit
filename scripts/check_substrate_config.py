@@ -44,7 +44,7 @@ except Exception as _e:  # pragma: no cover - exercised via staged broken module
 _ALLOWED_KEYS = {"SUBSTRATE_PROFILE", "SUBSTRATE_LANG", "SUBSTRATE_RUNNER",
                  "LINT_CMD", "TYPECHECK_CMD", "TEST_CMD", "SUBSTRATE_CODE_SUFFIXES",
                  "SUBSTRATE_SANDBOX", "SUBSTRATE_REMOTE_GOVERNANCE", "SUBSTRATE_DEP_COOLDOWN",
-                 "SUBSTRATE_SECURITY_SCANNERS"}
+                 "SUBSTRATE_SECURITY_SCANNERS", "SUBSTRATE_RELEASE_BACKEND"}
 # Non-negative-integer keys (validated numerically, not against a fixed enum domain).
 # SUBSTRATE_DEP_COOLDOWN=N opts into the dependency-cooldown tier — flag direct deps
 # whose resolved version published < N days ago (a fresh-version risk signal). 0 = off. v3.7.2.
@@ -62,6 +62,10 @@ _ENUMS = {
     # SUBSTRATE_SECURITY_SCANNERS=1 opts into the DEEP scanner tier (gitleaks/trivy/osv,
     # composed + skip-honest). Networked (vuln DBs) — never part of the offline base. v3.7.17.
     "SUBSTRATE_SECURITY_SCANNERS": {"0", "1"},
+    # SUBSTRATE_RELEASE_BACKEND declares HOW releases are signed/published — a scale rung, not a
+    # runtime gate: local (laptop minisign) → ci-minisign (key in CI) → keyless (Sigstore/OIDC).
+    # go-live maps the ladder; `enable release <tier>` installs the matching workflow. v3.7.18.
+    "SUBSTRATE_RELEASE_BACKEND": {"local", "ci-minisign", "keyless"},
 }
 
 

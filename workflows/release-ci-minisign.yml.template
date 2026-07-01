@@ -1,0 +1,50 @@
+# DORMANT TEMPLATE — activate with `./manage.sh enable release --ci` (copies this into
+# .github/workflows/). Tag-triggered release, signed IN CI with a stored minisign key.
+#
+# Trust tradeoff (documented in DISTRIBUTION.md): this tier keeps the minisign SECRET key in a
+# GitHub Actions secret. Convenient + fully automated, but a repo/org compromise = key
+# compromise. For zero key custody, use `enable release --keyless` (Sigstore) instead.
+#
+# Required repo secret: SUBSTRATE_RELEASE_SECKEY = the contents of your minisign secret key.
+# Trigger: push a tag like v3.7.18.
+name: Release (ci-minisign)
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write   # create the GitHub Release
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 0}
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      - name: Install tools
+        run: |
+          sudo apt-get update && sudo apt-get install -y minisign
+          python3 -m pip install --quiet cryptography
+      - name: Write signing key (mode 600, cleaned up after)
+        run: |
+          umask 077
+          printf '%s' "${{ secrets.SUBSTRATE_RELEASE_SECKEY }}" > "$RUNNER_TEMP/substrate.key"
+      - name: Build + sign + self-verify
+        env:
+          SUBSTRATE_RELEASE_SECKEY: ${{ runner.temp }}/substrate.key
+        run: ./package_release.sh --smoke
+      - name: Verify the signed artifact (fail-closed)
+        run: |
+          ZIP="$(ls dist/*.zip | grep -v -- '-review-bundle' | head -1)"
+          python3 -I scripts/verify_release.py "$ZIP" --require
+      - name: Create the GitHub Release with signed assets
+        env: {GH_TOKEN: "${{ github.token }}"}
+        run: |
+          ZIP="$(ls dist/*.zip | grep -v -- '-review-bundle' | head -1)"
+          gh release create "${GITHUB_REF_NAME}" \
+            "$ZIP" "$ZIP.sha256" "$ZIP.minisig" .substrate/trust/minisign.pub \
+            --title "${GITHUB_REF_NAME}" \
+            --notes "Signed release (minisign). Verify: \`minisign -Vm <zip> -p minisign.pub\` or \`scripts/verify_release.py <zip>\`."
+      - name: Scrub the signing key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/substrate.key"

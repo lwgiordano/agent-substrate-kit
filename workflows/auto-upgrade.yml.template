@@ -1,0 +1,46 @@
+# DORMANT TEMPLATE — activate with `./manage.sh enable auto-upgrade` (copies this into
+# .github/workflows/). Scheduled substrate self-upgrade: fetch the latest signed kit release,
+# VERIFY it (fail-closed), apply the in-place upgrade, and open a PR. No signing key, no secret
+# — it only verifies + proposes; a human/branch-protection merge applies it. Pure consume-side
+# automation with no trust tradeoff.
+#
+# Set KIT_REPO below to your kit's repo (owner/name). Adjust the schedule as you like.
+name: Substrate auto-upgrade
+on:
+  schedule:
+    - cron: "0 6 * * 1"   # weekly, Monday 06:00 UTC
+  workflow_dispatch: {}
+permissions:
+  contents: write        # push the upgrade branch
+  pull-requests: write   # open the PR
+env:
+  KIT_REPO: lwgiordano/agent-substrate-kit
+jobs:
+  upgrade:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 0}
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      - name: Fetch the latest signed release
+        env: {GH_TOKEN: "${{ github.token }}"}
+        run: |
+          mkdir -p _upgrade && cd _upgrade
+          gh release download --repo "$KIT_REPO" --pattern '*.zip' --pattern '*.minisig' --pattern '*.sigstore' --pattern '*.sha256' || true
+      - name: Verify the release (fail-closed) then upgrade in place
+        run: |
+          python3 -m pip install --quiet cryptography
+          ZIP="$(ls _upgrade/*.zip | grep -v -- '-review-bundle' | head -1)"
+          python3 -I scripts/verify_release.py "$ZIP" --require        # multi-backend; blocks on bad/absent sig
+          ./manage.sh upgrade --from "$ZIP" --write --allow-unverified # already verified above
+      - name: Open an upgrade PR if anything changed
+        env: {GH_TOKEN: "${{ github.token }}"}
+        run: |
+          rm -rf _upgrade
+          if [ -z "$(git status --porcelain)" ]; then echo "already current"; exit 0; fi
+          BR="substrate-upgrade-$(date -u +%Y%m%d)"
+          git config user.name "substrate-bot"; git config user.email "substrate-bot@users.noreply.github.com"
+          git checkout -b "$BR" && git add -A && git commit -qm "chore: substrate upgrade (verified release)"
+          git push -u origin "$BR"
+          gh pr create --title "Substrate upgrade (verified)" --body "Automated: verified the signed kit release and applied \`manage.sh upgrade\`. Review the diff before merging." --head "$BR" || true

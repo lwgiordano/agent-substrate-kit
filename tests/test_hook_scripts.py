@@ -170,6 +170,80 @@ def test_bootstrap_warns_on_preexisting_scripts_dir(tmp_path) -> None:
     assert (tmp_path / "scripts" / "my_project_tool.py").read_text(encoding="utf-8") == "print('mine')\n"
 
 
+def _verify_release(file, *args, cwd=None):
+    return subprocess.run([sys.executable, "-I", str(SCRIPTS / "verify_release.py"), str(file), *args],
+                          capture_output=True, text=True, timeout=60, cwd=cwd)
+
+
+def test_release_backend_key_mirrored_both_validators() -> None:
+    """v3.7.18: SUBSTRATE_RELEASE_BACKEND (+ its enum) must be in BOTH config validators."""
+    py = (SCRIPTS / "check_substrate_config.py").read_text(encoding="utf-8")
+    sh = (SCRIPTS / "_substrate_config.sh").read_text(encoding="utf-8")
+    for tok in ("SUBSTRATE_RELEASE_BACKEND", "ci-minisign", "keyless"):
+        assert tok in py and tok in sh, tok
+
+
+def test_verify_release_unsigned_exit3_and_require_exit2(tmp_path) -> None:
+    """v3.7.18: an artifact with NO signature sidecar is unsigned (exit 3), and fail-closed
+    (exit 2) under --require — never a silent pass."""
+    f = tmp_path / "art.zip"
+    f.write_bytes(b"data")
+    assert _verify_release(f, cwd=str(tmp_path)).returncode == 3
+    assert _verify_release(f, "--require", cwd=str(tmp_path)).returncode == 2
+
+
+def test_verify_release_minisign_backend() -> None:
+    """The multi-backend verifier accepts a minisign-signed artifact (release-key-signed
+    installer fixture) against the repo trust anchor."""
+    import pytest
+    pytest.importorskip("cryptography")
+    fix = ROOT / "installer" / "substrate-init" / "tests" / "fixtures" / "fixture-kit.zip"
+    pub = ROOT / ".substrate" / "trust" / "minisign.pub"
+    if not (fix.is_file() and pub.is_file()):
+        pytest.skip("fixture or trust anchor absent")
+    p = _verify_release(fix, "--pub", str(pub), cwd=str(ROOT))
+    assert p.returncode == 0 and "minisign" in p.stdout, (p.returncode, p.stdout, p.stderr)
+
+
+def test_verify_release_sigstore_failclosed_without_identity(tmp_path) -> None:
+    """A .sigstore sidecar with no trusted identity configured must fail closed (exit 2),
+    not silently pass."""
+    f = tmp_path / "art.zip"
+    f.write_bytes(b"data")
+    (tmp_path / "art.zip.sigstore").write_text("{}", encoding="utf-8")
+    assert _verify_release(f, cwd=str(tmp_path)).returncode == 2
+
+
+def test_bootstrap_stages_release_templates(tmp_path) -> None:
+    """v3.7.18: the dormant distribution templates ship with every install (scale = a copy,
+    not authoring)."""
+    if not _bootstrapped(tmp_path):
+        return
+    for t in ("release-ci-minisign.yml.template", "release-keyless.yml.template", "auto-upgrade.yml.template"):
+        assert (tmp_path / ".substrate" / t).is_file(), t
+
+
+def test_enable_release_sets_backend_and_installs_workflow(tmp_path) -> None:
+    """`enable release ci` flips the posture flag + activates the staged release workflow."""
+    if not _bootstrapped(tmp_path):
+        return
+    p = subprocess.run(["./manage.sh", "enable", "release", "ci"], cwd=tmp_path,
+                       capture_output=True, text=True, timeout=60)
+    assert p.returncode == 0, (p.stdout, p.stderr)
+    cfg = (tmp_path / ".substrate" / "config").read_text(encoding="utf-8")
+    assert 'SUBSTRATE_RELEASE_BACKEND="ci-minisign"' in cfg, cfg
+    assert (tmp_path / ".github" / "workflows" / "release.yml").is_file(), "release workflow not installed"
+
+
+def test_go_live_reports_distribution_ladder(tmp_path) -> None:
+    """go-live must surface the release_backend + auto_upgrade rungs (the scale map)."""
+    if not _bootstrapped(tmp_path):
+        return
+    p = subprocess.run(["./manage.sh", "go-live", "--json"], cwd=tmp_path,
+                       capture_output=True, text=True, timeout=120)
+    assert "release_backend" in p.stdout and "auto_upgrade" in p.stdout, (p.stdout[:600], p.stderr[:600])
+
+
 def _run_scanners(root, *args, env=None):
     return subprocess.run([sys.executable, "-I", str(SCRIPTS / "run_security_scanners.py"),
                            "--root", str(root), *args],
@@ -502,13 +576,16 @@ def test_release_signature_wrong_key_fails() -> None:
 
 
 def test_verify_release_cli_failclosed_on_missing_pubkey(tmp_path) -> None:
-    """verify_release.py must exit 2 when the trusted key is absent — a verification
-    that cannot run is NEVER reported as a pass."""
+    """verify_release.py must exit 2 when a signature IS present but the trusted key is absent —
+    a verification that cannot run is NEVER reported as a pass. (v3.7.18: the verifier now
+    dispatches on the signature sidecar first, so this must supply a .minisig to reach the
+    minisign path; no sidecar at all is 'unsigned' = exit 3, tested separately.)"""
     vr = SCRIPTS / "verify_release.py"
     if not vr.is_file():
         return
     f = tmp_path / "artifact.bin"
     f.write_bytes(b"data")
+    (tmp_path / "artifact.bin.minisig").write_text("untrusted comment: x\n", encoding="utf-8")
     p = subprocess.run([sys.executable, "-I", str(vr), str(f), "--pub", str(tmp_path / "nope.pub")],
                        capture_output=True, text=True, timeout=30)
     assert p.returncode == 2, (p.returncode, p.stdout, p.stderr)

@@ -159,6 +159,53 @@ PLAN
     *) echo "usage: ./manage.sh enable security [--plan|--write|--check]" >&2; exit 2 ;;
   esac
 }
+_set_cfg_flag(){  # $1=key $2=value — set-or-append in .substrate/config
+  local cfg=".substrate/config"; [ -f "$cfg" ] || { echo "no $cfg — run bootstrap first" >&2; exit 2; }
+  if grep -q "^$1=" "$cfg"; then local tmp; tmp="$(mktemp)"
+    awk -v k="$1" -v v="$2" '$0 ~ "^"k"=" {print k"=\""v"\""; next} {print}' "$cfg" > "$tmp" && mv "$tmp" "$cfg"
+  else printf '%s="%s"\n' "$1" "$2" >> "$cfg"; fi
+}
+_install_workflow(){  # $1=staged-template-name $2=dest-workflow-filename — activate a dormant template
+  local tpl=".substrate/$1" dest=".github/workflows/$2"
+  [ -f "$tpl" ] || { echo "staged template $tpl not found — re-bootstrap to stage it" >&2; return 1; }
+  mkdir -p .github/workflows && cp "$tpl" "$dest" && echo "installed $dest (from $tpl) — REVIEW before it runs"
+}
+enable_release(){
+  case "${1:---plan}" in
+    --plan|"") cat <<'PLAN'
+`enable release <tier>` sets the release/signing posture (SUBSTRATE_RELEASE_BACKEND). Consumers
+verify ANY tier out of the box (scripts/verify_release.py); go-live maps the ladder + next rung.
+  local    — sign on your laptop (package_release + gh release create); key never leaves it (default)
+  ci       — tag-triggered CI release, signed with a minisign key in a GH Actions secret
+  keyless  — tag-triggered CI release, signed KEYLESS via Sigstore/cosign OIDC (no key stored)
+Apply:  ./manage.sh enable release local|ci|keyless
+PLAN
+      ;;
+    local) _set_cfg_flag SUBSTRATE_RELEASE_BACKEND local
+      echo "release backend = local (laptop signing; publish: ./package_release.sh --full then gh release create)";;
+    ci) _set_cfg_flag SUBSTRATE_RELEASE_BACKEND ci-minisign
+      _install_workflow release-ci-minisign.yml.template release.yml
+      echo "next: add repo secret SUBSTRATE_RELEASE_SECKEY (your minisign secret key), then push a v* tag";;
+    keyless) _set_cfg_flag SUBSTRATE_RELEASE_BACKEND keyless
+      _install_workflow release-keyless.yml.template release.yml
+      echo "next: add .substrate/trust/sigstore_identity.json (trusted workflow identity + issuer); then push a v* tag";;
+    *) echo "usage: ./manage.sh enable release [local|ci|keyless]" >&2; exit 2;;
+  esac
+}
+enable_auto_upgrade(){
+  case "${1:---plan}" in
+    --plan|"") cat <<'PLAN'
+`enable auto-upgrade` installs a SCHEDULED workflow that fetches the latest signed kit release,
+VERIFIES it (fail-closed), applies `manage.sh upgrade`, and opens a PR. No key/secret — it only
+verifies + proposes; a human/branch-protection merge applies it.
+Apply:  ./manage.sh enable auto-upgrade --write   (then set KIT_REPO in the installed workflow)
+PLAN
+      ;;
+    --write) _install_workflow auto-upgrade.yml.template substrate-auto-upgrade.yml
+      echo "next: set KIT_REPO in .github/workflows/substrate-auto-upgrade.yml + adjust the cron";;
+    *) echo "usage: ./manage.sh enable auto-upgrade [--plan|--write]" >&2; exit 2;;
+  esac
+}
 case "$cmd" in
   setup) setup ;;
   doctor) run_py_system scripts/substrate_doctor.py "$@" ;;
@@ -172,7 +219,9 @@ case "$cmd" in
     case "$what" in
       remote) enable_remote "${1:---plan}" ;;
       security) enable_security "${1:---plan}" ;;
-      *) echo "usage: ./manage.sh enable remote|security [--plan|--write|--check]" >&2; exit 2 ;;
+      release) enable_release "${1:---plan}" ;;
+      auto-upgrade) enable_auto_upgrade "${1:---plan}" ;;
+      *) echo "usage: ./manage.sh enable remote|security|release|auto-upgrade [...]" >&2; exit 2 ;;
     esac ;;
   security)
     what="${1:-scan}"; shift || true

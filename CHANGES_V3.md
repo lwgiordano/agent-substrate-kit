@@ -1532,6 +1532,43 @@ where they are measured, not transcribed into prose that goes stale. This matche
 older entries' "N tests pass from the extracted artifact" phrasing and the kit's
 no-overclaim discipline applied to its own release notes.
 
+## v3.7.18 — distribution-tier spine (ready out-of-the-box, scale by one command)
+
+Makes release/publish/consume a **tiered capability** in the substrate's own idiom (flag →
+`enable` → go-live map → staged template → skip-honest), so the same machinery runs at every
+scale and climbing a rung is one command, never a rebuild. Consumers verify **any tier out of
+the box**.
+
+- **Multi-backend `verify_release.py`** — auto-detects the signature and verifies accordingly:
+  `<artifact>.minisig` → minisign (pure-Python), `<artifact>.sigstore` → Sigstore/cosign keyless
+  (shells `cosign verify-blob` against `.substrate/trust/sigstore_identity.json`). Fail-closed on
+  bad sig / absent anchor / required-verifier-missing; exit 3 (unsigned) vs 2 (present-but-invalid)
+  vs 0 (verified). So a consumer keeps working when the signing backend scales.
+- **`SUBSTRATE_RELEASE_BACKEND`** flag `{local|ci-minisign|keyless}` (default `local`) — mirrored
+  in both validators (enum), frozen by trusted-base (release posture is maintainer-owned; a PR
+  can't silently downgrade it).
+- **`./manage.sh enable release [local|ci|keyless]`** + **`enable auto-upgrade`** — flip the flag
+  and activate the matching **staged workflow**. Three dormant templates ship with every install
+  (`.substrate/release-ci-minisign.yml.template`, `release-keyless.yml.template`,
+  `auto-upgrade.yml.template`) — scaling is a copy, not authoring. `auto-upgrade` is the pure-win
+  consume rung: a scheduled workflow that verifies the latest release (fail-closed) and opens an
+  upgrade PR — no key, no secret.
+- **go-live distribution rows** — `release_backend` (current posture + the exact next-rung command)
+  and `auto_upgrade` (installed?), so the scale pathway is always visible, not a doc to find.
+- **Docs:** `DISTRIBUTION.md` (the three-axis ladder + tradeoffs) and `KEY_ROTATION.md` (signed
+  rotation through `upgrade` — a procedure, not a rebuild; when to move to keyless).
+
+Honest boundary: the minisign tier is built + tested end to end; the keyless path is wired +
+fail-closed/skip-honest and activates when you `enable release keyless` + install cosign + set the
+trusted identity. `substrate_upgrade` verifies minisign directly; keyless releases are verified by
+`verify_release` (installer + the auto-upgrade workflow) — the honest split. PyPI publish stays the
+one maintainer-owned, one-time-config step (only needed to go public).
+
+Regression-gated: `test_release_backend_key_mirrored_both_validators`,
+`test_verify_release_unsigned_exit3_and_require_exit2`, `test_verify_release_minisign_backend`,
+`test_verify_release_sigstore_failclosed_without_identity`, `test_bootstrap_stages_release_templates`,
+`test_enable_release_sets_backend_and_installs_workflow`, `test_go_live_reports_distribution_ladder`.
+
 ## v3.7.17 — security-scanner tier (`enable security`, deferred tier E)
 
 Composes best-in-class scanners behind the substrate's opt-in profile/lock/skip-honest

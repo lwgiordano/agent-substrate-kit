@@ -104,7 +104,15 @@ jobs:
             echo "::error::Disabling it must route through the release process."
             exit 1
           fi
-          echo "freeze-guard: ok — no frozen policy/validator/CI/profile/sandbox/remote-governance/cooldown/scanner change"
+          # Release-backend authority (v3.7.18): the release/signing posture is maintainer-owned
+          # — a PR must not silently downgrade it (e.g. keyless -> local) to weaken release trust.
+          if git diff "origin/${{ github.base_ref }}...HEAD" -- .substrate/config \
+               | grep -Eq '^[+-]\s*SUBSTRATE_RELEASE_BACKEND='; then
+            echo "::error::This PR changes SUBSTRATE_RELEASE_BACKEND in .substrate/config."
+            echo "::error::The release/signing posture is frozen — change it through the release process."
+            exit 1
+          fi
+          echo "freeze-guard: ok — no frozen policy/validator/CI/profile/sandbox/remote-governance/cooldown/scanner/release-backend change"
       - name: Run the (frozen) validators + strict governance against PR content
         run: |
           set -euo pipefail

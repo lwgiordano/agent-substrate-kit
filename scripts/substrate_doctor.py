@@ -459,6 +459,29 @@ def _go_live(blocks, warns, as_json=False):
                        'reason': 'not enabled — `./manage.sh enable security` composes gitleaks/trivy/osv-scanner'})
     checks.append({'id': 'deep_audit', 'tier': 'deep', 'status': 'available',
                    'reason': 'DeepSec/AgentDojo deep audit available as a manual/scheduled tier'})
+    # Distribution ladder (v3.7.18): the release/signing posture + the consume-side auto-upgrade
+    # rung. Informational map (never blocks) — the "scale by one command" pathway made visible.
+    # Consumers verify ANY tier out of the box via scripts/verify_release.py (multi-backend).
+    _rb = "local"
+    if _cfgp.is_file():
+        for _ln in _cfgp.read_text(encoding='utf-8', errors='replace').splitlines():
+            _ln = _ln.split('#', 1)[0].strip()
+            if _ln.startswith('SUBSTRATE_RELEASE_BACKEND='):
+                _rb = _ln.split('=', 1)[1].strip().strip('"\'')
+    _rb_next = {
+        "local": "next rung: `./manage.sh enable release ci` (CI minisign) or `keyless` (Sigstore, no stored key)",
+        "ci-minisign": "next rung: `./manage.sh enable release keyless` — zero key custody (Sigstore/OIDC)",
+        "keyless": "top rung — keyless Sigstore signing, no key stored",
+    }.get(_rb, "")
+    checks.append({'id': 'release_backend', 'tier': 'remote',
+                   'status': 'pass' if _rb == 'keyless' else 'available',
+                   'reason': f'signing posture: {_rb}. {_rb_next}'})
+    _au = (ROOT / '.github' / 'workflows' / 'substrate-auto-upgrade.yml').is_file()
+    checks.append({'id': 'auto_upgrade', 'tier': 'remote',
+                   'status': 'pass' if _au else 'available',
+                   'reason': ('scheduled verify+upgrade-PR workflow installed'
+                              if _au else
+                              'not enabled — `./manage.sh enable auto-upgrade` for hands-off verified upgrades')})
     repo_pass = repo_ok and eval_ok is not False
     def _st(cid):
         return next((c['status'] for c in checks if c['id'] == cid), None)

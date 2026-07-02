@@ -225,7 +225,7 @@ mkdir -p .github/workflows; render "$KIT_DIR/workflows/ci.yml.template" .github/
 # this raw copy == what the remote-tier render produces.) v3.6.1.
 copy "$KIT_DIR/workflows/trusted-base-audit.yml.template" .substrate/trusted-base-audit.yml.template
 # Distribution-tier templates (v3.7.18): staged DORMANT like trusted-base, activated on demand
-# by `./manage.sh enable release --ci|--keyless` / `enable auto-upgrade` — the "ready
+# by `./manage.sh enable release ci|keyless` / `enable auto-upgrade` — the "ready
 # out-of-the-box, scale by one command" path (no re-bootstrap needed to climb a rung).
 for _rt in release-ci-minisign.yml.template release-keyless.yml.template auto-upgrade.yml.template; do
   [ -f "$KIT_DIR/workflows/$_rt" ] && copy "$KIT_DIR/workflows/$_rt" ".substrate/$_rt"

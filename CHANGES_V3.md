@@ -1532,6 +1532,24 @@ where they are measured, not transcribed into prose that goes stale. This matche
 older entries' "N tests pass from the extracted artifact" phrasing and the kit's
 no-overclaim discipline applied to its own release notes.
 
+## v3.7.24 — test-cache correctness patch (v3.7.23 audit: 1 P2 + 2 P3)
+
+- **P2 — the template cache now gates on bootstrap's return code.** The cache accepted any run
+  that left a `manage.sh` behind; a bootstrap that failed partway after copying `manage.sh`
+  would have been cached as a valid template, silently running every cached test against a
+  half-installed repo. Extracted `_run_bootstrap_into_template()` (unit-testable, per the
+  audit's suggestion): `rc != 0` → template rejected + tail of stdout/stderr printed for
+  attribution; only `rc == 0` AND `manage.sh` present caches.
+- **P3 — last stale flag comment fixed** (`bootstrap.sh` staging comment now says
+  `enable release ci|keyless`).
+- **P3 — "byte-identical" wording softened** to "fresh isolated copy of a successfully
+  bootstrapped template (contents identical minus the install.json timestamp)" — the honest
+  claim.
+
+Regression-gated: `test_bootstrap_template_rejects_failed_bootstrap` (fake bootstrap writes
+`manage.sh` then exits 7 → rejected; clean rc 0 → accepted). Test-harness only; no production
+kit change beyond the one comment.
+
 ## v3.7.23 — test-speed refactor (bootstrapped-repo template cache) + audit polish
 
 The #1 test-suite debt, plus the v3.7.22 audit's two opportunistic items.

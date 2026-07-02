@@ -47,8 +47,9 @@ def _blocks(cmd: str, profile: str = "standard") -> bool:
 # dominating the suite's ~4-minute runtime and forcing the release artifact-test HARD_CAP to
 # 900s. Bootstrap is deterministic for a given flag-set, so: bootstrap ONCE per flag-set into a
 # process-lifetime template dir, then copytree the template into each test's tmp_path (~0.1s).
-# Every test still gets a fresh, isolated, mutable repo — identical bytes to a real bootstrap.
-# Tests that assert on bootstrap's OWN behavior/output keep invoking bootstrap.sh directly.
+# Every test still gets a fresh, isolated, mutable copy of a successfully bootstrapped repo
+# (contents identical to a direct bootstrap, minus the install.json timestamp). Tests that
+# assert on bootstrap's OWN behavior/output keep invoking bootstrap.sh directly.
 import atexit
 import shutil as _shutil
 import tempfile as _tempfile
@@ -64,8 +65,25 @@ def _find_bootstrap_sh():
     return None
 
 
+def _run_bootstrap_into_template(boot: Path, tpl: Path, flags: tuple[str, ...]) -> bool:
+    """Run bootstrap into tpl; True only for a COMPLETE install (rc==0 AND manage.sh).
+
+    The return code must gate caching (v3.7.23 audit P2): a bootstrap that copies manage.sh
+    and then fails partway would otherwise be cached as a valid template, and every cached
+    test would silently run against a half-installed repo."""
+    subprocess.run(["git", "init", "-q"], cwd=tpl, check=True)
+    r = subprocess.run(["bash", str(boot), *flags], cwd=tpl,
+                       capture_output=True, text=True, timeout=180)
+    if r.returncode != 0:
+        print(f"bootstrap template FAILED (rc={r.returncode}) for flags={flags}:\n"
+              f"{r.stdout[-1000:]}\n{r.stderr[-1000:]}", file=sys.stderr)
+        return False
+    return (tpl / "manage.sh").exists()
+
+
 def _bootstrap_template(flags: tuple[str, ...]) -> Path | None:
-    """Bootstrap once per flag-set into a cached template dir; None if bootstrap unavailable."""
+    """Bootstrap once per flag-set into a cached template dir; None if bootstrap unavailable
+    or the bootstrap did not complete cleanly."""
     global _TPL_ROOT
     if flags in _TPL_CACHE:
         return _TPL_CACHE[flags]
@@ -78,9 +96,7 @@ def _bootstrap_template(flags: tuple[str, ...]) -> Path | None:
         atexit.register(_shutil.rmtree, _TPL_ROOT, ignore_errors=True)
     tpl = _TPL_ROOT / f"tpl{len(_TPL_CACHE)}"
     tpl.mkdir()
-    subprocess.run(["git", "init", "-q"], cwd=tpl, check=True)
-    subprocess.run(["bash", str(boot), *flags], cwd=tpl, capture_output=True, timeout=180)
-    _TPL_CACHE[flags] = tpl if (tpl / "manage.sh").exists() else None
+    _TPL_CACHE[flags] = tpl if _run_bootstrap_into_template(boot, tpl, flags) else None
     return _TPL_CACHE[flags]
 
 
@@ -94,7 +110,8 @@ def _clone_template(flags: tuple[str, ...], dest: Path) -> bool:
 
 def _bootstrapped(tmp_path):
     """Provide a freshly-bootstrapped repo at tmp_path (from the cached template); True on
-    success. Byte-identical to running `bootstrap.sh --no-doctor` there, minus the wait."""
+    success. A fresh isolated copy of a successfully bootstrapped template — same contents as
+    running `bootstrap.sh --no-doctor` there (minus the install.json timestamp and the wait)."""
     return _clone_template(("--no-doctor",), tmp_path)
 
 
@@ -111,6 +128,22 @@ def test_manage_does_not_source_config_as_shell(tmp_path) -> None:
     assert not marker.exists(), "config was executed as shell (P0)"
     assert p.returncode != 0
     assert "invalid line" in (p.stdout + p.stderr).lower()
+
+
+def test_bootstrap_template_rejects_failed_bootstrap(tmp_path) -> None:
+    """v3.7.23 audit P2: a bootstrap that writes manage.sh but exits nonzero must NOT become
+    a valid template — cached tests would silently run against a half-installed repo."""
+    fake = tmp_path / "fake_bootstrap.sh"
+    fake.write_text("#!/usr/bin/env bash\necho fake > manage.sh\nexit 7\n", encoding="utf-8")
+    tpl = tmp_path / "tpl"
+    tpl.mkdir()
+    assert _run_bootstrap_into_template(fake, tpl, ("--no-doctor",)) is False, \
+        "partial bootstrap (manage.sh present, rc=7) was accepted as a template"
+    good = tmp_path / "good_bootstrap.sh"
+    good.write_text("#!/usr/bin/env bash\necho ok > manage.sh\nexit 0\n", encoding="utf-8")
+    tpl2 = tmp_path / "tpl2"
+    tpl2.mkdir()
+    assert _run_bootstrap_into_template(good, tpl2, ()) is True
 
 
 def test_consumer_install_omits_heavy_selftests(tmp_path) -> None:

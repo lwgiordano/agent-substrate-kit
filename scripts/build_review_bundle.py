@@ -69,7 +69,11 @@ def main(argv: list[str]) -> int:
     except Exception as e:
         err = f"internal error: {e}"
     if err:
+        # Remove the temp AND any pre-existing destination bundle: the guarantee is "after a
+        # failed build, NO bundle exists at the destination" — otherwise a caller ignoring the
+        # exit code could ship a stale previous bundle (v3.7.22 audit P2/P3).
         tmp.unlink(missing_ok=True)
+        bundle.unlink(missing_ok=True)
         print(f"build_review_bundle: {err}", file=sys.stderr)
         return 1
     tmp.replace(bundle)

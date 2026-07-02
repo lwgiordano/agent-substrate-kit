@@ -1,4 +1,4 @@
-# DORMANT + EXPERIMENTAL TEMPLATE — activate with `./manage.sh enable release --keyless`.
+# DORMANT + EXPERIMENTAL TEMPLATE — activate with `./manage.sh enable release keyless`.
 # Tag-triggered release, signed KEYLESS with Sigstore/cosign via the workflow's OIDC identity;
 # NO signing key stored anywhere — the strongest tier. Marked experimental until validated on a
 # real keyless release end-to-end (package_release builds the artifact UNSIGNED, then cosign

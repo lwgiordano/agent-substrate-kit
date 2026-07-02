@@ -42,19 +42,60 @@ def _blocks(cmd: str, profile: str = "standard") -> bool:
 
 # --- v3.2.10: .substrate/config must be DATA, not sourced shell ---
 
-def _bootstrapped(tmp_path):
-    """Bootstrap a minimal repo at tmp_path; returns True on success."""
-    kit = ROOT  # tests run from an installed repo OR the kit; find bootstrap
-    boot = None
+# --- bootstrapped-repo TEMPLATE CACHE (v3.7.23 test-speed refactor) -------------------------
+# ~35 tests each ran a FULL bootstrap (~2-3s: 100+ file copies + manifest + doctor plumbing),
+# dominating the suite's ~4-minute runtime and forcing the release artifact-test HARD_CAP to
+# 900s. Bootstrap is deterministic for a given flag-set, so: bootstrap ONCE per flag-set into a
+# process-lifetime template dir, then copytree the template into each test's tmp_path (~0.1s).
+# Every test still gets a fresh, isolated, mutable repo — identical bytes to a real bootstrap.
+# Tests that assert on bootstrap's OWN behavior/output keep invoking bootstrap.sh directly.
+import atexit
+import shutil as _shutil
+import tempfile as _tempfile
+
+_TPL_ROOT: Path | None = None
+_TPL_CACHE: dict[tuple, Path | None] = {}
+
+
+def _find_bootstrap_sh():
     for cand in (ROOT / "bootstrap.sh", ROOT.parent / "agent_substrate_kit_v3" / "bootstrap.sh"):
         if cand.exists():
-            boot = cand; break
+            return cand
+    return None
+
+
+def _bootstrap_template(flags: tuple[str, ...]) -> Path | None:
+    """Bootstrap once per flag-set into a cached template dir; None if bootstrap unavailable."""
+    global _TPL_ROOT
+    if flags in _TPL_CACHE:
+        return _TPL_CACHE[flags]
+    boot = _find_bootstrap_sh()
     if boot is None:
+        _TPL_CACHE[flags] = None
+        return None
+    if _TPL_ROOT is None:
+        _TPL_ROOT = Path(_tempfile.mkdtemp(prefix="substrate-test-templates-"))
+        atexit.register(_shutil.rmtree, _TPL_ROOT, ignore_errors=True)
+    tpl = _TPL_ROOT / f"tpl{len(_TPL_CACHE)}"
+    tpl.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=tpl, check=True)
+    subprocess.run(["bash", str(boot), *flags], cwd=tpl, capture_output=True, timeout=180)
+    _TPL_CACHE[flags] = tpl if (tpl / "manage.sh").exists() else None
+    return _TPL_CACHE[flags]
+
+
+def _clone_template(flags: tuple[str, ...], dest: Path) -> bool:
+    tpl = _bootstrap_template(flags)
+    if tpl is None:
         return False
-    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
-    subprocess.run(["bash", str(boot), "--no-doctor"], cwd=tmp_path,
-                   capture_output=True, timeout=120)
-    return (tmp_path / "manage.sh").exists()
+    _shutil.copytree(tpl, dest, symlinks=True, dirs_exist_ok=True)
+    return (dest / "manage.sh").exists()
+
+
+def _bootstrapped(tmp_path):
+    """Provide a freshly-bootstrapped repo at tmp_path (from the cached template); True on
+    success. Byte-identical to running `bootstrap.sh --no-doctor` there, minus the wait."""
+    return _clone_template(("--no-doctor",), tmp_path)
 
 
 def test_manage_does_not_source_config_as_shell(tmp_path) -> None:
@@ -197,6 +238,26 @@ def test_build_review_bundle_is_deterministic_and_hygienic(tmp_path) -> None:
     # tmp+rename) — a caller ignoring the exit code must not be able to ship a partial bundle.
     assert not (tmp_path / "o2.tar.gz").exists(), "partial bundle left at destination"
     assert not (tmp_path / "o2.tar.gz.tmp").exists(), "temp bundle not cleaned up"
+
+
+def test_build_review_bundle_failed_rebuild_removes_existing_destination(tmp_path) -> None:
+    """v3.7.22 audit P2/P3: after ANY failed build no bundle may exist at the destination —
+    including a stale previous bundle a rc-ignoring caller could otherwise ship."""
+    b = SCRIPTS / "build_review_bundle.py"
+    if not b.is_file():
+        return
+    review = tmp_path / "review"
+    review.mkdir()
+    (review / "a.txt").write_text("a", encoding="utf-8")
+    out = tmp_path / "o.tar.gz"
+    ok = subprocess.run([sys.executable, "-I", str(b), str(review), str(out), "a.txt"],
+                        capture_output=True, text=True, timeout=30)
+    assert ok.returncode == 0 and out.exists()
+    bad = subprocess.run([sys.executable, "-I", str(b), str(review), str(out), "missing.txt"],
+                         capture_output=True, text=True, timeout=30)
+    assert bad.returncode == 1
+    assert not out.exists(), "stale previous bundle left at destination after failed rebuild"
+    assert not Path(str(out) + ".tmp").exists()
 
 
 def test_build_review_bundle_rejects_traversal(tmp_path) -> None:
@@ -3455,14 +3516,12 @@ def test_manage_wires_code_shape() -> None:
 
 def _bootstrap_repo_for_shape(tmp_path, commit=True, dev_tests=False):
     repo = tmp_path / "proj"; repo.mkdir()
-    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    # cached template (v3.7.23): same flags → same bytes as a direct bootstrap, ~20x faster
+    flags = ("--profile", "standard", "--lang", "none", "--no-doctor") + (("--dev-tests",) if dev_tests else ())
+    if not _clone_template(flags, repo):
+        raise RuntimeError("bootstrap template unavailable")
     subprocess.run(["git", "config", "user.email", "x@x"], cwd=repo, check=True)
     subprocess.run(["git", "config", "user.name", "x"], cwd=repo, check=True)
-    cmd = ["bash", str(ROOT / "bootstrap.sh"), "--target", str(repo), "--profile",
-           "standard", "--lang", "none", "--no-doctor"]
-    if dev_tests:  # vendor the kit's full test suite so shape tests can assert on kit test files
-        cmd.append("--dev-tests")
-    subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=120)
     if commit:
         subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
         subprocess.run(["git", "commit", "-qm", "init"], cwd=repo, check=True, capture_output=True)

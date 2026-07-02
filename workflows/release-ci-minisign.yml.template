@@ -1,9 +1,9 @@
-# DORMANT TEMPLATE — activate with `./manage.sh enable release --ci` (copies this into
+# DORMANT TEMPLATE — activate with `./manage.sh enable release ci` (copies this into
 # .github/workflows/). Tag-triggered release, signed IN CI with a stored minisign key.
 #
 # Trust tradeoff (documented in DISTRIBUTION.md): this tier keeps the minisign SECRET key in a
 # GitHub Actions secret. Convenient + fully automated, but a repo/org compromise = key
-# compromise. For zero key custody, use `enable release --keyless` (Sigstore) instead.
+# compromise. For zero key custody, use `enable release keyless` (Sigstore) instead.
 #
 # Required repo secret: SUBSTRATE_RELEASE_SECKEY = the contents of your minisign secret key.
 # Trigger: push a tag like v3.7.18.

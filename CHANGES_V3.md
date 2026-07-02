@@ -1532,6 +1532,28 @@ where they are measured, not transcribed into prose that goes stale. This matche
 older entries' "N tests pass from the extracted artifact" phrasing and the kit's
 no-overclaim discipline applied to its own release notes.
 
+## v3.7.23 — test-speed refactor (bootstrapped-repo template cache) + audit polish
+
+The #1 test-suite debt, plus the v3.7.22 audit's two opportunistic items.
+
+- **Bootstrapped-repo TEMPLATE CACHE.** ~35 tests each ran a FULL `bootstrap.sh` (~2-3s of file
+  copies + manifest work), dominating the suite. Bootstrap is deterministic per flag-set, so the
+  suite now bootstraps ONCE per flag-set into a process-lifetime template dir and `copytree`s
+  the template into each test's `tmp_path` (~0.1s) — every test still gets a fresh, isolated,
+  byte-identical repo. Tests that assert on bootstrap's OWN behavior/output (strip messages,
+  env overrides, warnings) still invoke `bootstrap.sh` directly. **Measured: full suite
+  239s → 143s locally (−40%).** The release artifact-test keeps its 900s `HARD_CAP` — now with
+  ~6x headroom instead of ~1x (the cap stays as a hang backstop, not a squeeze).
+- **Bundle-builder failure now clears the destination (v3.7.22 audit P2/P3).** A failed rebuild
+  previously preserved an older bundle at the destination — normal atomic-write semantics, but
+  weaker than the stated guarantee; a rc-ignoring caller could ship a stale bundle. Failure now
+  unlinks the temp AND the destination: after ANY failed build, no bundle exists there.
+- **Stale wording fixed (audit P3):** the CI/keyless workflow templates' comments now say
+  `enable release ci` / `enable release keyless` (the flags never existed).
+
+Regression-gated: `test_build_review_bundle_failed_rebuild_removes_existing_destination`; the
+whole existing suite exercises the template cache by construction.
+
 ## v3.7.22 — review polish: atomic bundle publish, entry containment, key-setup root guard
 
 Three minor findings from a structured code review of v3.7.21, fixed at class level:

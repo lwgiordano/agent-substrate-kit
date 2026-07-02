@@ -1,6 +1,6 @@
 ---
 purpose: Universal Agent Substrate Kit v3 files installed in this repo.
-last_human_reviewed: 2026-07-01
+last_human_reviewed: 2026-07-02
 covers:
   - extras/calibrate_diy_ultrareview.py
   - extras/check_license_headers.py

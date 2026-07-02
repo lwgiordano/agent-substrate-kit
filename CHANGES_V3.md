@@ -1532,6 +1532,27 @@ where they are measured, not transcribed into prose that goes stale. This matche
 older entries' "N tests pass from the extracted artifact" phrasing and the kit's
 no-overclaim discipline applied to its own release notes.
 
+## v3.7.22 — review polish: atomic bundle publish, entry containment, key-setup root guard
+
+Three minor findings from a structured code review of v3.7.21, fixed at class level:
+
+- **Atomic bundle publish (review #1).** `build_review_bundle.py` built the tarball in place, so
+  a mid-build failure (missing file) left a partial `.tar.gz` at the destination — shippable by
+  any future caller that ignored the exit code. Now builds + verifies a `.tmp` and renames only
+  on success; every failure path unlinks the temp. A failed build leaves NOTHING at the
+  destination.
+- **Entry containment (review #2).** Bundle entries are bundle-relative filenames; an absolute
+  path or `..` segment would have read (and mislabeled) content from outside the review dir.
+  Refused now — the hygiene claim no longer depends on callers being well-behaved.
+- **Key-setup root guard (review #3).** `setup_release_key.sh` names the key after
+  `basename $(pwd)`, so running it outside a substrate repo root silently targeted a
+  wrong-named key. It now requires `manage.sh` + `.substrate/` in the cwd (exit 2 otherwise)
+  and warns when an existing key's `.pub` sidecar is missing.
+
+Regression-gated: partial-bundle-leaves-nothing + temp-cleanup assertions added to
+`test_build_review_bundle_is_deterministic_and_hygienic`,
+`test_build_review_bundle_rejects_traversal`, `test_setup_release_key_requires_repo_root`.
+
 ## v3.7.21 — de-dup the release bundle + durable, setup-appropriate signing key
 
 Closes the two honest gaps left after v3.7.20 — and both fixes REMOVE surface rather than add it.

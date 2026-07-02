@@ -193,6 +193,37 @@ def test_build_review_bundle_is_deterministic_and_hygienic(tmp_path) -> None:
     p2 = subprocess.run([sys.executable, "-I", str(b), str(review), str(tmp_path / "o2.tar.gz"),
                         "a.zip", "nope.txt"], capture_output=True, text=True, timeout=30)
     assert p2.returncode == 1, "missing file must fail closed"
+    # v3.7.22 review #1: a failed build must leave NO artifact at the destination (atomic
+    # tmp+rename) — a caller ignoring the exit code must not be able to ship a partial bundle.
+    assert not (tmp_path / "o2.tar.gz").exists(), "partial bundle left at destination"
+    assert not (tmp_path / "o2.tar.gz.tmp").exists(), "temp bundle not cleaned up"
+
+
+def test_build_review_bundle_rejects_traversal(tmp_path) -> None:
+    """v3.7.22 review #2: an absolute or '..' entry must be refused — bundle content is
+    contained to the review dir regardless of caller."""
+    b = SCRIPTS / "build_review_bundle.py"
+    if not b.is_file():
+        return
+    review = tmp_path / "review"
+    review.mkdir()
+    (review / "a.zip").write_text("a", encoding="utf-8")
+    outside = tmp_path / "secret.txt"
+    outside.write_text("secret", encoding="utf-8")
+    p = subprocess.run([sys.executable, "-I", str(b), str(review), str(tmp_path / "o.tar.gz"),
+                        "a.zip", "../secret.txt"], capture_output=True, text=True, timeout=30)
+    assert p.returncode == 1 and "non-contained" in (p.stdout + p.stderr), (p.stdout, p.stderr)
+    assert not (tmp_path / "o.tar.gz").exists()
+
+
+def test_setup_release_key_requires_repo_root(tmp_path) -> None:
+    """v3.7.22 review #3: the key is named after the repo root, so running from a non-substrate
+    dir must refuse (else it would silently target a wrong-named key)."""
+    sk = SCRIPTS / "setup_release_key.sh"
+    if not sk.is_file():
+        return
+    p = subprocess.run(["bash", str(sk)], cwd=str(tmp_path), capture_output=True, text=True, timeout=30)
+    assert p.returncode == 2 and "repo root" in (p.stdout + p.stderr), (p.returncode, p.stdout, p.stderr)
 
 
 def test_release_setup_key_wired() -> None:

@@ -325,19 +325,10 @@ BUNDLE="$DIST/${NAME}-${VER}-review-bundle.tar.gz"
 # elsewhere. tarfile never reads xattrs, and we normalize every TarInfo
 # (mtime/mode/uid/gid/uname/gname) in USTAR format, so the bundle is
 # deterministic + metadata-clean on every platform (v3.3.11 reviewer).
-python3 - "$REVIEW" "$BUNDLE" "${REVIEW_FILES[@]}" <<'PY'
-import io, sys, tarfile
-from pathlib import Path
-review, bundle = Path(sys.argv[1]), Path(sys.argv[2])
-files = sys.argv[3:]
-with tarfile.open(bundle, "w:gz", format=tarfile.USTAR_FORMAT) as tf:
-    for rel in files:
-        data = (review / rel).read_bytes()
-        info = tarfile.TarInfo(rel)
-        info.size = len(data); info.mtime = 0; info.mode = 0o644
-        info.uid = info.gid = 0; info.uname = info.gname = ""
-        tf.addfile(info, io.BytesIO(data))
-PY
+# Build via the SHARED builder (scripts/build_review_bundle.py) so the keyless template and the
+# local/minisign path produce the bundle ONE way — the dedup that keeps the tiers from drifting
+# (v3.7.21). The platform `tar -tzf` warning check below stays as the canonical-path belt.
+python3 "$KITROOT/scripts/build_review_bundle.py" "$REVIEW" "$BUNDLE" "${REVIEW_FILES[@]}"
 # Bundle hygiene (pipefail-safe): listing must SUCCEED, emit NO warnings (a stray
 # xattr/metadata header prints a tar warning), contain no ._*/.DS_Store, and be
 # EXACTLY the expected review files (4, or 6 when signed). Listings go to files so

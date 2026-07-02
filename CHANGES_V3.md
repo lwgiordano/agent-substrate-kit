@@ -1532,6 +1532,30 @@ where they are measured, not transcribed into prose that goes stale. This matche
 older entries' "N tests pass from the extracted artifact" phrasing and the kit's
 no-overclaim discipline applied to its own release notes.
 
+## v3.7.21 — de-dup the release bundle + durable, setup-appropriate signing key
+
+Closes the two honest gaps left after v3.7.20 — and both fixes REMOVE surface rather than add it.
+
+- **One shared review-bundle builder (kills the duplication).** The bundle tar-normalization was
+  duplicated (canonical in `package_release.sh`, a copy inline in the keyless template) — the
+  drift risk that made keyless "experimental." New `scripts/build_review_bundle.py` is the ONE
+  place the deterministic, metadata-clean tarball is built (fail-closed hygiene: exactly the
+  requested files, no macOS `._*`/`.DS_Store`). `package_release.sh` and the keyless template
+  both call it, so every backend produces the bundle the same way. Validated on a real signed
+  package (`build_review_bundle: ok (6 files)`); `package_release`'s platform-`tar` warning check
+  stays as the canonical-path belt.
+- **The signing key is now durable + resolves to your setup (no scratch, scales down as you
+  climb).** `SUBSTRATE_RELEASE_SECKEY` → a durable file you own (default
+  `~/.config/agent-substrate/<repo>-release.key`, mode 600) for `local`; a GitHub Actions secret
+  for `ci-minisign`; nothing at all for `keyless`. New `./manage.sh release --setup-key`
+  (`scripts/setup_release_key.sh`) generates the durable key + prints the public key to commit.
+  `KEY_ROTATION.md` documents the resolution ladder — key custody SHRINKS as you scale, by design.
+
+Regression-gated: `test_build_review_bundle_is_deterministic_and_hygienic`,
+`test_release_setup_key_wired`, and the updated
+`test_package_release_review_bundle_metadata_clean_creation` (asserts the shared builder + the
+retained hygiene). No new attack surface, less duplicated code.
+
 ## v3.7.20 — trust-anchor governance + keyless completeness (v3.7.19 audit: 1 P1 + 3 P2 + P3)
 
 - **P1 — the release trust anchors are now FROZEN by trusted-base.** The keys/identities that

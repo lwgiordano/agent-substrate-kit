@@ -259,7 +259,11 @@ case "$cmd" in
   evals) run_py scripts/run_substrate_evals.py "$@" ;;
   audit) run_py scripts/substrate_audit.py --mode quick --write-report ;;
   full-audit) run_py scripts/substrate_audit.py --mode full --write-report ;;
-  release|release-gate) bash scripts/release_gate.sh ;;
+  release|release-gate)
+    case "${1:-}" in
+      --setup-key) shift || true; bash scripts/setup_release_key.sh "$@" ;;
+      *) bash scripts/release_gate.sh ;;
+    esac ;;
   manifest) run_py scripts/update_manifest.py --fix ;;
   agent-system-audit) bash scripts/agent_system_audit.sh ;;
   handoff) run_py scripts/session_handoff.py capture ;;

@@ -4,6 +4,22 @@ The release trust root is one minisign keypair (`local` / `ci-minisign` tiers). 
 thing to have a plan for before you scale past yourself. The `keyless` tier removes the problem
 entirely (no key), so "rotation" below applies to the minisign tiers.
 
+## Where the signing key lives (resolves to YOUR setup — key custody shrinks as you scale)
+Signing is `SUBSTRATE_RELEASE_SECKEY` + the release backend; there is no hardcoded location:
+
+| Backend (`enable release …`) | Where the secret is | Custody |
+|---|---|---|
+| `local` | a **durable file** you own (default `~/.config/agent-substrate/<repo>-release.key`, mode 600) | you |
+| `ci-minisign` | a **GitHub Actions secret** | GitHub |
+| `keyless` | **nowhere** — Sigstore/OIDC, no key exists | none |
+
+- **Never keep the key in a scratch/temp dir** — it can vanish, and losing it forces a rotation.
+- One-command setup: `./manage.sh release --setup-key` generates the durable key + prints the
+  public key to commit. Then `export SUBSTRATE_RELEASE_SECKEY=<that path>` before packaging.
+- The higher you climb the ladder, the less local key custody you carry — that's the intended
+  scaling: solo keeps a durable file; a team moves it to a CI secret; public/high-value goes
+  keyless and holds no key at all.
+
 ## Protect the secret key
 - **Never commit it.** Only `.substrate/trust/minisign.pub` (the PUBLIC key) is in the repo.
 - **Password-protect it** for anything beyond solo use: `minisign -G` (without `-W`) encrypts the

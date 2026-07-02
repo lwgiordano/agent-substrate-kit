@@ -170,6 +170,42 @@ def test_bootstrap_warns_on_preexisting_scripts_dir(tmp_path) -> None:
     assert (tmp_path / "scripts" / "my_project_tool.py").read_text(encoding="utf-8") == "print('mine')\n"
 
 
+def test_build_review_bundle_is_deterministic_and_hygienic(tmp_path) -> None:
+    """v3.7.21: the SHARED bundle builder makes a normalized tar of EXACTLY the given files and
+    fails closed on a missing file (the one path package_release + the keyless template share)."""
+    b = SCRIPTS / "build_review_bundle.py"
+    if not b.is_file():
+        return
+    review = tmp_path / "review"
+    review.mkdir()
+    for n in ("a.zip", "a.zip.sha256", "README_REVIEW.md"):
+        (review / n).write_text(n, encoding="utf-8")
+    bundle = tmp_path / "out.tar.gz"
+    p = subprocess.run([sys.executable, "-I", str(b), str(review), str(bundle),
+                        "a.zip", "a.zip.sha256", "README_REVIEW.md"],
+                       capture_output=True, text=True, timeout=30)
+    assert p.returncode == 0, (p.stdout, p.stderr)
+    import tarfile
+    with tarfile.open(bundle) as tf:
+        assert sorted(tf.getnames()) == ["README_REVIEW.md", "a.zip", "a.zip.sha256"]
+        for m in tf.getmembers():
+            assert m.mtime == 0 and m.uid == 0 and m.uname == "", "TarInfo not normalized"
+    p2 = subprocess.run([sys.executable, "-I", str(b), str(review), str(tmp_path / "o2.tar.gz"),
+                        "a.zip", "nope.txt"], capture_output=True, text=True, timeout=30)
+    assert p2.returncode == 1, "missing file must fail closed"
+
+
+def test_release_setup_key_wired() -> None:
+    """v3.7.21: `manage.sh release --setup-key` routes to the durable-key helper (so the signing
+    key never has to live in a scratch/temp dir)."""
+    mg = ROOT / "manage.sh"
+    if not mg.is_file():
+        return
+    t = mg.read_text(encoding="utf-8")
+    assert "--setup-key" in t and "setup_release_key.sh" in t
+    assert (SCRIPTS / "setup_release_key.sh").is_file()
+
+
 def test_trusted_base_freezes_trust_anchors() -> None:
     """v3.7.20 P1: the release trust anchors (keys/identities that verify future upgrades) must
     be in the trusted-base freeze set — a PR can't swap the root of trust."""
@@ -2492,18 +2528,25 @@ def test_package_release_hygiene_is_pipefail_safe_and_excludes_venv() -> None:
 
 
 def test_package_release_review_bundle_metadata_clean_creation() -> None:
-    """v3.3.11: the review bundle is built with Python tarfile + normalized
-    metadata (platform tar leaks com.apple.provenance LIBARCHIVE.xattr headers),
-    and the hygiene gate fails on tar warnings AND a wrong file list."""
+    """v3.3.11 / v3.7.21: the review bundle is built with Python tarfile + normalized metadata
+    (platform tar leaks com.apple.provenance LIBARCHIVE.xattr headers) via the SHARED builder
+    scripts/build_review_bundle.py, and package_release's hygiene gate fails on tar warnings
+    AND a wrong file list."""
     pr = ROOT / "package_release.sh"
     if not pr.exists():
         pr = ROOT.parent / "agent_substrate_kit_v3" / "package_release.sh"
     if not pr.exists():
         return
     text = pr.read_text(encoding="utf-8")
-    assert "tarfile.open" in text and "TarInfo" in text and "info.mtime = 0" in text
+    # tar-build normalization now lives in the shared builder …
+    builder = SCRIPTS / "build_review_bundle.py"
+    if builder.is_file():
+        btext = builder.read_text(encoding="utf-8")
+        assert "tarfile.open" in btext and "TarInfo" in btext and "info.mtime = 0" in btext
+    assert "build_review_bundle.py" in text, "package_release must use the shared bundle builder"
+    # … and package_release keeps the platform-tar warning + exact-file-list hygiene.
     assert "review bundle emits tar warnings" in text
-    assert "not exactly the expected review files" in text  # 4, or 6 when signed (v3.7.16 P2a)
+    assert "not exactly the expected review files" in text
 
 
 def test_package_release_excludes_local_venv_end_to_end() -> None:

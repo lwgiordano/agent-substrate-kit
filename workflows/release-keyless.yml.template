@@ -62,17 +62,8 @@ jobs:
             echo; echo "Verify: scripts/verify_release.py $B  (needs cosign + the trusted identity in sigstore_identity.json).";
             echo "RELEASE_MANIFEST.json records signed=true, signature_backend=sigstore."; } > "$R/README_REVIEW.md"
           BUNDLE="dist/${B%.zip}-review-bundle.tar.gz"
-          python3 - "$R" "$BUNDLE" "$B" "$B.sha256" "$B.sigstore" sigstore_identity.json RELEASE_MANIFEST.json README_REVIEW.md <<'PY'
-          import io, sys, tarfile
-          from pathlib import Path
-          review, bundle = Path(sys.argv[1]), Path(sys.argv[2])
-          with tarfile.open(bundle, "w:gz", format=tarfile.USTAR_FORMAT) as tf:
-              for rel in sys.argv[3:]:
-                  data = (review / rel).read_bytes()
-                  info = tarfile.TarInfo(rel); info.size = len(data); info.mtime = 0; info.mode = 0o644
-                  info.uid = info.gid = 0; info.uname = info.gname = ""
-                  tf.addfile(info, io.BytesIO(data))
-          PY
+          # Same shared builder as package_release (v3.7.21) — one bundle path for every backend.
+          python3 scripts/build_review_bundle.py "$R" "$BUNDLE" "$B" "$B.sha256" "$B.sigstore" sigstore_identity.json RELEASE_MANIFEST.json README_REVIEW.md
       - name: Create the GitHub Release
         env: {GH_TOKEN: "${{ github.token }}"}
         run: |

@@ -43,6 +43,7 @@
         "scripts/lang_gate.sh",
         "scripts/lint_on_write.py",
         "scripts/memory_log.py",
+        "scripts/new_validator.py",
         "scripts/release_gate.sh",
         "scripts/remote_detect.py",
         "scripts/run_python_gate.sh",

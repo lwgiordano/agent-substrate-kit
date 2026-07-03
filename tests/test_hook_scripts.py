@@ -1171,6 +1171,70 @@ def test_session_handoff_history_tail_read_oversized(tmp_path) -> None:
     assert "The newest change wins." in ctx
 
 
+def test_new_validator_scaffold_generates_working_pair(tmp_path) -> None:
+    """v3.8.1: the scaffold writes a compiling validator + a passing test
+    stub, prints a complete pre-commit block, and never edits the
+    drift-tracked pre-commit config."""
+    if not (SCRIPTS / "new_validator.py").exists():
+        return
+    p = _run("new_validator.py", ["dq_thresholds", "--files-regex", r"^data/.*\.yaml$",
+                                  "--desc", "DQ thresholds are sane"], "", cwd=tmp_path)
+    assert p.returncode == 0, p.stdout + p.stderr
+    validator = tmp_path / "scripts" / "check_dq_thresholds.py"
+    test = tmp_path / "tests" / "test_validator_dq_thresholds.py"
+    assert validator.is_file() and test.is_file()
+    # compiles and runs clean under isolated mode
+    c = subprocess.run([sys.executable, "-I", str(validator)], cwd=str(tmp_path),
+                       capture_output=True, text=True, timeout=30)
+    assert c.returncode == 0, c.stdout + c.stderr
+    # printed block is a complete pre-commit entry, and nothing auto-edited
+    for needle in ("id: check-dq-thresholds", "name: DQ thresholds are sane",
+                   "entry: .substrate/venv/bin/python -I scripts/check_dq_thresholds.py",
+                   "language: system", r"files: '^data/.*\.yaml$'"):
+        assert needle in p.stdout, f"missing {needle!r} in printed block"
+    assert not (tmp_path / ".pre-commit-config.yaml").exists()
+    # repo-wide variant prints always_run instead of files:
+    q = _run("new_validator.py", ["repo_wide_gate"], "", cwd=tmp_path)
+    assert q.returncode == 0 and "always_run: true" in q.stdout
+
+
+def test_new_validator_scaffold_refusals(tmp_path) -> None:
+    if not (SCRIPTS / "new_validator.py").exists():
+        return
+    for bad in ("Bad-Name", "1starts_with_digit", "UPPER", "x"):
+        p = _run("new_validator.py", [bad], "", cwd=tmp_path)
+        assert p.returncode == 2, f"{bad!r} accepted (rc {p.returncode})"
+    assert _run("new_validator.py", ["dupe_check"], "", cwd=tmp_path).returncode == 0
+    p = _run("new_validator.py", ["dupe_check"], "", cwd=tmp_path)
+    assert p.returncode == 2 and "refusing to overwrite" in p.stderr
+
+
+def test_new_validator_pair_survives_meta_validator(tmp_path) -> None:
+    """The generated pair must not trip check_validator_input_coverage —
+    the skeleton defers YAML parsing, the test stub pre-stages the
+    non-string fixtures for when it lands."""
+    if not (SCRIPTS / "new_validator.py").exists():
+        return
+    if not (SCRIPTS / "check_validator_input_coverage.py").exists():
+        return
+    assert _run("new_validator.py", ["dq_thresholds"], "", cwd=tmp_path).returncode == 0
+    for dep in ("check_validator_input_coverage.py", "_doc_common.py", "_substrate_root.py"):
+        (tmp_path / "scripts" / dep).write_text((SCRIPTS / dep).read_text(), encoding="utf-8")
+    p = subprocess.run(
+        [sys.executable, "-I", "scripts/check_validator_input_coverage.py", "--all"],
+        cwd=str(tmp_path), capture_output=True, text=True, timeout=60)
+    assert p.returncode == 0, p.stdout + p.stderr
+
+
+def test_manage_sh_dispatches_new_validator() -> None:
+    for rel in ("manage.sh", "templates/manage.sh.template"):
+        p = ROOT / rel
+        if not p.is_file():
+            continue
+        text = p.read_text(encoding="utf-8")
+        assert 'new-validator) run_py scripts/new_validator.py "$@" ;;' in text, rel
+
+
 def test_lint_on_write_skips_unknown_and_garbage(tmp_path) -> None:
     if not (SCRIPTS / "lint_on_write.py").exists():
         return

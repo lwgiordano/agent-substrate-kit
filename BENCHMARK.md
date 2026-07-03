@@ -4,7 +4,7 @@ A **reproducible** adversarial eval: every malicious task must BLOCK, every beni
 must be ALLOWED. This turns the substrate's block-rate from a self-description into a
 result anyone can re-run and verify.
 
-- **Version:** 3.8.0
+- **Version:** 3.8.1
 - **Generated:** 2026-07-03
 - **Mode:** full
 - **Host:** Linux x86_64, python 3.11.15; resolved sandbox backend: `none`
@@ -56,7 +56,7 @@ prompt injection is "solved."
 ## Reproduce
 
 ```bash
-# On the published v3.8.0 release artifact (its exact commit is in RELEASE_MANIFEST.json):
+# On the published v3.8.1 release artifact (its exact commit is in RELEASE_MANIFEST.json):
 ./manage.sh setup
 ./manage.sh evals --report      # or: python3 -I scripts/run_substrate_evals.py --no-trace
 ```

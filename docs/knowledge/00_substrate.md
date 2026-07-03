@@ -42,6 +42,7 @@ covers:
   - scripts/lang_gate.sh
   - scripts/lint_on_write.py
   - scripts/memory_log.py
+  - scripts/new_validator.py
   - scripts/release_gate.sh
   - scripts/remote_detect.py
   - scripts/run_python_gate.sh
@@ -263,3 +264,13 @@ warns (v3.7.9 only warned when project code also changed), and the classifier wa
 to the canonical context surfaces it missed (docs/HISTORY.md, docs/README.md,
 docs/ARCHITECTURE.md, docs/INTENT.md, docs/blind-spot-checklists/**, docs/templates/**,
 docs/postmortems/**, design-system/**).
+
+v3.8.1 adds the bugs→validators scaffold: `./manage.sh new-validator <name>
+[--files-regex REGEX] [--desc TEXT]` (`scripts/new_validator.py`) generates
+`scripts/check_<name>.py` (0/1/2 exit convention, `-I` import shim) plus
+`tests/test_validator_<name>.py` (adversarial stub pre-staging the non-string fixture
+shapes that check_validator_input_coverage layer 2 requires once YAML parsing lands),
+and PRINTS the pre-commit block — it never auto-edits `.pre-commit-config.yaml`, which
+is profile-rendered and drift-tracked. Referenced from the finding-response skill
+(lock-down step) and customization.md. Templates are embedded string constants, so
+nothing new is staged under `.substrate/`.

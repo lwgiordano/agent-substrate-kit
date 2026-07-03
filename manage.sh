@@ -268,9 +268,10 @@ case "$cmd" in
   agent-system-audit) bash scripts/agent_system_audit.sh ;;
   handoff) run_py scripts/session_handoff.py capture ;;
   memory) run_py scripts/memory_log.py "$@" ;;
+  new-validator) run_py scripts/new_validator.py "$@" ;;
   design-init) mkdir -p design-system/pages design-system/tokens; echo "design-system/ scaffolded" ;;
   *) cat <<'HELP'
-Usage: ./manage.sh setup|doctor|go-live|context-report|code-shape|verify-release|upgrade|enable|security|check|evals|audit|full-audit|release|manifest|agent-system-audit|handoff|memory|design-init
+Usage: ./manage.sh setup|doctor|go-live|context-report|code-shape|verify-release|upgrade|enable|security|check|evals|audit|full-audit|release|manifest|agent-system-audit|handoff|memory|design-init|new-validator
   evals                                       adversarial behavior evals (block-rate / FP-rate, writes a trace)
   doctor [--quick|--security|--operational]   readiness levels
   go-live [--json]                            local/remote/deep readiness map (offline, side-effect-light)

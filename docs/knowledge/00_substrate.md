@@ -1,6 +1,6 @@
 ---
 purpose: Universal Agent Substrate Kit v3 files installed in this repo.
-last_human_reviewed: 2026-07-02
+last_human_reviewed: 2026-07-03
 covers:
   - extras/calibrate_diy_ultrareview.py
   - extras/check_license_headers.py
@@ -150,7 +150,15 @@ measure the real sources): it classifies by WHEN/HOW context loads —
   SKILL.md's name+description; the body is on-demand).
 - SESSION restore (re-injected at SessionStart): `.substrate/memory/tasks/current.json`
   — the STRUCTURED source of truth `session_handoff.py restore` reads — plus
-  `docs/.todo_state.json` (capture input).
+  `docs/.todo_state.json` (capture input). v3.8.0: restore ALSO appends the last 5
+  `docs/HISTORY.md` summary lines (tail-read 64KB; sanitized like todo text plus
+  invisible-char/HTML/role-prefix stripping — HISTORY is SHA-validated but its text is
+  agent-authored) under a separate 1500-char budget (handoff body keeps 4000; 6000
+  absolute), in BOTH restore paths, so startup step 1 ("read HISTORY") is self-executing.
+  restore additionally records the session-start git baseline to
+  `.substrate/memory/session_start.json` (best-effort) — the comparison point for the
+  planned v3.8.3 completion gate. lint_on_write.py passes `--force-exclude` so the
+  edit-hook honors `[tool.ruff] extend-exclude` exactly like run_python_gate.sh.
 - DERIVED / human-only: `docs/CURRENT_SESSION.md` — a generated view, NEVER re-injected.
 - RUNTIME CONFIG (NOT prompt tokens): `.claude/settings.json`, `.codex/hooks.json`,
   `.github/hooks/*` — read by the harness, not injected into the model prompt.

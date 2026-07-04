@@ -160,6 +160,10 @@ DEFAULT_EXCLUDES: tuple[str, ...] = (
     # `bare_excludes` matches any directory holding the kit's own source.
     "agent_substrate_kit_v3",
     "docs/agent_substrate_kit_v3",  # path-form, if extracted under docs/
+    # Substrate runtime/staging state (locks, memory, dormant templates —
+    # including the staged strict extras *.py, v3.8.2). Never project source;
+    # activated copies land in scripts/, which IS covered.
+    ".substrate",
     # Tests are validation artifacts, not subsystem code that needs a
     # knowledge doc covering them. The drift detector ensures every
     # production module is documented; tests document themselves via

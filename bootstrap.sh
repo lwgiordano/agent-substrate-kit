@@ -230,6 +230,14 @@ copy "$KIT_DIR/workflows/trusted-base-audit.yml.template" .substrate/trusted-bas
 for _rt in release-ci-minisign.yml.template release-keyless.yml.template auto-upgrade.yml.template; do
   [ -f "$KIT_DIR/workflows/$_rt" ] && copy "$KIT_DIR/workflows/$_rt" ".substrate/$_rt"
 done
+# Profile-ratchet staging (v3.8.2): the RAW pre-commit template (placeholders + marker
+# blocks intact) plus the strict-only extras, so `manage.sh enable profile <p> --write`
+# (scripts/substrate_profile.py) can re-render + install strict extras IN PLACE later —
+# no kit checkout, no re-bootstrap. Same dormant-staging pattern as the workflow tiers.
+copy "$KIT_DIR/templates/pre-commit-config.yaml.template" .substrate/pre-commit-config.yaml.template
+for _xf in "$KIT_DIR"/extras/*.py; do
+  [ -f "$_xf" ] && copy "$_xf" ".substrate/extras/$(basename "$_xf")"
+done
 # Strict root-of-trust: run base-branch validators against PR content so a PR
 # cannot weaken both the policy and its own validator. This is a REMOTE-governance
 # artifact (a CI workflow + CODEOWNERS authority that only mean anything on a GitHub

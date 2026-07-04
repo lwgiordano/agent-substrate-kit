@@ -57,6 +57,7 @@
         "scripts/setup_branch_protection.sh",
         "scripts/substrate_audit.py",
         "scripts/substrate_doctor.py",
+        "scripts/substrate_profile.py",
         "scripts/substrate_upgrade.py",
         "scripts/todo_state_hook.py",
         "scripts/update_manifest.py",

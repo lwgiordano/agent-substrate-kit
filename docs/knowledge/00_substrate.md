@@ -56,6 +56,7 @@ covers:
   - scripts/setup_branch_protection.sh
   - scripts/substrate_audit.py
   - scripts/substrate_doctor.py
+  - scripts/substrate_profile.py
   - scripts/substrate_upgrade.py
   - scripts/todo_state_hook.py
   - scripts/update_manifest.py
@@ -274,3 +275,19 @@ and PRINTS the pre-commit block — it never auto-edits `.pre-commit-config.yaml
 is profile-rendered and drift-tracked. Referenced from the finding-response skill
 (lock-down step) and customization.md. Templates are embedded string constants, so
 nothing new is staged under `.substrate/`.
+
+v3.8.2 adds the IN-PLACE profile ratchet: `./manage.sh enable profile <standard|strict>
+[--plan|--write|--check] [--force]` (`scripts/substrate_profile.py`) raises the governance
+profile without a kit checkout or re-bootstrap. bootstrap now stages the RAW
+`pre-commit-config.yaml.template` + `extras/*.py` under `.substrate/` (same dormant-staging
+pattern as the workflow tiers); `--write` re-renders `.pre-commit-config.yaml` (a Python
+port of bootstrap's `render_precommit`, verified byte-identical to a direct bootstrap),
+sets SUBSTRATE_PROFILE, RAISES `required_profile` (other `required_*` locks untouched),
+installs strict extras (skip-if-exists), and re-records install.json so the next upgrade
+sees no false drift. RAISE-only (lowering exits 2 — eval `profile_ratchet_lower_refused`);
+refuses a hand-edited pre-commit config without `--force`; never half-applies (config edits
+happen only after the staged template is confirmed readable; missing template → "run
+./manage.sh upgrade first"). `substrate_upgrade.py --profile standard|strict` performs the
+same raise during an upgrade, applied AFTER `_restore()` because `.substrate/config` +
+`required_profile` are in PRESERVE_FILES (the preserved old-profile copies would otherwise
+silently undo the ratchet).

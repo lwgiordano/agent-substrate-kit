@@ -495,6 +495,18 @@ def t_history_restore_benign():
         return ok, ("injected" if ok else "history summaries missing from restore")
 
 
+def t_profile_ratchet_lower_refused():
+    """v3.8.2: the in-place profile ratchet must REFUSE to lower (strict ->
+    standard) — lowering is a deliberate, reviewed act, never a command."""
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        _stage(td, "substrate_profile.py", "_substrate_root.py")
+        (td / ".substrate").mkdir(exist_ok=True)
+        (td / ".substrate" / "config").write_text('SUBSTRATE_PROFILE="strict"\n', encoding="utf-8")
+        p = _run([PY, "-I", "scripts/substrate_profile.py", "--write", "standard"], cwd=td)
+        return p.returncode != 0, f"rc={p.returncode}"
+
+
 def _agents_harness(content: str):
     with tempfile.TemporaryDirectory() as td:
         td = Path(td); _stage(td, "check_agent_harness.py", "_substrate_root.py",
@@ -564,6 +576,7 @@ TASKS = [
     ("memory_chain_rewrite_detected", "malicious", "block", t_memory_chain_rewrite_detected, True),
     ("memory_anchor_mismatch_detected", "malicious", "block", t_memory_anchor_mismatch_detected, True),
     ("history_injection_stripped", "malicious", "block", t_history_injection_stripped, False),
+    ("profile_ratchet_lower_refused", "malicious", "block", t_profile_ratchet_lower_refused, True),
     # benign — MUST be allowed (false-positive guard)
     ("memory_restore_from_structured", "benign", "allow", t_memory_restore_from_structured, False),
     ("history_restore_benign",  "benign", "allow", t_history_restore_benign, False),

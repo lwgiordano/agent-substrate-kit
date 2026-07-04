@@ -182,6 +182,26 @@ def _restore(root: Path, backup: Path, saved: list[str]) -> None:
             shutil.copytree(b, root / d, dirs_exist_ok=True)
 
 
+def _apply_profile_ratchet(root: Path, target: str) -> None:
+    """Re-apply the profile raise AFTER _restore(): .substrate/config and
+    required_profile are in PRESERVE_FILES, so the bootstrap's fresh values
+    get overwritten by the preserved (old-profile) copies."""
+    cfg = root / ".substrate" / "config"
+    try:
+        lines = cfg.read_text(encoding="utf-8").splitlines()
+        for i, line in enumerate(lines):
+            if line.startswith("SUBSTRATE_PROFILE="):
+                lines[i] = f'SUBSTRATE_PROFILE="{target}"'
+                break
+        else:
+            lines.append(f'SUBSTRATE_PROFILE="{target}"')
+        cfg.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        (root / ".substrate" / "required_profile").write_text(target + "\n", encoding="utf-8")
+        print(f"upgrade: profile ratcheted to {target} (config + required_profile)")
+    except Exception as e:
+        print(f"upgrade: WARNING could not apply the profile ratchet: {e}", file=sys.stderr)
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="In-place substrate upgrade (fail-closed).")
     ap.add_argument("--from", dest="src", required=True, help="signed release .zip (trusted) or a kit directory (needs --allow-unverified)")
@@ -191,6 +211,8 @@ def main(argv=None) -> int:
     g.add_argument("--write", action="store_true", help="apply the upgrade")
     ap.add_argument("--force", action="store_true", help="overwrite locally-modified machinery files")
     ap.add_argument("--allow-unverified", action="store_true", help="skip signature verification (dir/unsigned source)")
+    ap.add_argument("--profile", choices=["standard", "strict"],
+                    help="RAISE the governance profile during the upgrade (raise-only)")
     a = ap.parse_args(argv)
     root = Path(a.root).resolve()
     src = Path(a.src).resolve()
@@ -201,6 +223,14 @@ def main(argv=None) -> int:
     baseline = _load_install_json(root)
     answers = (baseline or {}).get("answers") or _answers_from_config(root)
     cur_ver = (baseline or {}).get("kit_version", "unknown")
+    if a.profile:
+        _rank = {"starter": 0, "standard": 1, "strict": 2}
+        cur_prof = answers.get("profile") or "standard"
+        if _rank[a.profile] <= _rank.get(cur_prof, 1):
+            print(f"upgrade: --profile {a.profile} would not RAISE the current profile "
+                  f"({cur_prof}) — the ratchet is raise-only.", file=sys.stderr)
+            return 2
+        answers["profile"] = a.profile
 
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
@@ -250,6 +280,8 @@ def main(argv=None) -> int:
                   file=sys.stderr)
             return 2
         _restore(root, backup, saved)
+        if a.profile:
+            _apply_profile_ratchet(root, a.profile)
 
         # consistency + fresh provenance
         _run([sys.executable, "-I", str(root / "scripts" / "update_manifest.py"), "--fix"], cwd=root)

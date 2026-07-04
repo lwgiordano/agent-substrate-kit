@@ -1235,6 +1235,99 @@ def test_manage_sh_dispatches_new_validator() -> None:
         assert 'new-validator) run_py scripts/new_validator.py "$@" ;;' in text, rel
 
 
+def _ratchet_repo(tmp_path):
+    """Bootstrapped standard/lang-none repo from the cached template."""
+    repo = tmp_path / "proj"
+    repo.mkdir()
+    if not _clone_template(("--profile", "standard", "--lang", "none", "--no-doctor"), repo):
+        return None
+    return repo
+
+
+def _profile_tool(repo, *args):
+    return subprocess.run(
+        [sys.executable, "-I", str(repo / "scripts" / "substrate_profile.py"), *args],
+        cwd=str(repo), capture_output=True, text=True, timeout=60)
+
+
+def test_bootstrap_stages_profile_ratchet_templates(tmp_path) -> None:
+    """v3.8.2: bootstrap stages the raw pre-commit template + strict extras
+    under .substrate/ so the ratchet works with no kit checkout."""
+    repo = _ratchet_repo(tmp_path)
+    if repo is None:
+        return
+    assert (repo / ".substrate" / "pre-commit-config.yaml.template").is_file()
+    staged = {p.name for p in (repo / ".substrate" / "extras").glob("*.py")}
+    assert "check_license_headers.py" in staged, staged
+
+
+def test_enable_profile_write_ratchets_to_strict(tmp_path) -> None:
+    repo = _ratchet_repo(tmp_path)
+    if repo is None:
+        return
+    assert _profile_tool(repo, "--check", "standard").returncode == 0
+    p = _profile_tool(repo, "--write", "strict")
+    assert p.returncode == 0, p.stdout + p.stderr
+    assert 'SUBSTRATE_PROFILE="strict"' in (repo / ".substrate" / "config").read_text()
+    assert (repo / ".substrate" / "required_profile").read_text().strip() == "strict"
+    pc = (repo / ".pre-commit-config.yaml").read_text()
+    assert "check-finding-response" in pc and "check-postmortem-for-bug-fix" in pc
+    assert (repo / "scripts" / "check_license_headers.py").is_file(), "strict extras not installed"
+    # other locks untouched; provenance re-recorded at the new profile
+    assert (repo / ".substrate" / "required_sandbox").read_text().strip() == "0"
+    ij = json.loads((repo / ".substrate" / "install.json").read_text())
+    assert ij["answers"]["profile"] == "strict"
+    assert _profile_tool(repo, "--check", "strict").returncode == 0
+
+
+def test_enable_profile_refusals(tmp_path) -> None:
+    repo = _ratchet_repo(tmp_path)
+    if repo is None:
+        return
+    # lowering (and not-raising) always refused
+    p = _profile_tool(repo, "--write", "standard")
+    assert p.returncode == 2 and "RAISE-only" in p.stderr
+    # missing staged template -> precise remediation, and NO half-apply
+    tpl = repo / ".substrate" / "pre-commit-config.yaml.template"
+    saved = tpl.read_bytes()
+    tpl.unlink()
+    cfg_before = (repo / ".substrate" / "config").read_bytes()
+    p = _profile_tool(repo, "--write", "strict")
+    assert p.returncode == 2 and "upgrade" in p.stderr
+    assert (repo / ".substrate" / "config").read_bytes() == cfg_before, "half-applied!"
+    assert (repo / ".substrate" / "required_profile").read_text().strip() == "standard"
+    tpl.write_bytes(saved)
+    # hand-edited pre-commit config -> refused without --force, applied with it
+    pc = repo / ".pre-commit-config.yaml"
+    pc.write_text(pc.read_text() + "# local tweak\n", encoding="utf-8")
+    p = _profile_tool(repo, "--write", "strict")
+    assert p.returncode == 2 and "--force" in p.stderr
+    p = _profile_tool(repo, "--write", "strict", "--force")
+    assert p.returncode == 0, p.stdout + p.stderr
+
+
+def test_upgrade_profile_flag_is_raise_only(tmp_path) -> None:
+    """--profile on the upgrade engine refuses to not-raise, even in --plan."""
+    repo = _ratchet_repo(tmp_path)
+    if repo is None:
+        return
+    p = subprocess.run(
+        [sys.executable, "-I", str(repo / "scripts" / "substrate_upgrade.py"),
+         "--from", str(ROOT), "--allow-unverified", "--plan", "--profile", "standard"],
+        cwd=str(repo), capture_output=True, text=True, timeout=120)
+    assert p.returncode == 2 and "raise-only" in (p.stdout + p.stderr)
+
+
+def test_manage_sh_dispatches_enable_profile() -> None:
+    for rel in ("manage.sh", "templates/manage.sh.template"):
+        p = ROOT / rel
+        if not p.is_file():
+            continue
+        text = p.read_text(encoding="utf-8")
+        assert 'profile) enable_profile "$@" ;;' in text, rel
+        assert "substrate_profile.py --write" in text, rel
+
+
 def test_lint_on_write_skips_unknown_and_garbage(tmp_path) -> None:
     if not (SCRIPTS / "lint_on_write.py").exists():
         return

@@ -151,6 +151,27 @@ def _git(*args: str) -> str:
         return ""
 
 
+# skill-run free-text fields are agent-authored and durable. Nothing re-injects
+# them into model context TODAY (completion_gate reads only type/skill/ts), but
+# harden at the write like session_handoff does — future consumers (memory tail
+# in a skill, v3.8.4 block reasons) must not inherit a poisoned log.
+_INSTRUCTION_PREFIX = re.compile(
+    r"(?im)^\s*(?:ignore|disregard|forget|override|system:|developer:|"
+    r"you must|you are now|new instructions?|from now on)\b.*$"
+)
+_ROLE_PREFIX = re.compile(
+    r"(?i)\[\s*(?:system|assistant|developer|user|tool)\s*[:\]]"
+)
+
+
+def _safe_note(text: str, limit: int) -> str:
+    text = " ".join(str(text).split())
+    text = _INSTRUCTION_PREFIX.sub("[instruction-line stripped]", text)
+    if _ROLE_PREFIX.search(text):
+        return "[note stripped: role-prefix directive]"
+    return _redact(text)[:limit]
+
+
 def skill_run(name: str, result: str, note: str) -> int:
     """Record tamper-evident evidence that a skill ran. Git state (head,
     branch, dirty, changed files) is captured HERE at append time, so the
@@ -166,13 +187,13 @@ def skill_run(name: str, result: str, note: str) -> int:
         status_lines = []
     changed = [line[3:].strip() for line in status_lines if len(line) > 3][:50]
     return append("skill-run", {
-        "skill": str(name)[:80],
+        "skill": _safe_note(name, 80),
         "head": _git("rev-parse", "--short", "HEAD") or "none",
         "branch": _git("rev-parse", "--abbrev-ref", "HEAD") or "none",
         "dirty": bool(status_lines),
         "changed_files": changed,
         "result": result,
-        "note": str(note)[:200],
+        "note": _safe_note(note, 200),
     })
 
 

@@ -10,8 +10,11 @@ bootstrap stages under .substrate/:
   --write TARGET   apply the ratchet (RAISE-only; refuses to lower)
   --check TARGET   verify the repo is at/above TARGET and consistent
 
-What --write does, in order (nothing is edited until the staged template
-is confirmed readable — never half-applies):
+What --write does, in order. Nothing is edited until the staged template is
+confirmed readable and every refusal condition passes, so a REFUSAL never
+half-applies. The apply steps themselves are sequential, not transactional:
+an interrupt mid-apply can leave them inconsistent — `--check` detects that
+state and re-running `--write` repairs it.
   1. re-renders .pre-commit-config.yaml from
      .substrate/pre-commit-config.yaml.template at TARGET profile
      (drift-guarded against install.json's recorded hash; --force overrides)

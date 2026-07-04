@@ -27,3 +27,9 @@ This file is `merge=union` in `.gitattributes` so concurrent branch entries comb
 **Intent:** Release 4 of 4: make 'self-audit before done' verifiable evidence instead of prose, with the reviewer-mandated soft rollout (default off, warn-only, kill-switch).
 **Knowledge:** Gate ignores its own side effects: .substrate/, todo mirror, CURRENT_SESSION.md, __pycache__ (the audit's own .pyc write must not re-arm it); porcelain paths are position-encoded (never strip() the block output — first-line path mangling); untracked dirs collapse without -uall; event ts is second-resolution so ties go to the audit. skill-run records self-audit after the LAST project change, not merely after session start.
 
+## 2026-07-04T05:46:42Z — NO_SESSION — 737f6a0
+**Summary:** v3.8.3 audit polish: skill-run text hardened like handoff text; render byte-parity test; atomicity docs made honest (3 WARNs closed, 0 BLOCKs).
+**Files:** scripts/memory_log.py,scripts/substrate_profile.py,tests/test_hook_scripts.py
+**Intent:** Close the harness-audit WARNs on the v3.8.x cluster before review.
+**Knowledge:** Any durable agent-authored text surface needs the same sanitization as the handoff path at WRITE time, even if nothing reads it back yet — retrofitting after a consumer exists is how injection channels ship.
+

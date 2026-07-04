@@ -21,3 +21,9 @@ This file is `merge=union` in `.gitattributes` so concurrent branch entries comb
 **Intent:** Release 3 of 4: ratchet, don't max out — one command to climb starter->standard->strict when postmortems justify it, no kit checkout needed.
 **Knowledge:** Renderer is a Python port of bootstrap render_precommit, verified byte-identical. Ratchet must re-apply config/required_profile AFTER upgrade _restore (preserve-set undoes bootstrap's fresh values). .substrate/ is now excluded from doc-drift code scanning (staged extras are dormant artifacts).
 
+## 2026-07-04T05:34:21Z — NO_SESSION — 79394a4
+**Summary:** v3.8.3: memory skill-run evidence (logger captures git state itself) + opt-in warning-only Stop-hook completion gate, default OFF; strict block deferred to v3.8.4 post-dogfood.
+**Files:** scripts/completion_gate.py,scripts/memory_log.py,.claude/settings.json,templates/claude/settings.json.template,templates/codex/hooks.json.template,skills/self-audit/SKILL.md,AGENTS.md,templates/AGENTS.md,templates/OPERATOR_ENABLEMENT.md
+**Intent:** Release 4 of 4: make 'self-audit before done' verifiable evidence instead of prose, with the reviewer-mandated soft rollout (default off, warn-only, kill-switch).
+**Knowledge:** Gate ignores its own side effects: .substrate/, todo mirror, CURRENT_SESSION.md, __pycache__ (the audit's own .pyc write must not re-arm it); porcelain paths are position-encoded (never strip() the block output — first-line path mangling); untracked dirs collapse without -uall; event ts is second-resolution so ties go to the audit. skill-run records self-audit after the LAST project change, not merely after session start.
+

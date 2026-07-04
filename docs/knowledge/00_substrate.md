@@ -1,6 +1,6 @@
 ---
 purpose: Universal Agent Substrate Kit v3 files installed in this repo.
-last_human_reviewed: 2026-07-03
+last_human_reviewed: 2026-07-04
 covers:
   - extras/calibrate_diy_ultrareview.py
   - extras/check_license_headers.py
@@ -36,6 +36,7 @@ covers:
   - scripts/check_validator_input_coverage.py
   - scripts/code_shape.py
   - scripts/command_policy.py
+  - scripts/completion_gate.py
   - scripts/context_report.py
   - scripts/copilot_hook_adapter.py
   - scripts/diy_ultrareview.sh
@@ -291,3 +292,22 @@ happen only after the staged template is confirmed readable; missing template �
 same raise during an upgrade, applied AFTER `_restore()` because `.substrate/config` +
 `required_profile` are in PRESERVE_FILES (the preserved old-profile copies would otherwise
 silently undo the ratchet).
+
+v3.8.3 adds skill-run evidence + the OPT-IN completion gate. `./manage.sh memory skill-run
+<name> [--result pass|issues-found|unknown] [--note]` (`memory_log.py`) appends a
+hash-chained event whose git state (head/branch/dirty/changed_files) is captured BY THE
+LOGGER at append time — a skill cannot record a wrong SHA. The self-audit skill's
+completion contract now ends with recording that event. `scripts/completion_gate.py` is a
+Stop hook (wired in Claude settings + chained advisory in the Codex template, host-tagged)
+that is DEFAULT OFF: enable with SUBSTRATE_COMPLETION_GATE=1 (env; =0 is the kill-switch)
+or COMPLETION_GATE="1" in config. When enabled it warns (systemMessage, WARNING-ONLY —
+the strict decision-block path exists but is disabled by _BLOCK_MODE_ENABLED=False until
+v3.8.4 post-dogfood) iff PROJECT files changed (HEAD moved from session_start.json, or
+dirty tree excluding .substrate/, docs/.todo_state.json, docs/CURRENT_SESSION.md,
+__pycache__/*.pyc) AND no self-audit skill-run event is timestamped at/after the last
+project change (second-resolution; benign ties go to the audit). Fail-open everywhere:
+garbage stdin, stop_hook_active, missing baseline, and internal errors all exit 0.
+Hard-won edge cases (all eval/test-locked): `git status` porcelain paths are position-
+encoded so lines must NOT be globally stripped (first-line path mangling); untracked dirs
+collapse (`?? docs/`) so dirty detection uses `-uall`; recording the audit itself drops a
+fresh scripts/__pycache__ .pyc that must not re-arm the gate.

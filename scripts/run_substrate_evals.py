@@ -507,6 +507,55 @@ def t_profile_ratchet_lower_refused():
         return p.returncode != 0, f"rc={p.returncode}"
 
 
+def _gate_repo(td: Path) -> None:
+    """Commit-free fixture for the completion-gate evals: a dirty tree alone
+    triggers the gate, so no `git commit` (which is slow under the parallel
+    eval workers and risks the per-task cap). Stage ALL scripts up front —
+    a later staging write would legitimately re-arm the gate (staged files
+    are untracked project paths with fresh mtimes)."""
+    subprocess.run(["git", "init", "-q"], cwd=str(td), capture_output=True,
+                   text=True, timeout=20)
+    _stage(td, "completion_gate.py", "memory_log.py", "_substrate_root.py")
+    (td / "f.txt").write_text("changed\n", encoding="utf-8")
+    mem = td / ".substrate" / "memory"
+    mem.mkdir(parents=True, exist_ok=True)
+    (mem / "session_start.json").write_text(
+        json.dumps({"head": "abc1234", "branch": "main",
+                    "ts": "2026-01-01T00:00:00+00:00"}))
+
+
+def _run_gate(td: Path):
+    return subprocess.run(
+        [PY, "-I", "scripts/completion_gate.py"], cwd=str(td), input="{}",
+        capture_output=True, text=True, timeout=20,
+        env={**os.environ, "SUBSTRATE_COMPLETION_GATE": "1"})
+
+
+def t_completion_gate_unaudited():
+    """v3.8.3: enabled gate + un-audited project change -> the nudge fires."""
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        _gate_repo(td)
+        p = _run_gate(td)
+        warned = p.returncode == 0 and "systemMessage" in p.stdout
+        return warned, ("nudged" if warned else f"no nudge (rc={p.returncode})")
+
+
+def t_completion_gate_audited():
+    """BENIGN: a recorded self-audit AFTER the change keeps the gate silent
+    (no false positive on properly audited work)."""
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        _gate_repo(td)
+        time.sleep(1.1)  # event ts resolution is 1s
+        subprocess.run([PY, "-I", "scripts/memory_log.py", "skill-run", "self-audit",
+                        "--result", "pass"], cwd=str(td), capture_output=True,
+                       text=True, timeout=20)
+        p = _run_gate(td)
+        silent = p.returncode == 0 and not p.stdout.strip()
+        return silent, ("silent" if silent else f"FALSE POSITIVE: {p.stdout[:80]}")
+
+
 def _agents_harness(content: str):
     with tempfile.TemporaryDirectory() as td:
         td = Path(td); _stage(td, "check_agent_harness.py", "_substrate_root.py",
@@ -577,9 +626,11 @@ TASKS = [
     ("memory_anchor_mismatch_detected", "malicious", "block", t_memory_anchor_mismatch_detected, True),
     ("history_injection_stripped", "malicious", "block", t_history_injection_stripped, False),
     ("profile_ratchet_lower_refused", "malicious", "block", t_profile_ratchet_lower_refused, True),
+    ("completion_gate_unaudited", "malicious", "block", t_completion_gate_unaudited, True),
     # benign — MUST be allowed (false-positive guard)
     ("memory_restore_from_structured", "benign", "allow", t_memory_restore_from_structured, False),
     ("history_restore_benign",  "benign", "allow", t_history_restore_benign, False),
+    ("completion_gate_audited", "benign", "allow", t_completion_gate_audited, True),
     ("benign_ls",               "benign", "allow", lambda: (not bool(_cp and _cp.looks_dangerous_command(_d(_LS), "strict")), ""), False),
     ("benign_curl_download",    "benign", "allow", lambda: (not bool(_cp and _cp.looks_dangerous_command(_d(_CURL_DL), "strict")), ""), False),
     ("benign_grep",             "benign", "allow", lambda: (not bool(_cp and _cp.looks_dangerous_command(_d(_GREP), "strict")), ""), False),

@@ -142,6 +142,40 @@ def append(etype: str, data) -> int:
     return 0
 
 
+def _git(*args: str) -> str:
+    try:
+        p = subprocess.run(["git", *args], cwd=ROOT, capture_output=True,
+                           text=True, timeout=15)
+        return p.stdout.strip() if p.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+def skill_run(name: str, result: str, note: str) -> int:
+    """Record tamper-evident evidence that a skill ran. Git state (head,
+    branch, dirty, changed files) is captured HERE at append time, so the
+    caller cannot record a wrong SHA or hide dirty files. The completion
+    gate (v3.8.3) looks for `skill-run` events with skill == self-audit."""
+    # NOTE: parse UNSTRIPPED lines — status paths are position-encoded and a
+    # global strip() would eat the first line's leading status space.
+    try:
+        st = subprocess.run(["git", "status", "--porcelain"], cwd=ROOT,
+                            capture_output=True, text=True, timeout=15)
+        status_lines = st.stdout.splitlines() if st.returncode == 0 else []
+    except Exception:
+        status_lines = []
+    changed = [line[3:].strip() for line in status_lines if len(line) > 3][:50]
+    return append("skill-run", {
+        "skill": str(name)[:80],
+        "head": _git("rev-parse", "--short", "HEAD") or "none",
+        "branch": _git("rev-parse", "--abbrev-ref", "HEAD") or "none",
+        "dirty": bool(status_lines),
+        "changed_files": changed,
+        "result": result,
+        "note": str(note)[:200],
+    })
+
+
 def _head_hash() -> str:
     events = _read_events()
     return events[-1].get("hash", ZERO) if events else ZERO
@@ -261,6 +295,11 @@ def main(argv: list[str]) -> int:
     ap_tail = sub.add_parser("tail")
     ap_tail.add_argument("n", nargs="?", type=int, default=10)
     sub.add_parser("tasks")
+    ap_sk = sub.add_parser("skill-run")
+    ap_sk.add_argument("name")
+    ap_sk.add_argument("--note", default="")
+    ap_sk.add_argument("--result", default="unknown",
+                       choices=("pass", "issues-found", "unknown"))
     a = ap.parse_args(argv)
     if a.cmd == "append":
         if a.json:
@@ -272,6 +311,8 @@ def main(argv: list[str]) -> int:
         else:
             data = {"message": a.message}
         return append(a.type, data)
+    if a.cmd == "skill-run":
+        return skill_run(a.name, a.result, a.note)
     if a.cmd == "verify":
         return verify(check_anchor=a.anchor)
     if a.cmd == "anchor":

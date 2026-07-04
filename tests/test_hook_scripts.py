@@ -1328,6 +1328,139 @@ def test_manage_sh_dispatches_enable_profile() -> None:
         assert "substrate_profile.py --write" in text, rel
 
 
+def _gate_repo(tmp_path):
+    """Tiny git repo with a session_start baseline at HEAD."""
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "x@x"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "x"], cwd=tmp_path, check=True)
+    (tmp_path / "f.txt").write_text("a\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "init"], cwd=tmp_path, check=True)
+    head = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=tmp_path,
+                          capture_output=True, text=True).stdout.strip()
+    mem = tmp_path / ".substrate" / "memory"
+    mem.mkdir(parents=True)
+    (mem / "session_start.json").write_text(
+        json.dumps({"head": head, "branch": "master", "ts": "2026-01-01T00:00:00+00:00"}),
+        encoding="utf-8")
+    return tmp_path
+
+
+def _gate(repo, stdin="{}", **env):
+    e = {**_HERMETIC_ENV, **{k: str(v) for k, v in env.items()}}
+    return subprocess.run([sys.executable, "-I", str(SCRIPTS / "completion_gate.py")],
+                          cwd=str(repo), input=stdin, capture_output=True, text=True,
+                          timeout=30, env=e)
+
+
+def test_completion_gate_default_off_and_fail_open(tmp_path) -> None:
+    """v3.8.3: the gate is DEFAULT OFF, and every failure mode exits 0 silent."""
+    if not (SCRIPTS / "completion_gate.py").exists():
+        return
+    repo = _gate_repo(tmp_path)
+    (repo / "f.txt").write_text("changed\n", encoding="utf-8")
+    p = _gate(repo)  # disabled: dirty project tree, still silent
+    assert p.returncode == 0 and not p.stdout.strip()
+    for stdin in ("garbage{{", "", "[]"):
+        p = _gate(repo, stdin=stdin, SUBSTRATE_COMPLETION_GATE="1")
+        assert p.returncode == 0, (stdin, p.stderr)
+    p = _gate(repo, stdin='{"stop_hook_active": true}', SUBSTRATE_COMPLETION_GATE="1")
+    assert p.returncode == 0 and not p.stdout.strip(), "loop guard must be silent"
+    # env kill-switch beats a config enable
+    (repo / ".substrate" / "config").write_text('COMPLETION_GATE="1"\n', encoding="utf-8")
+    p = _gate(repo, SUBSTRATE_COMPLETION_GATE="0")
+    assert p.returncode == 0 and not p.stdout.strip()
+
+
+def test_completion_gate_warns_only_on_unaudited_project_work(tmp_path) -> None:
+    if not (SCRIPTS / "completion_gate.py").exists():
+        return
+    repo = _gate_repo(tmp_path)
+    # clean tree, HEAD unmoved -> silent even when enabled
+    p = _gate(repo, SUBSTRATE_COMPLETION_GATE="1")
+    assert p.returncode == 0 and not p.stdout.strip()
+    # only substrate bookkeeping dirty -> silent
+    (repo / ".substrate" / "memory" / "events.jsonl").write_text("", encoding="utf-8")
+    (repo / "docs").mkdir()
+    (repo / "docs" / ".todo_state.json").write_text("{}", encoding="utf-8")
+    p = _gate(repo, SUBSTRATE_COMPLETION_GATE="1")
+    assert p.returncode == 0 and not p.stdout.strip(), p.stdout
+    # project file dirty, no audit -> warning-only systemMessage (never a block)
+    (repo / "f.txt").write_text("changed\n", encoding="utf-8")
+    p = _gate(repo, SUBSTRATE_COMPLETION_GATE="1")
+    assert p.returncode == 0
+    out = json.loads(p.stdout)
+    assert "systemMessage" in out and "skill-run self-audit" in out["systemMessage"]
+    assert "decision" not in out, "v3.8.3 is warning-only; block mode is v3.8.4"
+
+
+def test_completion_gate_audit_evidence_clears_and_restains(tmp_path) -> None:
+    """A self-audit event AFTER the last project change silences the gate;
+    editing again after the audit re-arms it (audit-early-then-edit)."""
+    if not (SCRIPTS / "completion_gate.py").exists():
+        return
+    import time
+    repo = _gate_repo(tmp_path)
+    (repo / "f.txt").write_text("changed\n", encoding="utf-8")
+    time.sleep(1.1)  # event ts resolution is 1s
+    p = subprocess.run([sys.executable, "-I", str(SCRIPTS / "memory_log.py"),
+                        "skill-run", "self-audit", "--result", "pass"],
+                       cwd=str(repo), capture_output=True, text=True, timeout=30)
+    assert p.returncode == 0, p.stderr
+    p = _gate(repo, SUBSTRATE_COMPLETION_GATE="1")
+    assert p.returncode == 0 and not p.stdout.strip(), p.stdout
+    time.sleep(1.1)
+    (repo / "f.txt").write_text("changed again\n", encoding="utf-8")
+    p = _gate(repo, SUBSTRATE_COMPLETION_GATE="1")
+    assert "systemMessage" in (p.stdout or ""), "post-audit edit must re-arm the gate"
+
+
+def test_completion_gate_silent_without_baseline(tmp_path) -> None:
+    """Pre-v3.8.0 sessions have no session_start.json: a clean tree must be
+    silent (no guessing about commits)."""
+    if not (SCRIPTS / "completion_gate.py").exists():
+        return
+    repo = _gate_repo(tmp_path)
+    (repo / ".substrate" / "memory" / "session_start.json").unlink()
+    p = _gate(repo, SUBSTRATE_COMPLETION_GATE="1")
+    assert p.returncode == 0 and not p.stdout.strip()
+
+
+def test_memory_log_skill_run_event_shape(tmp_path) -> None:
+    """skill-run captures git state ITSELF (head/branch/dirty/changed_files)
+    and the event lands chain-valid."""
+    if not (SCRIPTS / "memory_log.py").exists():
+        return
+    repo = _gate_repo(tmp_path)
+    (repo / "f.txt").write_text("dirty\n", encoding="utf-8")
+    p = subprocess.run([sys.executable, "-I", str(SCRIPTS / "memory_log.py"),
+                        "skill-run", "self-audit", "--result", "issues-found",
+                        "--note", "two warns"],
+                       cwd=str(repo), capture_output=True, text=True, timeout=30)
+    assert p.returncode == 0, p.stderr
+    events = [json.loads(ln) for ln in
+              (repo / ".substrate" / "memory" / "events.jsonl").read_text().splitlines()]
+    ev = events[-1]
+    assert ev["type"] == "skill-run"
+    d = ev["data"]
+    assert d["skill"] == "self-audit" and d["result"] == "issues-found"
+    assert d["dirty"] is True and "f.txt" in d["changed_files"], d
+    assert len(d["head"]) >= 7 and d["branch"], d
+    v = subprocess.run([sys.executable, "-I", str(SCRIPTS / "memory_log.py"), "verify"],
+                       cwd=str(repo), capture_output=True, text=True, timeout=30)
+    assert v.returncode == 0, v.stdout + v.stderr
+
+
+def test_stop_hook_wired_in_settings() -> None:
+    for rel in (".claude/settings.json", "templates/claude/settings.json.template"):
+        p = ROOT / rel
+        if not p.is_file():
+            continue
+        hooks = json.loads(p.read_text(encoding="utf-8"))["hooks"]
+        stop = json.dumps(hooks.get("Stop", []))
+        assert "completion_gate.py" in stop, f"{rel}: Stop hook not wired"
+
+
 def test_lint_on_write_skips_unknown_and_garbage(tmp_path) -> None:
     if not (SCRIPTS / "lint_on_write.py").exists():
         return
@@ -4503,7 +4636,7 @@ def test_evals_pass_on_shipped_kit() -> None:
     # Backend- and count-agnostic: exact malicious counts vary (the containment eval
     # is tested with a backend, skipped without), but the block-rate is always 1.00
     # and there are zero benign false-positives.
-    assert "(rate 1.00), benign FP 0/9" in p.stdout, p.stdout
+    assert "(rate 1.00), benign FP 0/10" in p.stdout, p.stdout
 
 
 # --- v3.7.5: memory tamper/anchor evals + go-live 3-state row ---

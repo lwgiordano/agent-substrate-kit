@@ -37,6 +37,7 @@
         "scripts/check_validator_input_coverage.py",
         "scripts/code_shape.py",
         "scripts/command_policy.py",
+        "scripts/completion_gate.py",
         "scripts/context_report.py",
         "scripts/copilot_hook_adapter.py",
         "scripts/diy_ultrareview.sh",
@@ -64,7 +65,7 @@
         "scripts/verify_release.py",
         "scripts/write_install_json.py"
       ],
-      "last_human_reviewed": "2026-07-03",
+      "last_human_reviewed": "2026-07-04",
       "path": "docs/knowledge/00_substrate.md",
       "purpose": "Universal Agent Substrate Kit v3 files installed in this repo."
     }

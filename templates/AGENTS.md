@@ -32,6 +32,9 @@ hooks at context tail — never add it here.
   JSON plus sanitized HISTORY summaries, and records the git baseline to
   `.substrate/memory/session_start.json`. `docs/CURRENT_SESSION.md` is a
   derived human view only — never re-injected, never trusted as input.
+- Opt-in (SUBSTRATE_COMPLETION_GATE=1): a Stop-hook gate nudges when
+  project files changed with no self-audit recorded after the last
+  change (`./manage.sh memory skill-run self-audit`). Warning-only.
 
 ## Docs/code parity contract
 

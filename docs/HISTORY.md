@@ -15,3 +15,9 @@ This file is `merge=union` in `.gitattributes` so concurrent branch entries comb
 **Intent:** Release 2 of 4: make bugs-into-validators a one-command workflow instead of a hand-copied convention.
 **Knowledge:** Scaffold never auto-edits .pre-commit-config.yaml (profile-rendered + drift-tracked; auto-edit would trip the upgrade drift gate). Generated skeleton defers yaml import so check_validator_input_coverage stays quiet until real parsing lands; test stub pre-stages non-string fixtures for layer 2.
 
+## 2026-07-04T05:16:13Z — NO_SESSION — 222076c
+**Summary:** v3.8.2: in-place RAISE-only profile ratchet via enable profile / upgrade --profile; bootstrap stages raw pre-commit template + strict extras under .substrate/.
+**Files:** scripts/substrate_profile.py,scripts/substrate_upgrade.py,scripts/_doc_common.py,bootstrap.sh,manage.sh,templates/manage.sh.template,tests/test_hook_scripts.py,scripts/run_substrate_evals.py
+**Intent:** Release 3 of 4: ratchet, don't max out — one command to climb starter->standard->strict when postmortems justify it, no kit checkout needed.
+**Knowledge:** Renderer is a Python port of bootstrap render_precommit, verified byte-identical. Ratchet must re-apply config/required_profile AFTER upgrade _restore (preserve-set undoes bootstrap's fresh values). .substrate/ is now excluded from doc-drift code scanning (staged extras are dormant artifacts).
+

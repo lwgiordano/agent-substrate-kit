@@ -33,3 +33,9 @@ This file is `merge=union` in `.gitattributes` so concurrent branch entries comb
 **Intent:** Close the harness-audit WARNs on the v3.8.x cluster before review.
 **Knowledge:** Any durable agent-authored text surface needs the same sanitization as the handoff path at WRITE time, even if nothing reads it back yet — retrofitting after a consumer exists is how injection channels ship.
 
+## 2026-07-05T18:30:26Z — NO_SESSION — d90d04c
+**Summary:** ci: green-notify job comments on the PR when the release matrix passes, converting CI success (no webhook) into a deliverable event; wake signal only, verify before acting.
+**Files:** .github/workflows/release-matrix.yml
+**Intent:** Event-driven PR watching without hourly polling: make the terminal green state generate the one event type webhooks deliver.
+**Knowledge:** Comment is forgeable (anyone can comment) so watchers must re-verify via the checks API; permissions caged to the notify job; sticky upsert keeps one wake per push. Kit-self CI only, not a consumer template.
+

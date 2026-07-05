@@ -83,3 +83,48 @@ jobs:
           esac
           ./manage.sh setup
           ./manage.sh check
+
+  # PR-green wake signal. CI SUCCESS generates no webhook, so an agent watching
+  # this PR can only poll for the terminal state; this job converts "matrix went
+  # green" into a PR comment — an event subscriptions DO deliver. The comment is
+  # a WAKE SIGNAL, not a fact: anyone can comment on a PR, so a watcher must
+  # re-verify via the checks API before acting on it. One sticky comment per PR,
+  # updated in place (each comment wakes the watcher at full context cost — no
+  # stacking). Kit-self CI only; NOT shipped to consumer repos.
+  green-notify:
+    if: github.event_name == 'pull_request'
+    needs: [matrix, full-setup]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write   # comment upsert only — no checkout, no code access
+      checks: read           # report sibling check-run states as facts
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const marker = '<!-- pr-green-notify -->';
+            const sha = context.payload.pull_request.head.sha;
+            const checks = await github.rest.checks.listForRef({
+              ...context.repo, ref: sha, per_page: 100 });
+            const others = checks.data.check_runs
+              .filter(c => c.name !== 'green-notify')
+              .map(c => `- ${c.name}: ${c.conclusion ?? c.status}`);
+            const body = [
+              marker,
+              `✅ Release matrix green for \`${sha}\`.`,
+              '',
+              'Sibling check runs at comment time (wake signal only — verify',
+              'via the checks API before treating the PR as mergeable):',
+              ...others,
+            ].join('\n');
+            const comments = await github.rest.issues.listComments({
+              ...context.repo, issue_number: context.issue.number, per_page: 100 });
+            const mine = comments.data.find(c => c.body && c.body.startsWith(marker));
+            if (mine) {
+              await github.rest.issues.updateComment(
+                { ...context.repo, comment_id: mine.id, body });
+            } else {
+              await github.rest.issues.createComment(
+                { ...context.repo, issue_number: context.issue.number, body });
+            }

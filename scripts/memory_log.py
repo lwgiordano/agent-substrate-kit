@@ -240,10 +240,13 @@ def skill_run(name: str, result: str, note: str, verify: bool = False) -> int:
             path_b = rec[3:]
             lines.append(xy + " " + path_b.decode("utf-8", "surrogateescape"))
             paths.append((xy, path_b))
-            # rename/copy record is followed by a SECOND NUL field (the old name) —
-            # skip it; the new name (this record) is what we hash.
+            # rename/copy records are followed by a SECOND NUL field = the OLD name.
+            # Fold it into the signature (don't discard) so switching a rename's source
+            # with identical content (a.txt->c.txt vs b.txt->c.txt) is still detected.
             if xy and (xy[0] in "RC" or xy[1] in "RC"):
                 i += 1
+                old = records[i] if i < len(records) else b""
+                lines[-1] += " <- " + old.decode("utf-8", "surrogateescape")
             i += 1
         h = hashlib.sha256()
         h.update("\n".join(lines).encode("utf-8", "surrogateescape"))
@@ -268,6 +271,19 @@ def skill_run(name: str, result: str, note: str, verify: bool = False) -> int:
                     return lines, None   # git reports it changed but it's absent
             except Exception:
                 return lines, None       # unreadable -> fail closed
+        # Index identity (v3.8.8): a staged-blob swap that leaves working-tree bytes and
+        # the porcelain letters unchanged is otherwise invisible. `ls-files -s -z` lists
+        # the staged mode/OID/stage/path of every tracked entry, so any staged content
+        # change flips an OID. Read failure -> fail closed.
+        try:
+            idx = subprocess.run(["git", "ls-files", "-s", "-z"], cwd=ROOT,
+                                capture_output=True, timeout=15)
+        except Exception:
+            return lines, None
+        if idx.returncode != 0:
+            return lines, None
+        h.update(b"\0index\0")
+        h.update(idx.stdout)
         return lines, h.hexdigest()
 
     status_lines, sig_before = _worktree_state()

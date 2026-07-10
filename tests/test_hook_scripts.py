@@ -1630,6 +1630,36 @@ def test_upgrade_render_floors_remote_governance_to_lock(tmp_path) -> None:
     assert wf.is_file(), "required remote governance did not restore the trusted-base workflow!"
 
 
+def test_upgrade_render_lang_from_config_not_forged_provenance(tmp_path) -> None:
+    """v3.8.8 (P1): lang is config-backed, so the render must take it from LIVE CONFIG,
+    not install.json — the v3.8.7 fix only overrode profile+remote_governance. A forged
+    answers.lang=none on a python install must NOT drop the python (ruff) hooks."""
+    if not (SCRIPTS / "substrate_upgrade.py").exists():
+        return
+    repo = tmp_path / "py"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    r = subprocess.run(["bash", str(ROOT / "bootstrap.sh"), "--target", str(repo),
+                        "--profile", "standard", "--lang", "python", "--no-doctor"],
+                       capture_output=True, text=True, timeout=180)
+    if r.returncode != 0:
+        return
+    assert "ruff" in (repo / ".pre-commit-config.yaml").read_text()
+    ij = repo / ".substrate" / "install.json"
+    if ij.is_file():
+        d = json.loads(ij.read_text())
+        d.setdefault("answers", {})["lang"] = "none"   # forge provenance
+        ij.write_text(json.dumps(d))
+    p = subprocess.run(
+        [sys.executable, "-I", str(repo / "scripts" / "substrate_upgrade.py"),
+         "--from", str(ROOT), "--root", str(repo), "--allow-unverified", "--write", "--force"],
+        capture_output=True, text=True, timeout=180)
+    assert p.returncode == 0, (p.returncode, p.stdout[-400:], p.stderr[-400:])
+    assert "ruff" in (repo / ".pre-commit-config.yaml").read_text(), \
+        "forged lang=none dropped the python hooks!"
+    assert 'SUBSTRATE_LANG="python"' in (repo / ".substrate" / "config").read_text()
+
+
 def test_enable_profile_repairs_config_stale_below_lock(tmp_path) -> None:
     """v3.8.5 (P2): a config stale BELOW its required_profile lock must be
     repairable UP to the lock. The v3.8.4 max()-floor with `<=` made the lock
@@ -1725,6 +1755,44 @@ def test_memory_log_verify_detects_nonascii_untracked_change(tmp_path) -> None:
     (repo / "scripts" / "run_smoke_verification.py").write_text(
         "import pathlib\n"
         "pathlib.Path('üntracked.txt').write_text('after-changed\\n')\n"
+        "raise SystemExit(0)\n", encoding="utf-8")
+    p = subprocess.run([sys.executable, "-I", str(repo / "scripts" / "memory_log.py"),
+                        "skill-run", "self-audit", "--verify"],
+                       cwd=str(repo), capture_output=True, text=True, timeout=60)
+    assert p.returncode != 0, (p.returncode, p.stdout, p.stderr)
+    ev = repo / ".substrate" / "memory" / "events.jsonl"
+    sk = [json.loads(ln) for ln in ev.read_text().splitlines()
+          if '"skill-run"' in ln][-1]
+    assert sk["data"].get("verify_stale") is True and sk["data"]["verified"] is False
+
+
+def test_memory_log_verify_detects_index_only_change(tmp_path) -> None:
+    """v3.8.8 (P2): a staged-blob swap that leaves working-tree bytes AND the porcelain
+    letters unchanged must still be detected — via the git INDEX identity in the
+    signature (the v3.8.7 working-bytes-only signature was blind to it)."""
+    if not (SCRIPTS / "memory_log.py").exists():
+        return
+    repo = tmp_path / "r"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "x@x"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "x"], cwd=repo, check=True)
+    (repo / ".gitignore").write_text("__pycache__/\n", encoding="utf-8")
+    (repo / "f.txt").write_text("H\n", encoding="utf-8")
+    subprocess.run(["git", "add", "f.txt", ".gitignore"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "base"], cwd=repo, check=True)
+    # index=A, working=W (≠A, ≠HEAD) → porcelain "MM f.txt", working bytes = "W".
+    (repo / "f.txt").write_text("A\n", encoding="utf-8")
+    subprocess.run(["git", "add", "f.txt"], cwd=repo, check=True)
+    (repo / "f.txt").write_text("W\n", encoding="utf-8")
+    _stage(repo, "memory_log.py", "_substrate_root.py")
+    # fake check: swap the STAGED blob A->B, then restore working bytes to W, so the
+    # porcelain letters and working bytes are IDENTICAL before/after — only the index moved.
+    (repo / "scripts" / "run_smoke_verification.py").write_text(
+        "import subprocess, pathlib\n"
+        "pathlib.Path('f.txt').write_text('B\\n')\n"
+        "subprocess.run(['git', 'add', 'f.txt'], check=True)\n"
+        "pathlib.Path('f.txt').write_text('W\\n')\n"
         "raise SystemExit(0)\n", encoding="utf-8")
     p = subprocess.run([sys.executable, "-I", str(repo / "scripts" / "memory_log.py"),
                         "skill-run", "self-audit", "--verify"],

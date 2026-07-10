@@ -213,6 +213,15 @@ def _read_required_remote_governance(root: Path) -> str:
         return ""
 
 
+def _read_required_sandbox(root: Path) -> str:
+    """The frozen egress-containment lock. "1" means the repo REQUIRES the sandbox,
+    so the render must never turn it off regardless of provenance/config (v3.8.8)."""
+    try:
+        return (root / ".substrate" / "required_sandbox").read_text(encoding="utf-8").strip()
+    except Exception:
+        return ""
+
+
 def _apply_profile_ratchet(root: Path, target: str) -> None:
     """Re-apply the profile raise AFTER _restore(): .substrate/config and
     required_profile are in PRESERVE_FILES, so the bootstrap's fresh values
@@ -264,12 +273,19 @@ def main(argv=None) -> int:
     # (ui/workflow). profile + remote_governance are additionally floored to their frozen
     # required_* locks below. (The v3.8.6 patch only floored profile DOWNWARD and still
     # trusted provenance for remote_governance and an inconsistent HIGH profile.)
-    answers = dict((baseline or {}).get("answers") or {})
+    prov = dict((baseline or {}).get("answers") or {})
     _cfg_answers = _answers_from_config(root)
-    for _k, _v in _cfg_answers.items():
-        answers.setdefault(_k, _v)
-    answers["profile"] = _cfg_answers["profile"]
-    answers["remote_governance"] = _cfg_answers["remote_governance"]
+    answers = dict(prov)
+    # EVERY config-backed render tier comes from LIVE CONFIG, never agent-writable
+    # provenance (v3.8.8 — v3.8.7 only did profile+remote_governance, so a forged
+    # lang/runner/sandbox still dropped the matching hooks, e.g. lang=none removing the
+    # python ruff/pytest gates). These are exactly the keys _answers_from_config reads
+    # from .substrate/config. ui/workflow are NOT stored in config, so provenance
+    # supplies them (config default is only a fallback). required_* tiers floored below.
+    for _k in ("profile", "lang", "runner", "sandbox", "remote_governance"):
+        answers[_k] = _cfg_answers[_k]
+    for _k in ("ui", "workflow"):
+        answers.setdefault(_k, _cfg_answers[_k])
     cur_ver = (baseline or {}).get("kit_version", "unknown")
     if a.profile:
         _rank = {"starter": 0, "standard": 1, "strict": 2}
@@ -312,6 +328,8 @@ def main(argv=None) -> int:
     # forged value drops the trusted-base workflow the lock promises (v3.8.7 / P2).
     if _read_required_remote_governance(root) == "1":
         answers["remote_governance"] = "1"
+    if _read_required_sandbox(root) == "1":
+        answers["sandbox"] = "1"
 
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)

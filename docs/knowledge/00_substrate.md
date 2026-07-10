@@ -417,3 +417,16 @@ noncharacters, and preserves the regex exactly) plus REJECTION of an empty/uncom
 `_COVERAGE_SKIP_PARTS`. (5) test-quality: the new_validator regression drives the real CLI (not
 templates directly); upgrade regressions cover forged-HIGH and required-remote render state.
 Standing residual (documented): the green-notify pagination fix remains JS-only (no unit harness).
+
+v3.8.8 is Codex's FOURTH-round re-audit (of v3.8.7) — 2 substantive findings (Codex also posted an
+explicit convergence verdict: fix these two, do not extend for cosmetic). (1/P1) `substrate_upgrade.py`:
+the v3.8.7 fix overrode only profile+remote_governance from live config, but lang/runner/sandbox are
+ALSO config-backed and still came from provenance — a forged `lang=none` on a python install dropped
+the ruff/pytest hooks. Now EVERY config-backed render tier (profile, lang, runner, sandbox,
+remote_governance) is taken from live `.substrate/config`; only ui/workflow (not stored in config) come
+from provenance; and all three frozen locks are floored (required_profile, required_remote_governance,
+new required_sandbox). (2/P2) `memory_log.py` signature: it hashed working-tree bytes but not the git
+INDEX (a staged-blob swap with unchanged working bytes/status was invisible) and discarded rename
+old-names. Now it also folds the rename old-name into the signature and hashes `ls-files -s -z` (staged
+mode/OID/path), failing closed if the index can't be read. After this round Codex's verdict drove a
+shift to a SUBSTANTIVE-ONLY posture (cosmetic/test-hygiene observations are logged, not chased).

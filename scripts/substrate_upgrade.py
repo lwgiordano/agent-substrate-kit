@@ -65,16 +65,38 @@ def _load_install_json(root: Path) -> dict | None:
     return None
 
 
+def _parse_config(root: Path) -> dict:
+    """Comment-aware, quote-aware parse of .substrate/config, mirroring
+    check_substrate_config (v3.8.9): strips bootstrap's inline `# ...` comments and ONE
+    layer of surrounding quotes. The old `.strip('"')` left the comment IN the value, so
+    `SUBSTRATE_REMOTE_GOVERNANCE="1"   # ...` parsed to `1"   # ...` and was treated as
+    OFF — dropping the trusted-base workflow once live config became the render authority."""
+    vals: dict[str, str] = {}
+    try:
+        text = (root / ".substrate" / "config").read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return vals
+    for raw in text.splitlines():
+        line = raw
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        line = line.split("  #", 1)[0].rstrip()
+        if " #" in line:
+            line = line.split(" #", 1)[0].rstrip()
+        if not line.startswith("SUBSTRATE_") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        k, v = k.strip(), v.strip()
+        if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+            v = v[1:-1]
+        vals[k] = v
+    return vals
+
+
 def _answers_from_config(root: Path) -> dict:
-    """Fallback answers when install.json is absent (pre-1b repo): read .substrate/config."""
-    cfg = root / ".substrate" / "config"
-    vals = {}
-    if cfg.is_file():
-        for ln in cfg.read_text(encoding="utf-8").splitlines():
-            ln = ln.strip()
-            if ln.startswith("SUBSTRATE_") and "=" in ln:
-                k, v = ln.split("=", 1)
-                vals[k.strip()] = v.strip().strip('"')
+    """Answers derived from live .substrate/config (the render authority for every
+    config-backed tier). Uses the comment-aware parser above."""
+    vals = _parse_config(root)
     return {
         "profile": vals.get("SUBSTRATE_PROFILE", "standard"),
         "lang": vals.get("SUBSTRATE_LANG", "auto"),
@@ -186,13 +208,9 @@ _PROF_RANK = {"starter": 0, "standard": 1, "strict": 2}
 
 
 def _read_cfg_profile(root: Path) -> str:
-    try:
-        for line in (root / ".substrate" / "config").read_text(encoding="utf-8").splitlines():
-            if line.startswith("SUBSTRATE_PROFILE="):
-                return line.split("=", 1)[1].strip().strip('"')
-    except Exception:
-        pass
-    return "standard"
+    # comment-aware parse (v3.8.9) — an inline `# ...` on the profile line previously
+    # leaked into the value via `.strip('"')`.
+    return _parse_config(root).get("SUBSTRATE_PROFILE", "standard")
 
 
 def _read_required_profile(root: Path) -> str:

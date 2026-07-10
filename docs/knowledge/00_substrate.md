@@ -430,3 +430,16 @@ INDEX (a staged-blob swap with unchanged working bytes/status was invisible) and
 old-names. Now it also folds the rename old-name into the signature and hashes `ls-files -s -z` (staged
 mode/OID/path), failing closed if the index can't be read. After this round Codex's verdict drove a
 shift to a SUBSTANTIVE-ONLY posture (cosmetic/test-hygiene observations are logged, not chased).
+
+v3.8.9 is Codex's FIFTH-round re-audit (of v3.8.8) — 2 substantive findings, both edges of v3.8.8
+fixes. (1/P2) `substrate_upgrade.py` `_answers_from_config`: making live config the render authority
+exposed that its parser was naive — `.strip('"')` left bootstrap's inline `# ...` comments in the
+value, so `SUBSTRATE_REMOTE_GOVERNANCE="1"   # ...` parsed to `1"   # ...` and read as OFF (dropping
+the trusted-base workflow). Now a shared comment-aware/quote-aware `_parse_config` (mirroring
+`check_substrate_config`) backs BOTH `_answers_from_config` and `_read_cfg_profile`. (2/P2)
+`memory_log.py` signature: `skip-worktree`/`assume-unchanged` HIDE a tracked path from porcelain AND
+leave its staged OID unchanged, so a working-byte change was invisible. Now the signature also hashes
+`ls-files -v -z` (flag map) and the on-disk bytes of every flagged path, failing closed on read error.
+The memory content-signature has now been hardened across three rounds (working bytes → +index →
++skip-worktree/flags) — a good illustration that a "hash the tree" evidence primitive has many git
+escape hatches (ext-diff/textconv, C-quoting, the index, assume-unchanged) each needing explicit cover.

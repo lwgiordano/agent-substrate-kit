@@ -284,6 +284,37 @@ def skill_run(name: str, result: str, note: str, verify: bool = False) -> int:
             return lines, None
         h.update(b"\0index\0")
         h.update(idx.stdout)
+        # skip-worktree / assume-unchanged HIDE a tracked path from porcelain AND leave its
+        # staged OID unchanged, so a change to its working bytes is otherwise invisible
+        # (v3.8.9). `ls-files -v -z` tags each entry: a lowercase tag = assume-unchanged,
+        # 'S' = skip-worktree. Hash the flag map (catches a toggle) AND the on-disk bytes of
+        # every flagged path (catches a content change to one ALREADY flagged); fail closed
+        # on read failure.
+        try:
+            lv = subprocess.run(["git", "ls-files", "-v", "-z"], cwd=ROOT,
+                                capture_output=True, timeout=15)
+        except Exception:
+            return lines, None
+        if lv.returncode != 0:
+            return lines, None
+        h.update(b"\0flags\0")
+        h.update(lv.stdout)
+        for rec in lv.stdout.split(b"\0"):
+            if len(rec) < 3 or rec[1:2] != b" ":
+                continue
+            tag = rec[0:1]
+            if tag.islower() or tag == b"S":
+                pb = rec[2:]
+                fp = Path(os.fsdecode(pb))
+                fp = fp if fp.is_absolute() else (ROOT / fp)
+                try:
+                    if fp.is_file():
+                        h.update(b"\0hidden\0")
+                        h.update(pb)
+                        h.update(b"\0")
+                        h.update(fp.read_bytes())
+                except Exception:
+                    return lines, None
         return lines, h.hexdigest()
 
     status_lines, sig_before = _worktree_state()

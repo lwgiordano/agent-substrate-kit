@@ -1660,6 +1660,28 @@ def test_upgrade_render_lang_from_config_not_forged_provenance(tmp_path) -> None
     assert 'SUBSTRATE_LANG="python"' in (repo / ".substrate" / "config").read_text()
 
 
+def test_upgrade_answers_from_config_strips_inline_comments(tmp_path) -> None:
+    """v3.8.9 (P2): the live-config parser (now the render authority) must strip
+    bootstrap's inline `# ...` comments and quotes. The naive `.strip('"')` left
+    `SUBSTRATE_REMOTE_GOVERNANCE="1"   # ...` as `1"   # ...` — read as OFF, dropping
+    the trusted-base workflow on upgrade."""
+    if not (SCRIPTS / "substrate_upgrade.py").exists():
+        return
+    import importlib
+    sys.path.insert(0, str(SCRIPTS))
+    su = importlib.import_module("substrate_upgrade")
+    sub = tmp_path / ".substrate"
+    sub.mkdir()
+    (sub / "config").write_text(
+        'SUBSTRATE_PROFILE="strict"   # governance level\n'
+        'SUBSTRATE_REMOTE_GOVERNANCE="1"   # 1 = enforce remote governance\n'
+        'SUBSTRATE_SANDBOX="1" # egress containment\n', encoding="utf-8")
+    ans = su._answers_from_config(tmp_path)
+    assert ans["profile"] == "strict"
+    assert ans["remote_governance"] == "1", repr(ans["remote_governance"])
+    assert ans["sandbox"] == "1", repr(ans["sandbox"])
+
+
 def test_enable_profile_repairs_config_stale_below_lock(tmp_path) -> None:
     """v3.8.5 (P2): a config stale BELOW its required_profile lock must be
     repairable UP to the lock. The v3.8.4 max()-floor with `<=` made the lock
@@ -1793,6 +1815,38 @@ def test_memory_log_verify_detects_index_only_change(tmp_path) -> None:
         "pathlib.Path('f.txt').write_text('B\\n')\n"
         "subprocess.run(['git', 'add', 'f.txt'], check=True)\n"
         "pathlib.Path('f.txt').write_text('W\\n')\n"
+        "raise SystemExit(0)\n", encoding="utf-8")
+    p = subprocess.run([sys.executable, "-I", str(repo / "scripts" / "memory_log.py"),
+                        "skill-run", "self-audit", "--verify"],
+                       cwd=str(repo), capture_output=True, text=True, timeout=60)
+    assert p.returncode != 0, (p.returncode, p.stdout, p.stderr)
+    ev = repo / ".substrate" / "memory" / "events.jsonl"
+    sk = [json.loads(ln) for ln in ev.read_text().splitlines()
+          if '"skill-run"' in ln][-1]
+    assert sk["data"].get("verify_stale") is True and sk["data"]["verified"] is False
+
+
+def test_memory_log_verify_detects_skip_worktree_change(tmp_path) -> None:
+    """v3.8.9 (P2): a working-byte change to a tracked file hidden with skip-worktree
+    (porcelain omits it, the staged OID is unchanged) must still be detected — via the
+    `ls-files -v` flag map + hashing flagged paths' bytes."""
+    if not (SCRIPTS / "memory_log.py").exists():
+        return
+    repo = tmp_path / "r"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "x@x"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "x"], cwd=repo, check=True)
+    (repo / ".gitignore").write_text("__pycache__/\n", encoding="utf-8")
+    (repo / "f.txt").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "f.txt", ".gitignore"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "base"], cwd=repo, check=True)
+    _stage(repo, "memory_log.py", "_substrate_root.py")
+    # fake check: hide f.txt with skip-worktree, then change its working bytes.
+    (repo / "scripts" / "run_smoke_verification.py").write_text(
+        "import subprocess, pathlib\n"
+        "subprocess.run(['git', 'update-index', '--skip-worktree', 'f.txt'], check=True)\n"
+        "pathlib.Path('f.txt').write_text('changed-hidden\\n')\n"
         "raise SystemExit(0)\n", encoding="utf-8")
     p = subprocess.run([sys.executable, "-I", str(repo / "scripts" / "memory_log.py"),
                         "skill-run", "self-audit", "--verify"],

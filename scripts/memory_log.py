@@ -43,6 +43,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 from contextlib import suppress
@@ -156,6 +157,34 @@ def append(etype: str, data) -> int:
     return 0
 
 
+_GIT_ROUTING_VARS = (
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+    "GIT_COMMON_DIR", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE",
+    "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+)
+
+
+def _clean_env() -> dict:
+    """os.environ minus git REPO-ROUTING vars (v3.8.10): a snapshot command that
+    inherited GIT_INDEX_FILE / GIT_DIR / GIT_WORK_TREE could be pointed at a DIFFERENT
+    index/repo — authenticating a clean alternate while the real tree changed. Stripping
+    them forces git to discover the repo from cwd (ROOT)."""
+    e = dict(os.environ)
+    for k in _GIT_ROUTING_VARS:
+        e.pop(k, None)
+    return e
+
+
+def _git_s(*args: str) -> str:
+    """git in ROOT under the SANITIZED env; stripped stdout, "" on any failure."""
+    try:
+        p = subprocess.run(["git", *args], cwd=ROOT, capture_output=True, text=True,
+                          timeout=15, env=_clean_env())
+        return p.stdout.strip() if p.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
 def _git(*args: str) -> str:
     return _git_output(ROOT, *args)
 
@@ -199,7 +228,7 @@ def _run_deterministic_check() -> tuple[int, str]:
         return 2, "run_smoke_verification.py not found"
     try:
         p = subprocess.run([sys.executable, "-I", str(tool)], cwd=ROOT,
-                           capture_output=True, text=True, timeout=120)
+                           capture_output=True, text=True, timeout=120, env=_clean_env())
         return p.returncode, (p.stdout + p.stderr)
     except Exception as e:
         return 2, f"verification failed to run: {e}"
@@ -227,7 +256,7 @@ def skill_run(name: str, result: str, note: str, verify: bool = False) -> int:
         + git-diff signature blind to ext-diff/textconv and C-quoted untracked paths.)"""
         try:
             st = subprocess.run(["git", "status", "--porcelain", "-z", "-uall"],
-                                cwd=ROOT, capture_output=True, timeout=15)
+                                cwd=ROOT, capture_output=True, timeout=15, env=_clean_env())
             if st.returncode != 0:
                 return None, None
         except Exception:
@@ -277,7 +306,7 @@ def skill_run(name: str, result: str, note: str, verify: bool = False) -> int:
         # change flips an OID. Read failure -> fail closed.
         try:
             idx = subprocess.run(["git", "ls-files", "-s", "-z"], cwd=ROOT,
-                                capture_output=True, timeout=15)
+                                capture_output=True, timeout=15, env=_clean_env())
         except Exception:
             return lines, None
         if idx.returncode != 0:
@@ -292,7 +321,7 @@ def skill_run(name: str, result: str, note: str, verify: bool = False) -> int:
         # on read failure.
         try:
             lv = subprocess.run(["git", "ls-files", "-v", "-z"], cwd=ROOT,
-                                capture_output=True, timeout=15)
+                                capture_output=True, timeout=15, env=_clean_env())
         except Exception:
             return lines, None
         if lv.returncode != 0:
@@ -307,24 +336,46 @@ def skill_run(name: str, result: str, note: str, verify: bool = False) -> int:
                 pb = rec[2:]
                 fp = Path(os.fsdecode(pb))
                 fp = fp if fp.is_absolute() else (ROOT / fp)
+                h.update(b"\0hidden\0")
+                h.update(pb)
+                h.update(b"\0")
                 try:
-                    if fp.is_file():
-                        h.update(b"\0hidden\0")
-                        h.update(pb)
-                        h.update(b"\0")
+                    # lstat (NO deref): a mode flip (0644->0755), a file<->symlink swap, or
+                    # a symlink RETARGET to an identical-bytes file were all invisible to a
+                    # plain read_bytes() (which follows the link) (v3.8.10).
+                    stt = fp.lstat()
+                    h.update(f"{stat.S_IFMT(stt.st_mode)}:{stat.S_IMODE(stt.st_mode)}".encode())
+                    if stat.S_ISLNK(stt.st_mode):
+                        h.update(b"\0lnk\0")
+                        h.update(os.readlink(fp).encode("utf-8", "surrogateescape"))
+                    elif stat.S_ISREG(stt.st_mode):
+                        h.update(b"\0reg\0")
                         h.update(fp.read_bytes())
+                    elif stat.S_ISDIR(stt.st_mode):
+                        h.update(b"\0dir\0")   # flagged gitlink/dir — type recorded, not walked
+                    else:
+                        h.update(b"\0oth\0")
+                except FileNotFoundError:
+                    h.update(b"\0absent\0")
                 except Exception:
                     return lines, None
         return lines, h.hexdigest()
 
+    def _identity():
+        # success-aware full HEAD OID + symbolic ref, under the sanitized env; "" -> None
+        # so an unborn / unreadable HEAD fails closed, and a same-commit branch switch
+        # (refs/heads/main -> refs/heads/other) is caught by the ref (v3.8.10).
+        return (_git_s("rev-parse", "HEAD") or None,
+                _git_s("rev-parse", "--symbolic-full-name", "HEAD") or None)
+
     status_lines, sig_before = _worktree_state()
+    id_before = _identity()
     _sl = status_lines or []
-    head_before = _git("rev-parse", "--short", "HEAD") or "none"
     changed = [line[3:].strip() for line in _sl if len(line) > 3][:50]
     data = {
         "skill": _safe_note(name, 80),
-        "head": head_before,
-        "branch": _git("rev-parse", "--abbrev-ref", "HEAD") or "none",
+        "head": id_before[0] or "none",
+        "branch": _git_s("rev-parse", "--abbrev-ref", "HEAD") or "none",
         "dirty": bool(_sl),
         "changed_files": changed,
         "result": result,
@@ -334,14 +385,16 @@ def skill_run(name: str, result: str, note: str, verify: bool = False) -> int:
     verify_ok = True
     if verify:
         rc, out = _run_deterministic_check()
-        # TOCTOU guard (v3.8.6): the working tree can move DURING the up-to-120s
-        # check. Re-read git state afterward and compare a CONTENT signature (not
-        # just porcelain strings) plus HEAD. Fail closed if git state is unreadable
-        # before or after — an unknown tree can never back a verified=true claim.
+        # TOCTOU guard (v3.8.6/v3.8.10): the working tree can move DURING the up-to-120s
+        # check. Re-read state afterward and compare the CONTENT signature AND the git
+        # identity. Fail closed if the signature is unreadable either side, if the
+        # signature or identity changed, or if HEAD is unborn/unreadable (no committed
+        # anchor can back a verified=true claim).
         status_after, sig_after = _worktree_state()
-        head_after = _git("rev-parse", "--short", "HEAD") or "none"
-        moved = (sig_before is None or sig_after is None
-                 or sig_after != sig_before or head_after != head_before)
+        id_after = _identity()
+        moved = (sig_before is None or sig_after is None or sig_after != sig_before
+                 or id_before != id_after
+                 or id_before[0] is None or id_after[0] is None)
         verify_ok = (rc == 0) and not moved
         data["verified"] = verify_ok
         data["verify_rc"] = rc

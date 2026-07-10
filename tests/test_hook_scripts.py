@@ -1682,6 +1682,66 @@ def test_upgrade_answers_from_config_strips_inline_comments(tmp_path) -> None:
     assert ans["sandbox"] == "1", repr(ans["sandbox"])
 
 
+def test_upgrade_load_install_json_rejects_nonmapping(tmp_path) -> None:
+    """v3.8.10 (P2): a non-mapping install.json (agent-writable) is treated as ABSENT,
+    not crashed on later `.get()`/`dict()` with an AttributeError."""
+    if not (SCRIPTS / "substrate_upgrade.py").exists():
+        return
+    import importlib
+    sys.path.insert(0, str(SCRIPTS))
+    su = importlib.import_module("substrate_upgrade")
+    sub = tmp_path / ".substrate"
+    sub.mkdir()
+    for bad in ('"attacker-controlled"', "[1, 2, 3]", "42", "null"):
+        (sub / "install.json").write_text(bad, encoding="utf-8")
+        assert su._load_install_json(tmp_path) is None, bad
+    (sub / "install.json").write_text('{"answers": {"profile": "strict"}}', encoding="utf-8")
+    assert su._load_install_json(tmp_path) == {"answers": {"profile": "strict"}}
+
+
+def test_upgrade_authority_snapshot_detects_lock_change(tmp_path) -> None:
+    """v3.8.10 (P1): _authority_snapshot must change when config or any required_* lock
+    changes, so the mid-run TOCTOU guard aborts rather than render a stale state."""
+    if not (SCRIPTS / "substrate_upgrade.py").exists():
+        return
+    import importlib
+    sys.path.insert(0, str(SCRIPTS))
+    su = importlib.import_module("substrate_upgrade")
+    sub = tmp_path / ".substrate"
+    sub.mkdir()
+    (sub / "config").write_text('SUBSTRATE_PROFILE="standard"\n', encoding="utf-8")
+    (sub / "required_profile").write_text("standard\n", encoding="utf-8")
+    s0 = su._authority_snapshot(tmp_path)
+    assert su._authority_snapshot(tmp_path) == s0            # stable when unchanged
+    (sub / "required_profile").write_text("strict\n", encoding="utf-8")  # lock raised mid-run
+    assert su._authority_snapshot(tmp_path) != s0
+
+
+def test_upgrade_fails_when_finalizer_fails(tmp_path) -> None:
+    """v3.8.10 (P2): if a finalizer (write_install_json) fails — e.g. install.json is a
+    directory — upgrade must NOT claim success: it returns nonzero and surfaces it."""
+    if not (SCRIPTS / "substrate_upgrade.py").exists():
+        return
+    repo = tmp_path / "r"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    r = subprocess.run(["bash", str(ROOT / "bootstrap.sh"), "--target", str(repo),
+                        "--profile", "standard", "--lang", "none", "--no-doctor"],
+                       capture_output=True, text=True, timeout=180)
+    if r.returncode != 0:
+        return
+    ij = repo / ".substrate" / "install.json"
+    if ij.exists():
+        ij.unlink()
+    ij.mkdir()   # a directory — write_install_json cannot write the file
+    p = subprocess.run(
+        [sys.executable, "-I", str(repo / "scripts" / "substrate_upgrade.py"),
+         "--from", str(ROOT), "--root", str(repo), "--allow-unverified", "--write", "--force"],
+        capture_output=True, text=True, timeout=180)
+    assert p.returncode != 0, (p.returncode, p.stdout[-400:], p.stderr[-400:])
+    assert "finalizer" in (p.stdout + p.stderr).lower()
+
+
 def test_enable_profile_repairs_config_stale_below_lock(tmp_path) -> None:
     """v3.8.5 (P2): a config stale BELOW its required_profile lock must be
     repairable UP to the lock. The v3.8.4 max()-floor with `<=` made the lock
@@ -1856,6 +1916,100 @@ def test_memory_log_verify_detects_skip_worktree_change(tmp_path) -> None:
     sk = [json.loads(ln) for ln in ev.read_text().splitlines()
           if '"skill-run"' in ln][-1]
     assert sk["data"].get("verify_stale") is True and sk["data"]["verified"] is False
+
+
+def _mk_verify_repo(tmp_path):
+    """git repo with memory_log staged, ready for a skill-run --verify probe."""
+    repo = tmp_path / "r"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "x@x"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "x"], cwd=repo, check=True)
+    (repo / ".gitignore").write_text("__pycache__/\n", encoding="utf-8")
+    return repo
+
+
+def _verify_event(repo):
+    ev = repo / ".substrate" / "memory" / "events.jsonl"
+    return [json.loads(ln) for ln in ev.read_text().splitlines() if '"skill-run"' in ln][-1]
+
+
+def test_memory_log_verify_detects_skip_worktree_symlink_retarget(tmp_path) -> None:
+    """v3.8.10 (P2): a pre-flagged (skip-worktree) tracked SYMLINK retargeted to a file
+    with identical bytes must be detected — the v3.8.9 read_bytes() followed the link, so
+    identical target content hid the change. Now readlink() + lstat mode are hashed."""
+    if not (SCRIPTS / "memory_log.py").exists():
+        return
+    repo = _mk_verify_repo(tmp_path)
+    (repo / "a.txt").write_text("same\n", encoding="utf-8")
+    (repo / "b.txt").write_text("same\n", encoding="utf-8")  # identical bytes
+    os.symlink("a.txt", repo / "link")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "base"], cwd=repo, check=True)
+    subprocess.run(["git", "update-index", "--skip-worktree", "link"], cwd=repo, check=True)
+    _stage(repo, "memory_log.py", "_substrate_root.py")
+    (repo / "scripts" / "run_smoke_verification.py").write_text(
+        "import os\n"
+        "os.remove('link')\n"
+        "os.symlink('b.txt', 'link')\n"   # retarget; identical bytes
+        "raise SystemExit(0)\n", encoding="utf-8")
+    p = subprocess.run([sys.executable, "-I", str(repo / "scripts" / "memory_log.py"),
+                        "skill-run", "self-audit", "--verify"],
+                       cwd=str(repo), capture_output=True, text=True, timeout=60)
+    assert p.returncode != 0, (p.returncode, p.stdout, p.stderr)
+    assert _verify_event(repo)["data"].get("verify_stale") is True
+
+
+def test_memory_log_verify_sanitizes_git_index_file_env(tmp_path) -> None:
+    """v3.8.10 (P2): git snapshot commands must ignore an inherited GIT_INDEX_FILE, so a
+    routed clean alternate index cannot authenticate while the REAL index changes."""
+    if not (SCRIPTS / "memory_log.py").exists():
+        return
+    import shutil
+    repo = _mk_verify_repo(tmp_path)
+    (repo / "f.txt").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "base"], cwd=repo, check=True)
+    alt = repo / "alt.index"
+    shutil.copyfile(repo / ".git" / "index", alt)   # a "clean" alternate index
+    _stage(repo, "memory_log.py", "_substrate_root.py")
+    # the check (run under memory_log's sanitized env) stages a new blob into the REAL
+    # index, then restores working bytes.
+    (repo / "scripts" / "run_smoke_verification.py").write_text(
+        "import subprocess, pathlib\n"
+        "pathlib.Path('f.txt').write_text('B\\n')\n"
+        "subprocess.run(['git', 'add', 'f.txt'], check=True)\n"
+        "pathlib.Path('f.txt').write_text('base\\n')\n"
+        "raise SystemExit(0)\n", encoding="utf-8")
+    env = dict(os.environ)
+    env["GIT_INDEX_FILE"] = str(alt)   # if honored, memory_log would see a clean index
+    p = subprocess.run([sys.executable, "-I", str(repo / "scripts" / "memory_log.py"),
+                        "skill-run", "self-audit", "--verify"],
+                       cwd=str(repo), capture_output=True, text=True, timeout=60, env=env)
+    assert p.returncode != 0, (p.returncode, p.stdout, p.stderr)
+    assert _verify_event(repo)["data"].get("verify_stale") is True
+
+
+def test_memory_log_verify_detects_branch_switch_same_commit(tmp_path) -> None:
+    """v3.8.10 (P2): a branch switch at the SAME commit during --verify must be detected —
+    the v3.8.9 guard compared only the short OID and never re-read the branch/ref."""
+    if not (SCRIPTS / "memory_log.py").exists():
+        return
+    repo = _mk_verify_repo(tmp_path)
+    (repo / "f.txt").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "base"], cwd=repo, check=True)
+    subprocess.run(["git", "branch", "other"], cwd=repo, check=True)  # same commit
+    _stage(repo, "memory_log.py", "_substrate_root.py")
+    (repo / "scripts" / "run_smoke_verification.py").write_text(
+        "import subprocess\n"
+        "subprocess.run(['git', 'checkout', '-q', 'other'], check=True)\n"
+        "raise SystemExit(0)\n", encoding="utf-8")
+    p = subprocess.run([sys.executable, "-I", str(repo / "scripts" / "memory_log.py"),
+                        "skill-run", "self-audit", "--verify"],
+                       cwd=str(repo), capture_output=True, text=True, timeout=60)
+    assert p.returncode != 0, (p.returncode, p.stdout, p.stderr)
+    assert _verify_event(repo)["data"].get("verify_stale") is True
 
 
 def test_manage_sh_dispatches_enable_profile() -> None:

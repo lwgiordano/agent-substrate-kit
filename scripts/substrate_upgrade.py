@@ -59,9 +59,13 @@ def _load_install_json(root: Path) -> dict | None:
     p = root / ".substrate" / "install.json"
     if p.is_file():
         try:
-            return json.loads(p.read_text(encoding="utf-8"))
+            data = json.loads(p.read_text(encoding="utf-8"))
         except Exception:
             return None
+        # install.json is agent-writable and drift-EXCLUDED, so a hostile/garbled shape
+        # (e.g. a bare JSON string) must not crash the upgrade with an AttributeError when
+        # `.get()`/`dict()` are called on it — treat any non-mapping as absent (v3.8.10).
+        return data if isinstance(data, dict) else None
     return None
 
 
@@ -240,6 +244,21 @@ def _read_required_sandbox(root: Path) -> str:
         return ""
 
 
+def _authority_snapshot(root: Path) -> dict:
+    """Byte-snapshot of the render AUTHORITY — live config + every frozen required_*
+    lock. The render answers are derived from these BEFORE source resolution
+    (_resolve_kit can be slow / involve verification), so re-comparing this snapshot
+    just before the write catches a lock/config change mid-run that would otherwise
+    render a stale, inconsistent state (v3.8.10 / P1 TOCTOU)."""
+    snap = {}
+    for rel in ("config", "required_profile", "required_remote_governance", "required_sandbox"):
+        try:
+            snap[rel] = (root / ".substrate" / rel).read_bytes()
+        except Exception:
+            snap[rel] = None
+    return snap
+
+
 def _apply_profile_ratchet(root: Path, target: str) -> None:
     """Re-apply the profile raise AFTER _restore(): .substrate/config and
     required_profile are in PRESERVE_FILES, so the bootstrap's fresh values
@@ -291,7 +310,8 @@ def main(argv=None) -> int:
     # (ui/workflow). profile + remote_governance are additionally floored to their frozen
     # required_* locks below. (The v3.8.6 patch only floored profile DOWNWARD and still
     # trusted provenance for remote_governance and an inconsistent HIGH profile.)
-    prov = dict((baseline or {}).get("answers") or {})
+    _raw_ans = (baseline or {}).get("answers")
+    prov = dict(_raw_ans) if isinstance(_raw_ans, dict) else {}   # answers shape is agent-writable
     _cfg_answers = _answers_from_config(root)
     answers = dict(prov)
     # EVERY config-backed render tier comes from LIVE CONFIG, never agent-writable
@@ -348,6 +368,9 @@ def main(argv=None) -> int:
         answers["remote_governance"] = "1"
     if _read_required_sandbox(root) == "1":
         answers["sandbox"] = "1"
+    # Snapshot the authority NOW (answers are derived from it); re-checked before the
+    # write to catch a mid-run lock/config change during source resolution (v3.8.10).
+    _auth0 = _authority_snapshot(root)
 
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
@@ -383,6 +406,16 @@ def main(argv=None) -> int:
                   "protection.", file=sys.stderr)
             return 2
 
+        # Authority TOCTOU guard (v3.8.10 / P1): if .substrate config or any frozen
+        # required_* lock changed since we derived `answers` (e.g. during _resolve_kit),
+        # those answers are stale — abort BEFORE any mutation rather than render an
+        # inconsistent state (e.g. a raised lock with the old config).
+        if _authority_snapshot(root) != _auth0:
+            print("upgrade: .substrate authority (config / required_* locks) changed during "
+                  "source resolution — aborting to avoid rendering a stale, inconsistent state. "
+                  "Nothing was changed; re-run.", file=sys.stderr)
+            return 2
+
         backup = tmp / "preserve"
         saved = _backup(root, backup)
         alias = _profile_alias(answers)
@@ -401,7 +434,7 @@ def main(argv=None) -> int:
             _apply_profile_ratchet(root, a.profile)
 
         # consistency + fresh provenance
-        _run([sys.executable, "-I", str(root / "scripts" / "update_manifest.py"), "--fix"], cwd=root)
+        mf = _run([sys.executable, "-I", str(root / "scripts" / "update_manifest.py"), "--fix"], cwd=root)
         # Prefer the commit parsed from the VERIFIED trusted comment (a .zip extract has no
         # .git, so git rev-parse would record 'none' — v3.7.16 P2b). Fall back to git for a
         # directory source that IS a checkout.
@@ -410,7 +443,7 @@ def main(argv=None) -> int:
             gc = _run(["git", "rev-parse", "--short", "HEAD"], cwd=kit)
             if gc.returncode == 0:
                 commit = gc.stdout.strip()
-        _run([sys.executable, "-I", str(root / "scripts" / "write_install_json.py"),
+        wj = _run([sys.executable, "-I", str(root / "scripts" / "write_install_json.py"),
               "--root", str(root), "--version", new_ver, "--commit", commit,
               "--source", str(src), "--installed-at", datetime.now(timezone.utc).isoformat(),
               "--profile", answers.get("profile", "standard"), "--lang", answers.get("lang", "auto"),
@@ -418,6 +451,15 @@ def main(argv=None) -> int:
               "--workflow", answers.get("workflow", "superpowers"),
               "--sandbox", str(answers.get("sandbox", "0")),
               "--remote-governance", str(answers.get("remote_governance", "0"))], cwd=root)
+        # Do NOT claim success if a finalizer failed (v3.8.10 / P2): a failed
+        # write_install_json (e.g. install.json is a directory) leaves drift protection /
+        # fresh provenance absent, yet the kit files were already applied — surface it.
+        if mf.returncode != 0 or wj.returncode != 0:
+            print(f"upgrade: kit files applied, but a FINALIZER FAILED (manifest rc={mf.returncode}, "
+                  f"provenance rc={wj.returncode}) — drift protection / fresh provenance may be "
+                  f"incomplete. Review and re-run.\n{((wj.stderr or '') + (mf.stderr or ''))[-800:]}",
+                  file=sys.stderr)
+            return 2
         print(f"substrate upgrade: applied {new_ver}. Review `git diff`, run `./manage.sh check`, then commit.")
         return 0
 

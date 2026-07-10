@@ -443,3 +443,20 @@ leave its staged OID unchanged, so a working-byte change was invisible. Now the 
 The memory content-signature has now been hardened across three rounds (working bytes → +index →
 +skip-worktree/flags) — a good illustration that a "hash the tree" evidence primitive has many git
 escape hatches (ext-diff/textconv, C-quoting, the index, assume-unchanged) each needing explicit cover.
+
+v3.8.10 is Codex's SIXTH-round re-audit (of v3.8.9) — 6 substantive findings (operator stopping rule:
+fix everything substantive until a clean pass). THREE in `memory_log.py`: (a) the hidden-path loop
+hashed `read_bytes()` (follows symlinks) not lstat type/mode or `readlink`, so a retargeted symlink
+(identical target bytes) or a 0644->0755 flip was invisible — now hashes lstat S_IFMT/S_IMODE +
+readlink; (b) git snapshot commands inherited `GIT_INDEX_FILE`/`GIT_DIR`/`GIT_WORK_TREE`, so a routed
+alternate index could authenticate a clean state — now ALL git calls (and the check) run under a
+sanitized env (routing vars stripped); (c) identity was not fail-closed — HEAD failures collapsed to
+`"none"`, only the short OID was compared, the branch was never re-read — now a success-aware full
+HEAD OID + symbolic ref are compared before/after, failing closed on an unborn/unreadable HEAD or a
+same-commit branch switch. THREE in `substrate_upgrade.py`: (d) authority (config + required_* locks)
+was read BEFORE `_resolve_kit`, a TOCTOU — now `_authority_snapshot` is re-compared just before the
+write and aborts on any change; (e) `_load_install_json` accepted any JSON shape (a bare string
+crashed later `.get()`/`dict()` with AttributeError) — now any non-mapping is treated as absent, and
+the `answers` sub-shape is guarded; (f) finalizer return codes (`update_manifest`, `write_install_json`)
+were ignored so "applied" printed even when provenance was never written — now a finalizer failure
+returns nonzero and surfaces stderr. (v3.8.10)

@@ -92,10 +92,17 @@ jobs:
   # updated in place (each comment wakes the watcher at full context cost — no
   # stacking). Kit-self CI only; NOT shipped to consumer repos.
   green-notify:
-    if: github.event_name == 'pull_request'
+    # Same-repo PRs only: fork PRs get a READ-ONLY GITHUB_TOKEN regardless of the
+    # declared permissions, so the comment upsert would 403. Skipping forks keeps
+    # this job from showing a spurious red check on external-contributor PRs; the
+    # notifier is a convenience wake-signal, not a required gate. (v3.8.4)
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
     needs: [matrix, full-setup]
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # Belt-and-suspenders: even if a fork slips past the `if`, a failed comment
+    # must not red the run.
+    continue-on-error: true
     permissions:
       pull-requests: write   # comment upsert only — no checkout, no code access
       checks: read           # report sibling check-run states as facts
@@ -105,26 +112,34 @@ jobs:
           script: |
             const marker = '<!-- pr-green-notify -->';
             const sha = context.payload.pull_request.head.sha;
-            const checks = await github.rest.checks.listForRef({
-              ...context.repo, ref: sha, per_page: 100 });
-            const others = checks.data.check_runs
-              .filter(c => c.name !== 'green-notify')
-              .map(c => `- ${c.name}: ${c.conclusion ?? c.status}`);
-            const body = [
-              marker,
-              `✅ Release matrix green for \`${sha}\`.`,
-              '',
-              'Sibling check runs at comment time (wake signal only — verify',
-              'via the checks API before treating the PR as mergeable):',
-              ...others,
-            ].join('\n');
-            const comments = await github.rest.issues.listComments({
-              ...context.repo, issue_number: context.issue.number, per_page: 100 });
-            const mine = comments.data.find(c => c.body && c.body.startsWith(marker));
-            if (mine) {
-              await github.rest.issues.updateComment(
-                { ...context.repo, comment_id: mine.id, body });
-            } else {
-              await github.rest.issues.createComment(
-                { ...context.repo, issue_number: context.issue.number, body });
+            const body_lines = async () => {
+              const checks = await github.rest.checks.listForRef({
+                ...context.repo, ref: sha, per_page: 100 });
+              const others = checks.data.check_runs
+                .filter(c => c.name !== 'green-notify')
+                .map(c => `- ${c.name}: ${c.conclusion ?? c.status}`);
+              return [
+                marker,
+                `✅ Release matrix green for \`${sha}\`.`,
+                '',
+                'Sibling check runs at comment time (wake signal only — verify',
+                'via the checks API before treating the PR as mergeable):',
+                ...others,
+              ].join('\n');
+            };
+            try {
+              const body = await body_lines();
+              const comments = await github.rest.issues.listComments({
+                ...context.repo, issue_number: context.issue.number, per_page: 100 });
+              const mine = comments.data.find(c => c.body && c.body.startsWith(marker));
+              if (mine) {
+                await github.rest.issues.updateComment(
+                  { ...context.repo, comment_id: mine.id, body });
+              } else {
+                await github.rest.issues.createComment(
+                  { ...context.repo, issue_number: context.issue.number, body });
+              }
+            } catch (e) {
+              // Read-only token (fork) or transient API error: log, don't fail.
+              core.notice(`green-notify: could not post comment (${e.status || e.message}); skipping.`);
             }

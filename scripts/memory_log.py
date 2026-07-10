@@ -59,6 +59,19 @@ try:
     ROOT = _sr()
 except Exception:
     ROOT = Path.cwd()
+try:
+    from _substrate_root import git_output as _git_output
+except Exception:
+    def _git_output(root, *args, timeout=15):
+        try:
+            p = subprocess.run(["git", *args], cwd=root, capture_output=True, text=True, timeout=timeout)
+            return p.stdout.strip() if p.returncode == 0 else ""
+        except Exception:
+            return ""
+try:
+    import _text_safety  # confusable/leet-fold for the note danger scan
+except Exception:  # pragma: no cover - fail open to un-folded text
+    _text_safety = None
 MEM = ROOT / ".substrate" / "memory"
 EVENTS = MEM / "events.jsonl"
 ZERO = "0" * 64
@@ -143,12 +156,7 @@ def append(etype: str, data) -> int:
 
 
 def _git(*args: str) -> str:
-    try:
-        p = subprocess.run(["git", *args], cwd=ROOT, capture_output=True,
-                           text=True, timeout=15)
-        return p.stdout.strip() if p.returncode == 0 else ""
-    except Exception:
-        return ""
+    return _git_output(ROOT, *args)
 
 
 # skill-run free-text fields are agent-authored and durable. Nothing re-injects
@@ -167,16 +175,46 @@ _ROLE_PREFIX = re.compile(
 def _safe_note(text: str, limit: int) -> str:
     text = " ".join(str(text).split())
     text = _INSTRUCTION_PREFIX.sub("[instruction-line stripped]", text)
-    if _ROLE_PREFIX.search(text):
+    # Scan confusable/leet-folded variants too, so homoglyph ("[SYSTEM…" with a
+    # Cyrillic S) / leet evasion can't smuggle a directive past the ASCII regex.
+    variants = [text]
+    if _text_safety is not None:
+        try:
+            variants = _text_safety.scan_variants(text)
+        except Exception:
+            variants = [text]
+    if any(_ROLE_PREFIX.search(v) or _INSTRUCTION_PREFIX.search(v) for v in variants):
         return "[note stripped: role-prefix directive]"
     return _redact(text)[:limit]
 
 
-def skill_run(name: str, result: str, note: str) -> int:
+def _run_deterministic_check() -> tuple[int, str]:
+    """Run the in-process static validator chain and return (rc, output). This
+    is a REAL deterministic signal (not a self-report) that `--verify` records,
+    so the recorded result can't claim 'pass' while the checks are red. Uses
+    run_smoke_verification.py — fast, stdlib, no venv required."""
+    tool = ROOT / "scripts" / "run_smoke_verification.py"
+    if not tool.is_file():
+        return 2, "run_smoke_verification.py not found"
+    try:
+        p = subprocess.run([sys.executable, "-I", str(tool)], cwd=ROOT,
+                           capture_output=True, text=True, timeout=120)
+        return p.returncode, (p.stdout + p.stderr)
+    except Exception as e:
+        return 2, f"verification failed to run: {e}"
+
+
+def skill_run(name: str, result: str, note: str, verify: bool = False) -> int:
     """Record tamper-evident evidence that a skill ran. Git state (head,
     branch, dirty, changed files) is captured HERE at append time, so the
     caller cannot record a wrong SHA or hide dirty files. The completion
-    gate (v3.8.3) looks for `skill-run` events with skill == self-audit."""
+    gate (v3.8.3) looks for `skill-run` events with skill == self-audit.
+
+    With verify=True the recorded result is NOT self-asserted: the static
+    validator chain is run and its real exit status + an output hash are
+    stored (`verified`/`verify_rc`/`verify_hash`), and `result` is overridden
+    to reflect it. Block mode (deferred) will require a verified event — an
+    unverified `--result pass` is a nudge, not evidence."""
     # NOTE: parse UNSTRIPPED lines — status paths are position-encoded and a
     # global strip() would eat the first line's leading status space.
     try:
@@ -186,7 +224,7 @@ def skill_run(name: str, result: str, note: str) -> int:
     except Exception:
         status_lines = []
     changed = [line[3:].strip() for line in status_lines if len(line) > 3][:50]
-    return append("skill-run", {
+    data = {
         "skill": _safe_note(name, 80),
         "head": _git("rev-parse", "--short", "HEAD") or "none",
         "branch": _git("rev-parse", "--abbrev-ref", "HEAD") or "none",
@@ -194,7 +232,19 @@ def skill_run(name: str, result: str, note: str) -> int:
         "changed_files": changed,
         "result": result,
         "note": _safe_note(note, 200),
-    })
+        "verified": False,
+    }
+    if verify:
+        rc, out = _run_deterministic_check()
+        data["verified"] = rc == 0
+        data["verify_rc"] = rc
+        data["verify_tool"] = "run_smoke_verification"
+        data["verify_hash"] = hashlib.sha256(out.encode("utf-8", "replace")).hexdigest()[:16]
+        # A real check result overrides a self-asserted one — evidence, not a claim.
+        data["result"] = "pass" if rc == 0 else "issues-found"
+        print(f"memory-log: skill-run verified rc={rc} ({'pass' if rc == 0 else 'issues-found'})",
+              file=sys.stderr)
+    return append("skill-run", data)
 
 
 def _head_hash() -> str:
@@ -321,6 +371,9 @@ def main(argv: list[str]) -> int:
     ap_sk.add_argument("--note", default="")
     ap_sk.add_argument("--result", default="unknown",
                        choices=("pass", "issues-found", "unknown"))
+    ap_sk.add_argument("--verify", action="store_true",
+                       help="run the deterministic validator chain and record its REAL "
+                            "result (not self-asserted); required for block-mode evidence")
     a = ap.parse_args(argv)
     if a.cmd == "append":
         if a.json:
@@ -333,7 +386,7 @@ def main(argv: list[str]) -> int:
             data = {"message": a.message}
         return append(a.type, data)
     if a.cmd == "skill-run":
-        return skill_run(a.name, a.result, a.note)
+        return skill_run(a.name, a.result, a.note, verify=a.verify)
     if a.cmd == "verify":
         return verify(check_anchor=a.anchor)
     if a.cmd == "anchor":

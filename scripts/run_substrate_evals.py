@@ -507,6 +507,32 @@ def t_profile_ratchet_lower_refused():
         return p.returncode != 0, f"rc={p.returncode}"
 
 
+def t_profile_ratchet_raise_succeeds():
+    """BENIGN twin of lower-refused: a legal RAISE (standard -> strict) with the
+    staged template present must SUCCEED (rc 0) and bump the profile + lock —
+    the ratchet allows what it should, not only blocks what it shouldn't."""
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        _stage(td, "substrate_profile.py", "_substrate_root.py")
+        sub = td / ".substrate"; sub.mkdir(exist_ok=True)
+        (sub / "config").write_text('SUBSTRATE_PROFILE="standard"\nSUBSTRATE_LANG="none"\n'
+                                    'SUBSTRATE_RUNNER="auto"\n', encoding="utf-8")
+        # Stage the raw pre-commit template + strict extras the ratchet needs
+        # (as bootstrap does) — no install.json baseline, so it skips re-record.
+        tpl = SCRIPTS.parent / "templates" / "pre-commit-config.yaml.template"
+        if tpl.is_file():
+            (sub / "pre-commit-config.yaml.template").write_text(
+                tpl.read_text(encoding="utf-8"), encoding="utf-8")
+        exdir = sub / "extras"; exdir.mkdir(exist_ok=True)
+        for xf in (SCRIPTS.parent / "extras").glob("*.py"):
+            (exdir / xf.name).write_text(xf.read_text(encoding="utf-8"), encoding="utf-8")
+        p = _run([PY, "-I", "scripts/substrate_profile.py", "--write", "strict"], cwd=td)
+        raised = (p.returncode == 0
+                  and 'SUBSTRATE_PROFILE="strict"' in (sub / "config").read_text()
+                  and (sub / "required_profile").read_text().strip() == "strict")
+        return raised, ("raised" if raised else f"rc={p.returncode}: {p.stderr[:80]}")
+
+
 def _gate_repo(td: Path) -> None:
     """Commit-free fixture for the completion-gate evals: a dirty tree alone
     triggers the gate, so no `git commit` (which is slow under the parallel
@@ -547,10 +573,15 @@ def t_completion_gate_audited():
     with tempfile.TemporaryDirectory() as td:
         td = Path(td)
         _gate_repo(td)
-        time.sleep(1.1)  # event ts resolution is 1s
         subprocess.run([PY, "-I", "scripts/memory_log.py", "skill-run", "self-audit",
                         "--result", "pass"], cwd=str(td), capture_output=True,
                        text=True, timeout=20)
+        # Deterministic: place the file change strictly BEFORE the recorded audit
+        # ts via os.utime (no 1s sleep / boundary flakiness).
+        evs = (td / ".substrate" / "memory" / "events.jsonl").read_text().splitlines()
+        ev = [json.loads(ln) for ln in evs if '"skill-run"' in ln][-1]
+        ev_ts = datetime.fromisoformat(ev["ts"]).timestamp()
+        os.utime(td / "f.txt", (ev_ts - 1, ev_ts - 1))
         p = _run_gate(td)
         silent = p.returncode == 0 and not p.stdout.strip()
         return silent, ("silent" if silent else f"FALSE POSITIVE: {p.stdout[:80]}")
@@ -626,6 +657,7 @@ TASKS = [
     ("memory_anchor_mismatch_detected", "malicious", "block", t_memory_anchor_mismatch_detected, True),
     ("history_injection_stripped", "malicious", "block", t_history_injection_stripped, False),
     ("profile_ratchet_lower_refused", "malicious", "block", t_profile_ratchet_lower_refused, True),
+    ("profile_ratchet_raise_succeeds", "benign", "allow", t_profile_ratchet_raise_succeeds, True),
     ("completion_gate_unaudited", "malicious", "block", t_completion_gate_unaudited, True),
     # benign — MUST be allowed (false-positive guard)
     ("memory_restore_from_structured", "benign", "allow", t_memory_restore_from_structured, False),

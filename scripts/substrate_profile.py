@@ -158,10 +158,20 @@ def _write(root: Path, target: str, cfg: dict[str, str], force: bool) -> int:
         print(f"substrate-profile: invalid current profile {current!r} in .substrate/config",
               file=sys.stderr)
         return 2
-    if RANK[target] <= RANK[current]:
-        print(f"substrate-profile: refusing to go {current} -> {target} — the ratchet is "
-              "RAISE-only (required_profile freezes the floor; lowering is a deliberate, "
-              "reviewed act outside this command).", file=sys.stderr)
+    # The floor is max(config, required_profile lock): config can be stale BELOW
+    # the lock, and a raise must clear the true floor, not just the config value
+    # (v3.8.4 defense-in-depth alongside the upgrade-path floor fix).
+    req = root / ".substrate" / "required_profile"
+    try:
+        lock = req.read_text(encoding="utf-8").strip()
+    except Exception:
+        lock = ""
+    floor = max(RANK[current], RANK.get(lock, -1))
+    if RANK[target] <= floor:
+        floor_name = {0: "starter", 1: "standard", 2: "strict"}[floor]
+        print(f"substrate-profile: refusing {current} -> {target} — not above the floor "
+              f"({floor_name}, = max of config/required_profile). The ratchet is RAISE-only; "
+              "lowering is a deliberate, reviewed act outside this command.", file=sys.stderr)
         return 2
     tpl = root / STAGED_TEMPLATE
     if not tpl.is_file():

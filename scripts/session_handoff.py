@@ -56,10 +56,35 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 try:
+    from _substrate_root import git_output as _git_output
     from _substrate_root import substrate_root as _sr
     ROOT = _sr()
 except Exception:
     ROOT = Path.cwd()
+    def _git_output(root, *args, timeout=15):  # fallback if the shared seam is unavailable
+        try:
+            import subprocess as _sp
+            p = _sp.run(["git", *args], cwd=root, capture_output=True, text=True, timeout=timeout)
+            return p.stdout.strip() if p.returncode == 0 else ""
+        except Exception:
+            return ""
+try:
+    import _text_safety  # confusable/leet-fold + kit-token neutralize for danger scans
+except Exception:  # pragma: no cover - fail open to the un-folded raw text
+    _text_safety = None
+
+
+def _scan_variants(text: str) -> list[str]:
+    """Directive-detection views of `text`. With _text_safety: kit-token-
+    neutralized raw + confusable/leet-folded (catches homoglyph/leet/full-width
+    evasion and exempts the kit's own manage.sh vocabulary). Fails open to the
+    raw text so a helper-import failure never crashes a hook."""
+    if _text_safety is None:
+        return [text]
+    try:
+        return _text_safety.scan_variants(text)
+    except Exception:
+        return [text]
 HANDOFF = ROOT / "docs" / "CURRENT_SESSION.md"
 # Structured handoff is the SOURCE OF TRUTH; CURRENT_SESSION.md is a derived
 # human-readable view. restore() re-injects from the structured JSON when
@@ -110,13 +135,7 @@ def _redact(text: str) -> str:
 
 
 def _git(*args: str) -> str:
-    try:
-        p = subprocess.run(
-            ["git", *args], cwd=ROOT, capture_output=True, text=True, timeout=15
-        )
-        return p.stdout.strip() if p.returncode == 0 else ""
-    except Exception:
-        return ""
+    return _git_output(ROOT, *args)
 
 
 def _read_hook_input() -> dict:
@@ -147,7 +166,8 @@ def _safe_todo_text(text: str) -> str:
     text = " ".join(str(text).split())
     text = _INSTRUCTION_PREFIX.sub("[instruction-line stripped]", text)
     text = _redact(text)[:200]
-    if _TODO_INJECTION.search(text) or _TODO_SHELLISH.search(text):
+    variants = _scan_variants(text)
+    if any(p.search(v) for v in variants for p in (_TODO_INJECTION, _TODO_SHELLISH)):
         return "[todo text stripped: instruction-like or command-like directive]"
     return text
 
@@ -199,7 +219,9 @@ def _safe_history_line(text: str) -> str:
     text = " ".join(text.split())
     text = _INSTRUCTION_PREFIX.sub("[instruction-line stripped]", text)
     text = _redact(text)[:_HISTORY_LINE_CHARS]
-    if _TODO_INJECTION.search(text) or _TODO_SHELLISH.search(text) or _ROLE_PREFIX.search(text):
+    variants = _scan_variants(text)
+    if any(p.search(v) for v in variants
+           for p in (_TODO_INJECTION, _TODO_SHELLISH, _ROLE_PREFIX)):
         return "[history line stripped: instruction-like or command-like directive]"
     return text
 

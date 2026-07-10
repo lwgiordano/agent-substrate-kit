@@ -33,6 +33,14 @@ CONTEXT_GLOBS = [
     "docs/blind-spot-checklists/**/*.md", "docs/templates/**/*.md",
     # UI design system — AGENTS.md tells agents to read these on UI work.
     "design-system/**/*.md",
+    # templates/ ships VERBATIM to consumer installs, so a poisoned template
+    # reaches every downstream repo. Scan the ones that become AGENT-INSTRUCTION
+    # surfaces there (what an agent reads as rules) — NOT the human-operator docs
+    # (OPERATOR_ENABLEMENT/SECURITY/CONTRIBUTING), which legitimately document the
+    # security flags and would false-positive, exactly as their installed twins
+    # are not context-scanned either. (v3.8.4)
+    "templates/AGENTS.md", "templates/CLAUDE.md", "templates/copilot-instructions.md",
+    "templates/github/*.instructions.md", "templates/claude/**/*.md", "templates/codex/**/*.md",
 ]
 
 # --- CODE surfaces: executed by agent or CI ---
@@ -50,6 +58,13 @@ CODE_GLOBS = [
     ".claude/**/*.json", ".codex/**/*.json",
     # UI design-system config/tokens.
     "design-system/**/*.json", "design-system/**/*.yml", "design-system/**/*.yaml", "design-system/**/*.toml",
+    # templates/ EXECUTION surfaces shipped to consumers: rendered hook/config
+    # templates + the pre-commit template (their installed twins are code-scanned,
+    # so scan the source too). The human-doc .template files (pyproject/pytest/
+    # CODEOWNERS) are inert scaffolding and excluded. (v3.8.4)
+    "templates/claude/**/*.template", "templates/codex/**/*.template",
+    "templates/pre-commit-config.yaml.template", "templates/github/*.hook.json",
+    "templates/manage.sh.template",
 ] + [f"{root}/**/*.{ext}" for root in _SKILL_ROOTS for ext in _SKILL_RESOURCE_EXTS]
 
 # NOT harness-scanned: the adversarial test suite legitimately contains

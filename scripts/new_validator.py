@@ -37,6 +37,20 @@ except Exception:
 
 _NAME_RE = re.compile(r"^[a-z][a-z0-9_]+$")
 
+
+def _safe_desc(desc: str | None) -> str:
+    """Neutralize a free-text --desc so it can't break the generated file: it is
+    interpolated into a triple-quoted docstring AND a YAML `name:` field. Collapse
+    to one line and drop the characters that would escape either context
+    (triple-quotes, backslashes, control chars). (v3.8.4 — `--desc 'x \"\"\" y'`
+    previously generated uncompilable Python.)"""
+    if not desc:
+        return ""
+    d = " ".join(str(desc).split())          # single line, collapse whitespace
+    d = d.replace("\\", "").replace('"""', "").replace("'''", '')
+    d = d.replace('"', "'")                    # keep YAML/docstring quoting simple
+    return d[:120]
+
 _VALIDATOR_TEMPLATE = '''#!/usr/bin/env python3
 """check_{name}: {desc}
 
@@ -155,7 +169,7 @@ def main(argv: list[str] | None = None) -> int:
         if not _NAME_RE.match(name):
             print(f"new-validator: invalid name {args.name!r}", file=sys.stderr)
             return 2
-    desc = args.desc or f"check_{name} validator"
+    desc = _safe_desc(args.desc) or f"check_{name} validator"
 
     validator = ROOT / "scripts" / f"check_{name}.py"
     test = ROOT / "tests" / f"test_validator_{name}.py"

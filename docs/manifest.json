@@ -11,6 +11,7 @@
         "scripts/_substrate_config.sh",
         "scripts/_substrate_root.py",
         "scripts/_substrate_surfaces.py",
+        "scripts/_text_safety.py",
         "scripts/_verify_backends.py",
         "scripts/agent_system_audit.sh",
         "scripts/append_history.py",
@@ -65,7 +66,7 @@
         "scripts/verify_release.py",
         "scripts/write_install_json.py"
       ],
-      "last_human_reviewed": "2026-07-04",
+      "last_human_reviewed": "2026-07-10",
       "path": "docs/knowledge/00_substrate.md",
       "purpose": "Universal Agent Substrate Kit v3 files installed in this repo."
     }

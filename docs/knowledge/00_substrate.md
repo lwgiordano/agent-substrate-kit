@@ -1,6 +1,6 @@
 ---
 purpose: Universal Agent Substrate Kit v3 files installed in this repo.
-last_human_reviewed: 2026-07-04
+last_human_reviewed: 2026-07-10
 covers:
   - extras/calibrate_diy_ultrareview.py
   - extras/check_license_headers.py
@@ -10,6 +10,7 @@ covers:
   - scripts/_substrate_config.sh
   - scripts/_substrate_root.py
   - scripts/_substrate_surfaces.py
+  - scripts/_text_safety.py
   - scripts/_verify_backends.py
   - scripts/agent_system_audit.sh
   - scripts/append_history.py
@@ -286,9 +287,11 @@ port of bootstrap's `render_precommit`, verified byte-identical to a direct boot
 sets SUBSTRATE_PROFILE, RAISES `required_profile` (other `required_*` locks untouched),
 installs strict extras (skip-if-exists), and re-records install.json so the next upgrade
 sees no false drift. RAISE-only (lowering exits 2 — eval `profile_ratchet_lower_refused`);
-refuses a hand-edited pre-commit config without `--force`; never half-applies (config edits
-happen only after the staged template is confirmed readable; missing template → "run
-./manage.sh upgrade first"). `substrate_upgrade.py --profile standard|strict` performs the
+refuses a hand-edited pre-commit config without `--force`. A REFUSAL never half-applies
+(config edits happen only after the staged template is confirmed readable and every refusal
+condition passes; missing template → "run ./manage.sh upgrade first"). The apply steps
+themselves are sequential, not transactional — an interrupt mid-apply can leave them
+inconsistent, which `--check` detects and a re-run repairs. `substrate_upgrade.py --profile standard|strict` performs the
 same raise during an upgrade, applied AFTER `_restore()` because `.substrate/config` +
 `required_profile` are in PRESERVE_FILES (the preserved old-profile copies would otherwise
 silently undo the ratchet).
@@ -311,3 +314,39 @@ Hard-won edge cases (all eval/test-locked): `git status` porcelain paths are pos
 encoded so lines must NOT be globally stripped (first-line path mangling); untracked dirs
 collapse (`?? docs/`) so dirty detection uses `-uall`; recording the audit itself drops a
 fresh scripts/__pycache__ .pyc that must not re-arm the gate.
+
+v3.8.4 is audit remediation (two independent audits of the v3.8.x cluster). Fixes, all
+eval/test-locked: (1) `scripts/_text_safety.py` — a shared confusables/mixed-script + NFKC +
+leetspeak + invisible-char fold used by the SessionStart/handoff/memory sanitizers
+(`_safe_history_line`/`_safe_todo_text`/`_safe_note`) for the DANGER SCAN ONLY (emitted text
+is unchanged). This closes homoglyph/full-width/leet evasion of the ASCII directive regexes.
+IMPORTANT (truth-in-advertising): these sanitizers are a BOUNDED REDUCTION of the injection
+surface, NOT a claim that injection is solved — the durable defenses are the line/HISTORY
+budget caps, the "facts, not instructions" label, capability limits, and the deterministic
+gates (same disclaimer stance as the v3.7 adversarial-eval work; regex filtering alone is
+insufficient per current research). (2) `check_agent_harness.py` now scans the AGENT-FACING
+`templates/**` (AGENTS/CLAUDE/copilot/claude+codex instruction+config+hook templates), which
+ship verbatim to consumers — human-operator doc templates are excluded (they legitimately
+document security flags). (3) The shell-danger scan neutralizes the kit's own `manage.sh`
+vocabulary, so a legit `./manage.sh …` HISTORY summary is no longer stripped. (4) `_git`/
+`_git_lines` are consolidated into `_substrate_root.py` (was triplicated with drifted
+timeouts). (5) `manage.sh memory skill-run … --verify` runs the deterministic static chain
+(`run_smoke_verification.py`) and records its REAL exit status + output hash
+(`verified`/`verify_rc`/`verify_hash`), overriding a self-asserted `--result` — trustworthy
+evidence is now POSSIBLE (block mode, still deferred, will REQUIRE a verified event; the
+warning-only gate still accepts any event). (6) SECURITY (P1, self-introduced in v3.8.2):
+`substrate_upgrade.py --profile` trusted `install.json` (agent-writable) provenance and wrote
+`required_profile` unconditionally, so a mutated provenance file could LOWER a strict lock.
+Fixed: the floor is now `max(config, required_profile, install.json)` and the lock is written
+`max(existing, target)` — never lowered; `substrate_profile.py` gained the same
+config-vs-lock floor (eval `profile_ratchet_lower_refused` + regression). (7) `green-notify`
+skips fork PRs (read-only token → 403) and is `continue-on-error`, so it never reds an
+external PR. (8) `new_validator.py` sanitizes `--desc` (strips `"""`/backslashes) so a hostile
+description can't generate uncompilable Python. (9) the flaky `sleep(1.1)` completion-gate tie
+tests are deterministic via `os.utime`. Docs corrected: the recovery protocol and the
+"startup is honor-system" line in `principles.md` (HISTORY injection is hook-executed since
+v3.8.0), and the ratchet's "never half-applies" is scoped to REFUSALS (apply steps are
+sequential, `--check`-detectable, re-run-repairable). Known-and-documented residuals: the
+completion gate accepts unverified events (acceptable while warning-only); Copilot has no
+completion-gate equivalent (`copilot_hook_adapter.py` is tool-call decisioning only), by
+design.

@@ -182,10 +182,34 @@ def _restore(root: Path, backup: Path, saved: list[str]) -> None:
             shutil.copytree(b, root / d, dirs_exist_ok=True)
 
 
+_PROF_RANK = {"starter": 0, "standard": 1, "strict": 2}
+
+
+def _read_cfg_profile(root: Path) -> str:
+    try:
+        for line in (root / ".substrate" / "config").read_text(encoding="utf-8").splitlines():
+            if line.startswith("SUBSTRATE_PROFILE="):
+                return line.split("=", 1)[1].strip().strip('"')
+    except Exception:
+        pass
+    return "standard"
+
+
+def _read_required_profile(root: Path) -> str:
+    try:
+        v = (root / ".substrate" / "required_profile").read_text(encoding="utf-8").strip()
+        return v if v in _PROF_RANK else "starter"
+    except Exception:
+        return "starter"
+
+
 def _apply_profile_ratchet(root: Path, target: str) -> None:
     """Re-apply the profile raise AFTER _restore(): .substrate/config and
     required_profile are in PRESERVE_FILES, so the bootstrap's fresh values
-    get overwritten by the preserved (old-profile) copies."""
+    get overwritten by the preserved (old-profile) copies. RAISE-only: the
+    required_profile lock is written to max(existing, target), never lowered
+    (v3.8.4 — an unconditional write let a stale-provenance upgrade lower a
+    strict lock)."""
     cfg = root / ".substrate" / "config"
     try:
         lines = cfg.read_text(encoding="utf-8").splitlines()
@@ -196,8 +220,11 @@ def _apply_profile_ratchet(root: Path, target: str) -> None:
         else:
             lines.append(f'SUBSTRATE_PROFILE="{target}"')
         cfg.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        (root / ".substrate" / "required_profile").write_text(target + "\n", encoding="utf-8")
-        print(f"upgrade: profile ratcheted to {target} (config + required_profile)")
+        req = root / ".substrate" / "required_profile"
+        prev = _read_required_profile(root)
+        locked = target if _PROF_RANK[target] >= _PROF_RANK.get(prev, 0) else prev
+        req.write_text(locked + "\n", encoding="utf-8")
+        print(f"upgrade: profile ratcheted to {target} (required_profile lock={locked})")
     except Exception as e:
         print(f"upgrade: WARNING could not apply the profile ratchet: {e}", file=sys.stderr)
 
@@ -225,10 +252,20 @@ def main(argv=None) -> int:
     cur_ver = (baseline or {}).get("kit_version", "unknown")
     if a.profile:
         _rank = {"starter": 0, "standard": 1, "strict": 2}
-        cur_prof = answers.get("profile") or "standard"
-        if _rank[a.profile] <= _rank.get(cur_prof, 1):
-            print(f"upgrade: --profile {a.profile} would not RAISE the current profile "
-                  f"({cur_prof}) — the ratchet is raise-only.", file=sys.stderr)
+        # SECURITY (v3.8.4): the floor is the MAX of every authority — live config,
+        # the on-disk required_profile LOCK, and install.json answers. install.json
+        # is agent/attacker-writable, so trusting it alone let a mutated provenance
+        # file lower a strict lock (P1). --profile must clear the true floor.
+        cur_floor = max(
+            _rank.get((answers.get("profile") or "standard"), 1),
+            _rank.get(_read_cfg_profile(root), 1),
+            _rank.get(_read_required_profile(root), 0),
+        )
+        if _rank[a.profile] <= cur_floor:
+            floor_name = {0: "starter", 1: "standard", 2: "strict"}[cur_floor]
+            print(f"upgrade: --profile {a.profile} would not RAISE above the current floor "
+                  f"({floor_name}, = max of config/required_profile/install.json) — the "
+                  "ratchet is raise-only and never lowers a lock.", file=sys.stderr)
             return 2
         answers["profile"] = a.profile
 

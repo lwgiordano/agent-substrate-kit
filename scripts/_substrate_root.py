@@ -44,5 +44,31 @@ def substrate_root() -> Path:
     return here
 
 
+def git_output(root, *args: str, timeout: int = 15) -> str:
+    """Run `git <args>` in `root`, return stripped stdout ("" on any failure).
+    Shared by the session-handoff / memory-log / completion-gate hooks so the
+    (previously triplicated + timeout-drifted) helper lives in one place."""
+    try:
+        p = subprocess.run(
+            ["git", *args], cwd=root, capture_output=True, text=True, timeout=timeout
+        )
+        return p.stdout.strip() if p.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+def git_lines(root, *args: str, timeout: int = 15) -> list[str]:
+    """Like git_output but returns UNSTRIPPED stdout lines — `git status
+    --porcelain` paths are position-encoded, so a global strip() would mangle
+    the first line's leading status field."""
+    try:
+        p = subprocess.run(
+            ["git", *args], cwd=root, capture_output=True, text=True, timeout=timeout
+        )
+        return p.stdout.splitlines() if p.returncode == 0 else []
+    except Exception:
+        return []
+
+
 if __name__ == "__main__":
     print(substrate_root())

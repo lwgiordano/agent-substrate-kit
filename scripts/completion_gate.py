@@ -35,10 +35,24 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 try:
+    from _substrate_root import git_lines as _git_lines_impl
+    from _substrate_root import git_output as _git_output
     from _substrate_root import substrate_root as _sr
     ROOT = _sr()
 except Exception:
     ROOT = Path.cwd()
+    def _git_output(root, *args, timeout=10):
+        try:
+            p = subprocess.run(["git", *args], cwd=root, capture_output=True, text=True, timeout=timeout)
+            return p.stdout.strip() if p.returncode == 0 else ""
+        except Exception:
+            return ""
+    def _git_lines_impl(root, *args, timeout=10):
+        try:
+            p = subprocess.run(["git", *args], cwd=root, capture_output=True, text=True, timeout=timeout)
+            return p.stdout.splitlines() if p.returncode == 0 else []
+        except Exception:
+            return []
 
 SESSION_START = ROOT / ".substrate" / "memory" / "session_start.json"
 EVENTS = ROOT / ".substrate" / "memory" / "events.jsonl"
@@ -67,24 +81,12 @@ _REMEDIATION = (
 
 
 def _git(*args: str) -> str:
-    try:
-        p = subprocess.run(["git", *args], cwd=ROOT, capture_output=True,
-                           text=True, timeout=10)
-        return p.stdout.strip() if p.returncode == 0 else ""
-    except Exception:
-        return ""
+    return _git_output(ROOT, *args, timeout=10)
 
 
 def _git_lines(*args: str) -> list[str]:
-    """Unstripped stdout lines. `git status --porcelain` paths are position-
-    encoded (2 status chars + space); a global strip() would eat the leading
-    space of the FIRST line and mangle its path."""
-    try:
-        p = subprocess.run(["git", *args], cwd=ROOT, capture_output=True,
-                           text=True, timeout=10)
-        return p.stdout.splitlines() if p.returncode == 0 else []
-    except Exception:
-        return []
+    # UNSTRIPPED lines — `git status --porcelain` paths are position-encoded.
+    return _git_lines_impl(ROOT, *args, timeout=10)
 
 
 def _enabled() -> bool:

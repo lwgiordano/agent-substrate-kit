@@ -376,3 +376,24 @@ re-reading git state after the up-to-120s check — if HEAD/status moved, the ev
 nonzero`). (5) the `green-notify` sticky-comment lookup now PAGINATES all PR comments (was one
 page of 100), so past 100 comments it still finds its marker instead of stacking duplicate
 notifiers.
+
+v3.8.6 is remediation of Codex's re-audit of v3.8.5 — 6 findings, all real, and TWO were
+INCOMPLETE v3.8.5 fixes. (1/P1) `substrate_upgrade.py`: the v3.8.5 floor only guarded the
+`--profile` branch, so a PLAIN `upgrade --write` still rendered `_profile_alias(answers)` from
+the agent-writable `install.json` — a forged `profile=starter` on a strict install produced a
+starter `.pre-commit-config.yaml`, silently dropping the strict hooks the frozen lock promises.
+Fixed: the render profile is floored to `required_profile` on EVERY path
+(`answers["profile"] = max(answers, lock)`), and the `--profile` raise-baseline is the LIVE
+config only (not forgeable provenance), so forged-HIGH answers can't block a legit repair.
+(2/P2) `memory_log.py` TOCTOU: the v3.8.5 guard compared porcelain STRINGS, so re-editing an
+already-dirty file (its `?? `/` M ` line unchanged) went undetected. It now compares a CONTENT
+signature — porcelain + `git diff` (staged+unstaged) + untracked-file content — and FAILS
+CLOSED if git status is unreadable before/after. (3/P2) `new_validator.py`: `_safe_desc` now
+strips C0/C1 control chars (BEL/ESC survived `.split()` and PyYAML rejects them even quoted),
+and `--files-regex` runs through `_safe_regex` (drops control chars + doubles single quotes)
+before entering the single-quoted `files:` scalar. (4/P3) `substrate_doctor.py`'s import-failure
+fallback inventory now mirrors `_substrate_surfaces` exactly (was missing DESIGN.md/
+required_profile/README.md + design-system/templates + trust anchors), locked by
+`test_doctor_fallback_matches_canonical_inventory` so it can't drift again. Each behavioral fix
+has a regression test; the v3.8.5 green-notify pagination fix has no unit test (GitHub-Actions
+JS) — documented, not silently uncovered.

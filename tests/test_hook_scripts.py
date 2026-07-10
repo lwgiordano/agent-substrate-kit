@@ -1485,6 +1485,38 @@ def test_upgrade_profile_floor_not_lowered_via_stale_install_json(tmp_path) -> N
     assert req.read_text().strip() == "strict", "strict floor was lowered!"
 
 
+def test_upgrade_plain_render_floored_to_lock_despite_forged_provenance(tmp_path) -> None:
+    """v3.8.6 (P1): a PLAIN `upgrade --write` (no --profile) must RENDER at least
+    the required_profile lock. A forged install.json profile=starter must not drop
+    the strict pre-commit hooks the frozen lock promises — the v3.8.5 floor only
+    guarded the --profile branch, so the mutable provenance silently removed gates."""
+    if not (SCRIPTS / "substrate_upgrade.py").exists():
+        return
+    repo = tmp_path / "strict"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    r = subprocess.run(["bash", str(ROOT / "bootstrap.sh"), "--target", str(repo),
+                        "--profile", "strict", "--lang", "none", "--no-doctor"],
+                       capture_output=True, text=True, timeout=180)
+    if r.returncode != 0:
+        return
+    assert "check-finding-response" in (repo / ".pre-commit-config.yaml").read_text()
+    ij = repo / ".substrate" / "install.json"
+    if ij.is_file():
+        d = json.loads(ij.read_text())
+        d.setdefault("answers", {})["profile"] = "starter"   # forge provenance LOW
+        ij.write_text(json.dumps(d))
+    p = subprocess.run(
+        [sys.executable, "-I", str(repo / "scripts" / "substrate_upgrade.py"),
+         "--from", str(ROOT), "--root", str(repo), "--allow-unverified",
+         "--write", "--force"],
+        capture_output=True, text=True, timeout=180)
+    assert p.returncode == 0, (p.returncode, p.stdout[-400:], p.stderr[-400:])
+    pc = (repo / ".pre-commit-config.yaml").read_text()
+    assert "check-finding-response" in pc, "strict hooks dropped by forged provenance!"
+    assert (repo / ".substrate" / "required_profile").read_text().strip() == "strict"
+
+
 def test_new_validator_desc_cannot_break_generated_python(tmp_path) -> None:
     """v3.8.4 (P3): a hostile --desc (triple-quotes/backslashes) must not produce
     uncompilable Python — desc is sanitized before docstring interpolation."""
@@ -1516,13 +1548,21 @@ def test_new_validator_desc_cannot_break_generated_yaml(tmp_path) -> None:
         "new_validator", str(SCRIPTS / "new_validator.py"))
     nv = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(nv)
-    for hostile in ("x: y", "# hidden", 'a "b": c # e', "trailing\\", ": :"):
+    # v3.8.6: also cover C0/C1 control chars (BEL/ESC survive .split() and PyYAML
+    # rejects them even quoted) and a --files-regex bearing single quotes (which
+    # would otherwise close the single-quoted `files:` scalar / inject fields).
+    for hostile in ("x: y", "# hidden", 'a "b": c # e', "trailing\\", ": :",
+                    "bel\x07here", "esc\x1bhere", "del\x7fx"):
         desc = nv._safe_desc(hostile)
         for tmpl in (nv._PRECOMMIT_REPO_WIDE, nv._PRECOMMIT_SCOPED):
-            block = tmpl.format(dashed="x", desc=desc, name="x", files_regex=".*")
+            block = tmpl.format(dashed="x", desc=desc, name="x",
+                                files_regex=nv._safe_regex("a'b'c"))
             doc = yaml.safe_load(textwrap.dedent(block))
             assert isinstance(doc, list) and isinstance(doc[0].get("name"), str) \
                 and doc[0]["name"], f"hostile desc {hostile!r} broke YAML: {doc!r}"
+            if "files" in doc[0]:
+                assert doc[0]["files"] == "a'b'c", \
+                    f"files-regex round-trip broke: {doc[0]['files']!r}"
 
 
 def test_enable_profile_repairs_config_stale_below_lock(tmp_path) -> None:
@@ -1568,6 +1608,39 @@ def test_memory_log_verify_failure_exits_nonzero(tmp_path) -> None:
     events = [json.loads(ln) for ln in ev.read_text().splitlines()]
     sk = [e for e in events if e["type"] == "skill-run"][-1]
     assert sk["data"]["verified"] is False and sk["data"]["verify_rc"] != 0
+
+
+def test_memory_log_verify_detects_content_change_during_check(tmp_path) -> None:
+    """v3.8.6 (P2): the TOCTOU guard must detect a CONTENT change to an ALREADY-
+    dirty file during --verify — its porcelain line is unchanged, so the v3.8.5
+    string comparison missed it. A fake run_smoke_verification.py that mutates an
+    already-dirty file mid-check must yield verify_stale + a nonzero exit."""
+    if not (SCRIPTS / "memory_log.py").exists():
+        return
+    repo = tmp_path / "r"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "x@x"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "x"], cwd=repo, check=True)
+    (repo / ".gitignore").write_text("__pycache__/\n", encoding="utf-8")
+    (repo / "f.txt").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "f.txt", ".gitignore"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "base"], cwd=repo, check=True)
+    (repo / "f.txt").write_text("dirty1\n", encoding="utf-8")  # already dirty BEFORE verify
+    _stage(repo, "memory_log.py", "_substrate_root.py")
+    # fake deterministic check: exits 0 but MUTATES the already-dirty file mid-run
+    (repo / "scripts" / "run_smoke_verification.py").write_text(
+        "import pathlib\n"
+        "pathlib.Path('f.txt').write_text('dirty2-changed\\n')\n"
+        "raise SystemExit(0)\n", encoding="utf-8")
+    p = subprocess.run([sys.executable, "-I", str(repo / "scripts" / "memory_log.py"),
+                        "skill-run", "self-audit", "--verify"],
+                       cwd=str(repo), capture_output=True, text=True, timeout=60)
+    assert p.returncode != 0, (p.returncode, p.stdout, p.stderr)
+    ev = repo / ".substrate" / "memory" / "events.jsonl"
+    sk = [json.loads(ln) for ln in ev.read_text().splitlines()
+          if '"skill-run"' in ln][-1]
+    assert sk["data"].get("verify_stale") is True and sk["data"]["verified"] is False
 
 
 def test_manage_sh_dispatches_enable_profile() -> None:
@@ -3421,6 +3494,27 @@ def test_template_sources_are_scanned_and_owned() -> None:
               "templates/0000-adr-template.md", "templates/postmortem_template.md"):
         assert g in surfaces.CONTEXT_GLOBS, f"{g} not context-scanned"
     assert "templates" in surfaces.OPTIONAL_DIRS
+
+
+def test_doctor_fallback_matches_canonical_inventory() -> None:
+    """v3.8.6 (P3): substrate_doctor's import-failure fallback ownership lists MUST
+    mirror _substrate_surfaces exactly — a stale fallback silently under-protects
+    coverage (and overstates remote-governance) if the canonical import ever fails."""
+    import ast
+    import importlib
+    sys.path.insert(0, str(SCRIPTS))
+    inv = importlib.import_module("_substrate_surfaces")
+    src = (SCRIPTS / "substrate_doctor.py").read_text(encoding="utf-8")
+
+    def _fallback(name):
+        m = re.search(rf"^\s*{name}=(\[[^\]]*\])", src, re.MULTILINE)
+        assert m, f"fallback {name} not found in substrate_doctor.py"
+        return set(ast.literal_eval(m.group(1)))
+
+    assert _fallback("_SENSITIVE_DIRS") == set(inv.OWNED_DIRS)
+    assert _fallback("_SENSITIVE_FILES") == set(inv.OWNED_FILES)
+    assert _fallback("_SENSITIVE_OPTIONAL_FILES") == set(inv.OPTIONAL_FILES)
+    assert _fallback("_SENSITIVE_OPTIONAL_DIRS") == set(inv.OPTIONAL_DIRS)
 
 
 def test_doctor_go_live_runs_and_reports() -> None:

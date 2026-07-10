@@ -127,10 +127,16 @@ try:
         OWNED_FILES as _SENSITIVE_FILES, OPTIONAL_FILES as _SENSITIVE_OPTIONAL_FILES,
         OPTIONAL_DIRS as _SENSITIVE_OPTIONAL_DIRS, COVERAGE_SKIP_PARTS as _COVERAGE_SKIP_PARTS)
 except Exception:  # pragma: no cover - fall back if inventory unreadable
+    # This fallback MUST mirror _substrate_surfaces EXACTLY — test_doctor_fallback_
+    # matches_canonical_inventory fails CI if it drifts. (v3.8.6: the fallback was
+    # stale — missing DESIGN.md/.substrate/required_profile/docs/README.md and the
+    # design-system/templates optional dirs + trust-anchor optional files — so an
+    # import failure would silently DROP those coverage requirements and overstate
+    # remote-governance coverage.)
     _SENSITIVE_DIRS=['scripts','tests','.claude','.codex','.agents','docs/knowledge','docs/decisions','docs/blind-spot-checklists','docs/templates','.github/hooks','.github/instructions','.github/workflows']
-    _SENSITIVE_FILES=['AGENTS.md','CLAUDE.md','manage.sh','pytest.ini','.pre-commit-config.yaml','.gitattributes','.gitignore','.github/copilot-instructions.md','.github/dependabot.yml','.substrate/config','docs/HISTORY.md','docs/ARCHITECTURE.md','docs/INTENT.md']
-    _SENSITIVE_OPTIONAL_FILES=['.mcp.json']
-    _SENSITIVE_OPTIONAL_DIRS=['.github/skills','docs/postmortems']
+    _SENSITIVE_FILES=['AGENTS.md','CLAUDE.md','DESIGN.md','manage.sh','pytest.ini','.pre-commit-config.yaml','.gitattributes','.gitignore','.github/copilot-instructions.md','.github/dependabot.yml','.substrate/config','.substrate/required_profile','docs/HISTORY.md','docs/README.md','docs/ARCHITECTURE.md','docs/INTENT.md']
+    _SENSITIVE_OPTIONAL_FILES=['.mcp.json','.substrate/trust/minisign.pub','.substrate/trust/sigstore_identity.json','.substrate/install.json']
+    _SENSITIVE_OPTIONAL_DIRS=['.github/skills','docs/postmortems','design-system','templates']
     _COVERAGE_SKIP_PARTS={'__pycache__','venv','node_modules','.pytest_cache','.ruff_cache','.mypy_cache'}
 def _sensitive_files_on_disk():
     """Enumerate the actual privileged files that must be owned, plus the

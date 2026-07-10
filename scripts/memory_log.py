@@ -215,24 +215,52 @@ def skill_run(name: str, result: str, note: str, verify: bool = False) -> int:
     stored (`verified`/`verify_rc`/`verify_hash`), and `result` is overridden
     to reflect it. Block mode (deferred) will require a verified event — an
     unverified `--result pass` is a nudge, not evidence."""
-    def _porcelain():
-        # UNSTRIPPED lines — status paths are position-encoded and a global
-        # strip() would eat the first line's leading status space.
+    def _worktree_state():
+        """Return (porcelain_lines, content_signature). porcelain_lines are
+        UNSTRIPPED (status paths are position-encoded — a global strip() would eat
+        the first line's leading status space). porcelain_lines is None if git
+        status cannot be read (fail-closed: unknown is NOT clean). The signature
+        folds tracked-file diffs (staged + unstaged) AND untracked-file CONTENT, so
+        a re-edit of an already-dirty file — whose porcelain LINE is unchanged — is
+        still detected (v3.8.6: the v3.8.5 guard compared only porcelain strings)."""
         try:
             st = subprocess.run(["git", "status", "--porcelain"], cwd=ROOT,
                                 capture_output=True, text=True, timeout=15)
-            return st.stdout.splitlines() if st.returncode == 0 else []
+            if st.returncode != 0:
+                return None, None
+            lines = st.stdout.splitlines()
         except Exception:
-            return []
+            return None, None
+        h = hashlib.sha256()
+        h.update("\n".join(lines).encode("utf-8", "replace"))
+        h.update(b"\0diff\0")
+        h.update(_git("diff").encode("utf-8", "replace"))
+        h.update(b"\0cached\0")
+        h.update(_git("diff", "--cached").encode("utf-8", "replace"))
+        for ln in lines:
+            if ln.startswith("??") and len(ln) > 3:
+                p = ROOT / ln[3:].strip()
+                try:
+                    if p.is_dir():
+                        for f in sorted(p.rglob("*")):
+                            if f.is_file():
+                                h.update(str(f.relative_to(ROOT)).encode("utf-8", "replace"))
+                                h.update(f.read_bytes())
+                    elif p.is_file():
+                        h.update(p.read_bytes())
+                except Exception:
+                    h.update(b"\0unreadable\0")
+        return lines, h.hexdigest()
 
-    status_lines = _porcelain()
+    status_lines, sig_before = _worktree_state()
+    _sl = status_lines or []
     head_before = _git("rev-parse", "--short", "HEAD") or "none"
-    changed = [line[3:].strip() for line in status_lines if len(line) > 3][:50]
+    changed = [line[3:].strip() for line in _sl if len(line) > 3][:50]
     data = {
         "skill": _safe_note(name, 80),
         "head": head_before,
         "branch": _git("rev-parse", "--abbrev-ref", "HEAD") or "none",
-        "dirty": bool(status_lines),
+        "dirty": bool(_sl),
         "changed_files": changed,
         "result": result,
         "note": _safe_note(note, 200),
@@ -241,13 +269,14 @@ def skill_run(name: str, result: str, note: str, verify: bool = False) -> int:
     verify_ok = True
     if verify:
         rc, out = _run_deterministic_check()
-        # TOCTOU guard (v3.8.5): the working tree can move DURING the up-to-120s
-        # check. Re-read git state afterward; if HEAD or the porcelain status
-        # changed, the result cannot be trusted to describe the current tree, so
-        # do NOT claim verified — record the drift instead of a stale pass.
-        status_after = _porcelain()
+        # TOCTOU guard (v3.8.6): the working tree can move DURING the up-to-120s
+        # check. Re-read git state afterward and compare a CONTENT signature (not
+        # just porcelain strings) plus HEAD. Fail closed if git state is unreadable
+        # before or after — an unknown tree can never back a verified=true claim.
+        status_after, sig_after = _worktree_state()
         head_after = _git("rev-parse", "--short", "HEAD") or "none"
-        moved = (status_after != status_lines) or (head_after != head_before)
+        moved = (sig_before is None or sig_after is None
+                 or sig_after != sig_before or head_after != head_before)
         verify_ok = (rc == 0) and not moved
         data["verified"] = verify_ok
         data["verify_rc"] = rc
@@ -255,8 +284,8 @@ def skill_run(name: str, result: str, note: str, verify: bool = False) -> int:
         data["verify_hash"] = hashlib.sha256(out.encode("utf-8", "replace")).hexdigest()[:16]
         if moved:
             data["verify_stale"] = True
-            # file the event against the tree it ACTUALLY ended on
-            data["changed_files"] = [ln[3:].strip() for ln in status_after if len(ln) > 3][:50]
+            if status_after is not None:
+                data["changed_files"] = [ln[3:].strip() for ln in status_after if len(ln) > 3][:50]
             data["result"] = "unverified-tree-changed-during-check"
         else:
             # A real check result overrides a self-asserted one — evidence, not a claim.

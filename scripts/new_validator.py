@@ -50,7 +50,20 @@ def _safe_desc(desc: str | None) -> str:
     d = " ".join(str(desc).split())          # single line, collapse whitespace
     d = d.replace("\\", "").replace('"""', "").replace("'''", '')
     d = d.replace('"', "'")                    # keep YAML/docstring quoting simple
+    # Drop C0/C1 control chars (BEL, ESC, …): they survive .split() (not
+    # whitespace) and PyYAML rejects them even inside a quoted scalar (v3.8.6).
+    d = "".join(c for c in d if c >= " " and c != "\x7f" and not ("\x80" <= c <= "\x9f"))
     return d[:120]
+
+
+def _safe_regex(rx: str) -> str:
+    """Make a --files-regex safe to interpolate into the SINGLE-quoted YAML
+    `files:` scalar (v3.8.6): drop control chars/newlines and double any single
+    quote (YAML single-quote escaping) so a `'` in the regex cannot close the
+    scalar or inject adjacent YAML fields. YAML unescapes `''` -> `'`, so the
+    regex pre-commit actually applies is unchanged."""
+    rx = "".join(c for c in str(rx) if c >= " " and c != "\x7f" and not ("\x80" <= c <= "\x9f"))
+    return rx.replace("'", "''")
 
 _VALIDATOR_TEMPLATE = '''#!/usr/bin/env python3
 """check_{name}: {desc}
@@ -194,7 +207,7 @@ def main(argv: list[str] | None = None) -> int:
     dashed = name.replace("_", "-")
     if args.files_regex:
         block = _PRECOMMIT_SCOPED.format(dashed=dashed, desc=desc, name=name,
-                                         files_regex=args.files_regex)
+                                         files_regex=_safe_regex(args.files_regex))
     else:
         block = _PRECOMMIT_REPO_WIDE.format(dashed=dashed, desc=desc, name=name)
 

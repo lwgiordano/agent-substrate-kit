@@ -262,10 +262,10 @@ def main(argv=None) -> int:
         #   (a) refuse target < required_profile lock   (never below the floor)
         #   (b) refuse target <= current live profile   (raise-only)
         lock_rank = _rank.get(_read_required_profile(root), -1)
-        current_rank = max(
-            _rank.get((answers.get("profile") or "standard"), 1),
-            _rank.get(_read_cfg_profile(root), 1),
-        )
+        # Raise baseline is the LIVE config only — install.json answers are
+        # agent-writable, so forged-HIGH provenance must not block a legitimate
+        # repair up to the lock (v3.8.6). The lock handles the below-floor case.
+        current_rank = _rank.get(_read_cfg_profile(root), 1)
         target_rank = _rank[a.profile]
         if target_rank < lock_rank:
             print(f"upgrade: --profile {a.profile} is below the required_profile lock "
@@ -276,6 +276,16 @@ def main(argv=None) -> int:
                   f"({_names[current_rank]}) — the ratchet is raise-only.", file=sys.stderr)
             return 2
         answers["profile"] = a.profile
+
+    # Never RENDER below the required_profile lock, even on a plain upgrade with no
+    # --profile: answers["profile"] comes from the agent-writable install.json, so a
+    # forged LOW profile must not drop the strict pre-commit hooks the frozen lock
+    # promises (v3.8.6 — P1: the v3.8.5 floor only guarded the --profile branch, so a
+    # plain `upgrade --write` rendered whatever provenance claimed).
+    _rk = {"starter": 0, "standard": 1, "strict": 2}
+    _lock_profile = _read_required_profile(root)
+    if _lock_profile and _rk.get(_lock_profile, -1) > _rk.get(answers.get("profile") or "standard", 1):
+        answers["profile"] = _lock_profile
 
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)

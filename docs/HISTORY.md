@@ -45,3 +45,9 @@ This file is `merge=union` in `.gitattributes` so concurrent branch entries comb
 **Intent:** Remediate two independent audits of the v3.8.x cluster; close the one P1 (self-introduced profile-floor downgrade) and harden the sanitizers/evidence honestly.
 **Knowledge:** Profile floor must be max(config,required_profile,install.json) and locks written max(existing,target) — never trust agent-writable provenance alone. Sanitizers are a bounded reduction (confusables+NFKC+leet+invisible fold for the scan only), NOT an injection firewall; the durable defenses are budgets, labels, capability limits, deterministic gates. --verify ties skill-run evidence to a real check result for future block-mode.
 
+## 2026-07-10T20:32:51Z — NO_SESSION — f8b5cc4
+**Summary:** v3.8.5: remediate Codex's independent re-audit of v3.8.4 — 7 verified findings, all eval/test-locked (profile-floor equality trap, unscanned+unowned template sources, YAML name: injection in new-validator, --verify exit code + TOCTOU, green-notify pagination).
+**Files:** scripts/substrate_profile.py,scripts/substrate_upgrade.py,scripts/_substrate_surfaces.py,scripts/new_validator.py,scripts/memory_log.py,.github/workflows/release-matrix.yml,tests/test_hook_scripts.py,docs/knowledge/00_substrate.md,README.md,BENCHMARK.md,VERSION
+**Intent:** Close every finding from a second independent audit (Codex) with the same rigor as the first; keep the green baseline honest (22/22 blocked, 0/11 FP) with a red->green regression per fix.
+**Knowledge:** Profile floor is TWO constraints, not one max(): never below the required_profile lock (anchored on the owned/frozen lock, not agent-writable install.json) AND raise-only vs live config — so a stale-below-lock config is repairable UP to the lock (the v3.8.4 <= max-floor trapped this). Scan template SOURCES that ship verbatim into context surfaces. Quote generated YAML scalars. --verify must exit nonzero on failure and re-check the tree (TOCTOU).
+

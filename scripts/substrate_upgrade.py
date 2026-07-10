@@ -252,20 +252,28 @@ def main(argv=None) -> int:
     cur_ver = (baseline or {}).get("kit_version", "unknown")
     if a.profile:
         _rank = {"starter": 0, "standard": 1, "strict": 2}
-        # SECURITY (v3.8.4): the floor is the MAX of every authority — live config,
-        # the on-disk required_profile LOCK, and install.json answers. install.json
-        # is agent/attacker-writable, so trusting it alone let a mutated provenance
-        # file lower a strict lock (P1). --profile must clear the true floor.
-        cur_floor = max(
+        _names = {0: "starter", 1: "standard", 2: "strict"}
+        # SECURITY (v3.8.4/v3.8.5): two INDEPENDENT constraints. The hard FLOOR is the
+        # on-disk required_profile LOCK — owned + frozen, NOT the agent/attacker-writable
+        # install.json — so a mutated provenance file still cannot lower it. The RAISE
+        # baseline is the live config + provenance answers. Anchoring "below" on the lock
+        # (not on a single max()-floor with `<=`) fixes the v3.8.5 equality trap: a config
+        # stale BELOW the lock can now be repaired UP to it, while lowering stays refused.
+        #   (a) refuse target < required_profile lock   (never below the floor)
+        #   (b) refuse target <= current live profile   (raise-only)
+        lock_rank = _rank.get(_read_required_profile(root), -1)
+        current_rank = max(
             _rank.get((answers.get("profile") or "standard"), 1),
             _rank.get(_read_cfg_profile(root), 1),
-            _rank.get(_read_required_profile(root), 0),
         )
-        if _rank[a.profile] <= cur_floor:
-            floor_name = {0: "starter", 1: "standard", 2: "strict"}[cur_floor]
-            print(f"upgrade: --profile {a.profile} would not RAISE above the current floor "
-                  f"({floor_name}, = max of config/required_profile/install.json) — the "
-                  "ratchet is raise-only and never lowers a lock.", file=sys.stderr)
+        target_rank = _rank[a.profile]
+        if target_rank < lock_rank:
+            print(f"upgrade: --profile {a.profile} is below the required_profile lock "
+                  f"({_names[lock_rank]}) — the ratchet never lowers a lock.", file=sys.stderr)
+            return 2
+        if target_rank <= current_rank:
+            print(f"upgrade: --profile {a.profile} would not RAISE above the current profile "
+                  f"({_names[current_rank]}) — the ratchet is raise-only.", file=sys.stderr)
             return 2
         answers["profile"] = a.profile
 

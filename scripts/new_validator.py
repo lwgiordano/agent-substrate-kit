@@ -40,10 +40,11 @@ _NAME_RE = re.compile(r"^[a-z][a-z0-9_]+$")
 
 def _safe_desc(desc: str | None) -> str:
     """Neutralize a free-text --desc so it can't break the generated file: it is
-    interpolated into a triple-quoted docstring AND a YAML `name:` field. Collapse
-    to one line and drop the characters that would escape either context
-    (triple-quotes, backslashes, control chars). (v3.8.4 — `--desc 'x \"\"\" y'`
-    previously generated uncompilable Python.)"""
+    interpolated into a triple-quoted docstring AND a DOUBLE-QUOTED YAML `name:`
+    scalar. Collapse to one line, drop triple-quotes/backslashes (docstring +
+    YAML escape chars), and fold `"` -> `'` so nothing closes the YAML quotes.
+    (v3.8.4 — `--desc 'x \"\"\" y'` broke the Python docstring; v3.8.5 — `--desc
+    'x: y'` / `--desc '# h'` broke or nulled the YAML name field.)"""
     if not desc:
         return ""
     d = " ".join(str(desc).split())          # single line, collapse whitespace
@@ -137,15 +138,20 @@ def test_todo_add_a_failing_case(tmp_path):
     assert p.returncode in (0, 1)
 '''
 
+# The `name:` value is a DOUBLE-QUOTED YAML scalar (v3.8.5): an unquoted desc
+# containing `:` produced invalid YAML ("mapping values are not allowed here")
+# and a leading `#` was parsed as a comment -> null name. _safe_desc already
+# strips backslashes and folds `"` -> `'`, so nothing inside the quotes can
+# escape the scalar.
 _PRECOMMIT_SCOPED = """      - id: check-{dashed}
-        name: {desc}
+        name: "{desc}"
         entry: .substrate/venv/bin/python -I scripts/check_{name}.py
         language: system
         files: '{files_regex}'
         pass_filenames: false"""
 
 _PRECOMMIT_REPO_WIDE = """      - id: check-{dashed}
-        name: {desc}
+        name: "{desc}"
         entry: .substrate/venv/bin/python -I scripts/check_{name}.py
         language: system
         pass_filenames: false

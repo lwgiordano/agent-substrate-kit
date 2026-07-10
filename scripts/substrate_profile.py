@@ -158,20 +158,31 @@ def _write(root: Path, target: str, cfg: dict[str, str], force: bool) -> int:
         print(f"substrate-profile: invalid current profile {current!r} in .substrate/config",
               file=sys.stderr)
         return 2
-    # The floor is max(config, required_profile lock): config can be stale BELOW
-    # the lock, and a raise must clear the true floor, not just the config value
-    # (v3.8.4 defense-in-depth alongside the upgrade-path floor fix).
     req = root / ".substrate" / "required_profile"
     try:
         lock = req.read_text(encoding="utf-8").strip()
     except Exception:
         lock = ""
-    floor = max(RANK[current], RANK.get(lock, -1))
-    if RANK[target] <= floor:
-        floor_name = {0: "starter", 1: "standard", 2: "strict"}[floor]
-        print(f"substrate-profile: refusing {current} -> {target} — not above the floor "
-              f"({floor_name}, = max of config/required_profile). The ratchet is RAISE-only; "
-              "lowering is a deliberate, reviewed act outside this command.", file=sys.stderr)
+    # Two INDEPENDENT constraints (v3.8.5). The v3.8.4 single max()-floor with `<=`
+    # trapped the documented repair path: a config stale BELOW a strict lock made
+    # strict — the ceiling — unreachable (target == floor was refused), so the config
+    # could never be brought back up to its own lock. Separate the concerns:
+    #   (a) never BELOW the required_profile lock -> refuse target < lock
+    #   (b) RAISE-only vs the LIVE config         -> refuse target <= current
+    # Repairing a stale config UP to the lock (target == lock > current) is a raise
+    # that clears the floor, so it is allowed; lowering and no-ops are still refused.
+    names = {0: "starter", 1: "standard", 2: "strict"}
+    lock_rank = RANK.get(lock, -1)
+    if RANK[target] < lock_rank:
+        print(f"substrate-profile: refusing {current} -> {target} — below the "
+              f"required_profile lock ({names[lock_rank]}). The lock is a hard floor; "
+              "lowering it is a deliberate, reviewed act outside this command.",
+              file=sys.stderr)
+        return 2
+    if RANK[target] <= RANK[current]:
+        print(f"substrate-profile: refusing {current} -> {target} — not a raise. The "
+              "ratchet is RAISE-only; lowering is a deliberate, reviewed act outside "
+              "this command.", file=sys.stderr)
         return 2
     tpl = root / STAGED_TEMPLATE
     if not tpl.is_file():

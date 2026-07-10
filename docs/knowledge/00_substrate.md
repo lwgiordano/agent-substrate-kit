@@ -350,3 +350,29 @@ sequential, `--check`-detectable, re-run-repairable). Known-and-documented resid
 completion gate accepts unverified events (acceptable while warning-only); Copilot has no
 completion-gate equivalent (`copilot_hook_adapter.py` is tool-call decisioning only), by
 design.
+
+v3.8.5 is remediation of an independent re-audit (Codex) of the v3.8.4 cluster; 7 findings,
+all real, all eval/test-locked. (1) The v3.8.4 profile floor `max(config, required_profile,
+install.json)` compared with `<=`, which TRAPPED the documented repair path: a config stale
+BELOW its lock could never reach the lock because `target == floor` was refused — and with a
+strict lock (the ceiling) NO target could exceed it, so the config was permanently
+unrepairable. Both `substrate_profile.py` and `substrate_upgrade.py --profile` now use TWO
+independent constraints — (a) refuse `target < required_profile` (never below the hard floor,
+anchored on the owned+frozen lock, NOT agent-writable install.json), and (b) refuse
+`target <= current live profile` (raise-only) — so repairing a stale config UP to its lock is
+allowed while lowering and no-ops stay refused (regression: `enable_profile_repairs_config_
+stale_below_lock`). (2) `check_agent_harness` now also scans the remaining agent-read template
+sources bootstrap ships verbatim into downstream CONTEXT surfaces — `finding_response.md`,
+`diy_ultrareview_prompts.md`, `blind-spot-checklists/**`, and the ADR/knowledge/postmortem
+scaffolds; and `templates/` is required-owned-when-present (`OPTIONAL_DIRS`), closing the gap
+where a poisoned template passed the scan and had no CODEOWNER. (3) `new_validator.py` now
+DOUBLE-QUOTES the generated pre-commit `name:` scalar — an unquoted `--desc 'x: y'` was invalid
+YAML and a leading `#` nulled the name; `_safe_desc` already folds `"`→`'` (regression:
+`new_validator_desc_cannot_break_generated_yaml`). (4) `memory_log skill-run --verify` now
+EXITS NONZERO when the deterministic check does not pass (it previously always returned the
+append rc, so automation read a failed verification as success) AND closes a TOCTOU gap by
+re-reading git state after the up-to-120s check — if HEAD/status moved, the event is marked
+`verify_stale` and not claimed verified (regression: `memory_log_verify_failure_exits_
+nonzero`). (5) the `green-notify` sticky-comment lookup now PAGINATES all PR comments (was one
+page of 100), so past 100 comments it still finds its marker instead of stacking duplicate
+notifiers.

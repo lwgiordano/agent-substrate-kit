@@ -1245,7 +1245,7 @@ def test_new_validator_scaffold_generates_working_pair(tmp_path) -> None:
                        capture_output=True, text=True, timeout=30)
     assert c.returncode == 0, c.stdout + c.stderr
     # printed block is a complete pre-commit entry, and nothing auto-edited
-    for needle in ("id: check-dq-thresholds", "name: DQ thresholds are sane",
+    for needle in ("id: check-dq-thresholds", 'name: "DQ thresholds are sane"',
                    "entry: .substrate/venv/bin/python -I scripts/check_dq_thresholds.py",
                    "language: system", r"files: '^data/.*\.yaml$'"):
         assert needle in p.stdout, f"missing {needle!r} in printed block"
@@ -1498,6 +1498,76 @@ def test_new_validator_desc_cannot_break_generated_python(tmp_path) -> None:
     assert gen.is_file()
     py_compile.compile(str(gen), doraise=True)  # raises if the docstring was broken
     assert '"""' not in gen.read_text().split("Exit codes:")[0].split("check_dq_desc:")[1]
+
+
+def test_new_validator_desc_cannot_break_generated_yaml(tmp_path) -> None:
+    """v3.8.5 (P2): a hostile --desc must not break the generated pre-commit YAML
+    `name:` field. `x: y` was a mapping-value error and a leading `#` nulled the
+    name; the scalar is now double-quoted and _safe_desc folds `"`."""
+    if not (SCRIPTS / "new_validator.py").exists():
+        return
+    try:
+        import yaml
+    except ImportError:
+        return
+    import importlib.util
+    import textwrap
+    spec = importlib.util.spec_from_file_location(
+        "new_validator", str(SCRIPTS / "new_validator.py"))
+    nv = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(nv)
+    for hostile in ("x: y", "# hidden", 'a "b": c # e', "trailing\\", ": :"):
+        desc = nv._safe_desc(hostile)
+        for tmpl in (nv._PRECOMMIT_REPO_WIDE, nv._PRECOMMIT_SCOPED):
+            block = tmpl.format(dashed="x", desc=desc, name="x", files_regex=".*")
+            doc = yaml.safe_load(textwrap.dedent(block))
+            assert isinstance(doc, list) and isinstance(doc[0].get("name"), str) \
+                and doc[0]["name"], f"hostile desc {hostile!r} broke YAML: {doc!r}"
+
+
+def test_enable_profile_repairs_config_stale_below_lock(tmp_path) -> None:
+    """v3.8.5 (P2): a config stale BELOW its required_profile lock must be
+    repairable UP to the lock. The v3.8.4 max()-floor with `<=` made the lock
+    (esp. strict, the ceiling) unreachable — target == floor was refused — so the
+    config could never be brought back to its own lock."""
+    repo = _ratchet_repo(tmp_path)
+    if repo is None:
+        return
+    # Forge the stale state: lock says strict, live config still says standard.
+    (repo / ".substrate" / "required_profile").write_text("strict\n", encoding="utf-8")
+    cfg = repo / ".substrate" / "config"
+    assert 'SUBSTRATE_PROFILE="standard"' in cfg.read_text()
+    p = _profile_tool(repo, "--write", "strict")
+    assert p.returncode == 0, p.stdout + p.stderr
+    assert 'SUBSTRATE_PROFILE="strict"' in cfg.read_text()
+    assert (repo / ".substrate" / "required_profile").read_text().strip() == "strict"
+    # ...and lowering back below the lock is still refused.
+    q = _profile_tool(repo, "--write", "standard")
+    assert q.returncode == 2 and "lock" in (q.stdout + q.stderr).lower()
+
+
+def test_memory_log_verify_failure_exits_nonzero(tmp_path) -> None:
+    """v3.8.5 (P2): `skill-run --verify` whose deterministic check does NOT pass
+    must exit NONZERO so automation can't read a failed verification as success —
+    while still recording the event with verified=false."""
+    if not (SCRIPTS / "memory_log.py").exists():
+        return
+    repo = tmp_path / "r"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "x@x"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "x"], cwd=repo, check=True)
+    # Stage memory_log + its root helper but NOT run_smoke_verification.py, so the
+    # deterministic check returns rc=2 ("not found") — a non-pass verify.
+    _stage(repo, "memory_log.py", "_substrate_root.py")
+    p = subprocess.run([sys.executable, "-I", str(repo / "scripts" / "memory_log.py"),
+                        "skill-run", "self-audit", "--verify"],
+                       cwd=str(repo), capture_output=True, text=True, timeout=60)
+    assert p.returncode != 0, (p.returncode, p.stdout, p.stderr)
+    ev = repo / ".substrate" / "memory" / "events.jsonl"
+    events = [json.loads(ln) for ln in ev.read_text().splitlines()]
+    sk = [e for e in events if e["type"] == "skill-run"][-1]
+    assert sk["data"]["verified"] is False and sk["data"]["verify_rc"] != 0
 
 
 def test_manage_sh_dispatches_enable_profile() -> None:
@@ -3336,6 +3406,21 @@ def test_design_md_is_governed_surface() -> None:
     surfaces = importlib.import_module("_substrate_surfaces")
     assert "DESIGN.md" in surfaces.CONTEXT_GLOBS
     assert "DESIGN.md" in surfaces.OWNED_FILES
+
+
+def test_template_sources_are_scanned_and_owned() -> None:
+    """v3.8.5: the agent-read template sources bootstrap ships verbatim into
+    downstream CONTEXT surfaces must be context-scanned AND required-owned when
+    present (templates/ in OPTIONAL_DIRS) — closing the gap where a poisoned
+    template passed check_agent_harness and carried no CODEOWNER requirement."""
+    import importlib
+    sys.path.insert(0, str(SCRIPTS))
+    surfaces = importlib.import_module("_substrate_surfaces")
+    for g in ("templates/finding_response.md", "templates/diy_ultrareview_prompts.md",
+              "templates/blind-spot-checklists/**/*.md", "templates/knowledge_doc_template.md",
+              "templates/0000-adr-template.md", "templates/postmortem_template.md"):
+        assert g in surfaces.CONTEXT_GLOBS, f"{g} not context-scanned"
+    assert "templates" in surfaces.OPTIONAL_DIRS
 
 
 def test_doctor_go_live_runs_and_reports() -> None:

@@ -215,18 +215,22 @@ def skill_run(name: str, result: str, note: str, verify: bool = False) -> int:
     stored (`verified`/`verify_rc`/`verify_hash`), and `result` is overridden
     to reflect it. Block mode (deferred) will require a verified event — an
     unverified `--result pass` is a nudge, not evidence."""
-    # NOTE: parse UNSTRIPPED lines — status paths are position-encoded and a
-    # global strip() would eat the first line's leading status space.
-    try:
-        st = subprocess.run(["git", "status", "--porcelain"], cwd=ROOT,
-                            capture_output=True, text=True, timeout=15)
-        status_lines = st.stdout.splitlines() if st.returncode == 0 else []
-    except Exception:
-        status_lines = []
+    def _porcelain():
+        # UNSTRIPPED lines — status paths are position-encoded and a global
+        # strip() would eat the first line's leading status space.
+        try:
+            st = subprocess.run(["git", "status", "--porcelain"], cwd=ROOT,
+                                capture_output=True, text=True, timeout=15)
+            return st.stdout.splitlines() if st.returncode == 0 else []
+        except Exception:
+            return []
+
+    status_lines = _porcelain()
+    head_before = _git("rev-parse", "--short", "HEAD") or "none"
     changed = [line[3:].strip() for line in status_lines if len(line) > 3][:50]
     data = {
         "skill": _safe_note(name, 80),
-        "head": _git("rev-parse", "--short", "HEAD") or "none",
+        "head": head_before,
         "branch": _git("rev-parse", "--abbrev-ref", "HEAD") or "none",
         "dirty": bool(status_lines),
         "changed_files": changed,
@@ -234,17 +238,38 @@ def skill_run(name: str, result: str, note: str, verify: bool = False) -> int:
         "note": _safe_note(note, 200),
         "verified": False,
     }
+    verify_ok = True
     if verify:
         rc, out = _run_deterministic_check()
-        data["verified"] = rc == 0
+        # TOCTOU guard (v3.8.5): the working tree can move DURING the up-to-120s
+        # check. Re-read git state afterward; if HEAD or the porcelain status
+        # changed, the result cannot be trusted to describe the current tree, so
+        # do NOT claim verified — record the drift instead of a stale pass.
+        status_after = _porcelain()
+        head_after = _git("rev-parse", "--short", "HEAD") or "none"
+        moved = (status_after != status_lines) or (head_after != head_before)
+        verify_ok = (rc == 0) and not moved
+        data["verified"] = verify_ok
         data["verify_rc"] = rc
         data["verify_tool"] = "run_smoke_verification"
         data["verify_hash"] = hashlib.sha256(out.encode("utf-8", "replace")).hexdigest()[:16]
-        # A real check result overrides a self-asserted one — evidence, not a claim.
-        data["result"] = "pass" if rc == 0 else "issues-found"
-        print(f"memory-log: skill-run verified rc={rc} ({'pass' if rc == 0 else 'issues-found'})",
-              file=sys.stderr)
-    return append("skill-run", data)
+        if moved:
+            data["verify_stale"] = True
+            # file the event against the tree it ACTUALLY ended on
+            data["changed_files"] = [ln[3:].strip() for ln in status_after if len(ln) > 3][:50]
+            data["result"] = "unverified-tree-changed-during-check"
+        else:
+            # A real check result overrides a self-asserted one — evidence, not a claim.
+            data["result"] = "pass" if rc == 0 else "issues-found"
+        print(f"memory-log: skill-run verified rc={rc} "
+              f"({'pass' if verify_ok else 'FAILED/STALE'})", file=sys.stderr)
+    appended = append("skill-run", data)
+    if appended != 0:
+        return appended
+    # Surface a failed/stale verification as a NONZERO exit (v3.8.5) so shell and
+    # automation cannot read "verification ran but did not pass" as success. The
+    # event is recorded above regardless — evidence first, then the honest code.
+    return 0 if (not verify or verify_ok) else 1
 
 
 def _head_hash() -> str:

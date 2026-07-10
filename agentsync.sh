@@ -11,6 +11,11 @@
 #   AGENT_BUS.md merge=union
 # (already committed on this branch).
 #
+# Optional auto-backup (opt-in, generic — no machine-specific path in this file):
+#   export SUBSTRATE_BACKUP_DIR="/path/to/some/backup/folder"
+# When set, every sync/msg drops a fresh zip of the repo (minus .git) there —
+# e.g. point it at a Google Drive folder to snapshot into the cloud on each sync.
+#
 # Usage:
 #   ./agentsync.sh              # pull the other side's changes, push yours
 #   ./agentsync.sh msg "text"   # post a message to the bus + sync
@@ -21,11 +26,28 @@ BUS="AGENT_BUS.md"
 BR="$(git rev-parse --abbrev-ref HEAD)"
 who="${AGENT_NAME:-$(whoami)}"
 
+_backup() {
+  # If SUBSTRATE_BACKUP_DIR is set, refresh a single zip snapshot there (repo
+  # minus .git). Never hard-fail — a backup problem must not break the sync.
+  local dir="${SUBSTRATE_BACKUP_DIR:-}"
+  [ -n "$dir" ] || return 0
+  command -v zip >/dev/null 2>&1 || { echo "agentsync: 'zip' not found, skipping backup"; return 0; }
+  [ -d "$dir" ] || { echo "agentsync: SUBSTRATE_BACKUP_DIR '$dir' not found, skipping backup"; return 0; }
+  local top repo
+  top="$(git rev-parse --show-toplevel)" || return 0
+  repo="$(basename "$top")"
+  ( cd "$top/.." && rm -f "$dir/$repo-backup.zip" \
+      && zip -rq "$dir/$repo-backup.zip" "$repo" -x "*/.git/*" ) \
+    && echo "agentsync: backed up to $dir/$repo-backup.zip" \
+    || echo "agentsync: backup failed (sync still OK)"
+}
+
 _sync() {
   # pull the remote branch (merge, keep both sides), then push. Never hard-fail
   # on a transient network/push race — the next run reconciles.
   git pull --no-edit --no-rebase origin "$BR" || echo "agentsync: pull had issues (resolve conflicts, re-run)"
   git push origin "$BR" || echo "agentsync: push deferred (pull first, re-run)"
+  _backup
 }
 
 case "${1:-sync}" in

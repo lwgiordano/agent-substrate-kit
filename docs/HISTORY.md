@@ -39,3 +39,9 @@ This file is `merge=union` in `.gitattributes` so concurrent branch entries comb
 **Intent:** Event-driven PR watching without hourly polling: make the terminal green state generate the one event type webhooks deliver.
 **Knowledge:** Comment is forgeable (anyone can comment) so watchers must re-verify via the checks API; permissions caged to the notify job; sticky upsert keeps one wake per push. Kit-self CI only, not a consumer template.
 
+## 2026-07-10T13:29:00Z — NO_SESSION — 777ed1d
+**Summary:** v3.8.4 audit remediation: fixed a P1 profile-floor downgrade (stale install.json), homoglyph/leet sanitizer bypass, unscanned templates, manage.sh false-positive, gameable self-audit (added --verify), green-notify fork fail-red, new-validator --desc; deduped _git; corrected doc drift.
+**Files:** scripts/_text_safety.py,scripts/substrate_upgrade.py,scripts/substrate_profile.py,scripts/session_handoff.py,scripts/memory_log.py,scripts/completion_gate.py,scripts/_substrate_root.py,scripts/_substrate_surfaces.py,scripts/new_validator.py,scripts/run_substrate_evals.py,tests/test_hook_scripts.py,principles.md,docs/knowledge/00_substrate.md,.github/workflows/release-matrix.yml
+**Intent:** Remediate two independent audits of the v3.8.x cluster; close the one P1 (self-introduced profile-floor downgrade) and harden the sanitizers/evidence honestly.
+**Knowledge:** Profile floor must be max(config,required_profile,install.json) and locks written max(existing,target) — never trust agent-writable provenance alone. Sanitizers are a bounded reduction (confusables+NFKC+leet+invisible fold for the scan only), NOT an injection firewall; the durable defenses are budgets, labels, capability limits, deterministic gates. --verify ties skill-run evidence to a real check result for future block-mode.
+

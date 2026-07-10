@@ -24,6 +24,7 @@ Exit codes: 0 scaffolded / 2 bad name, existing files, or usage error.
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sys
 from pathlib import Path
@@ -56,14 +57,21 @@ def _safe_desc(desc: str | None) -> str:
     return d[:120]
 
 
-def _safe_regex(rx: str) -> str:
-    """Make a --files-regex safe to interpolate into the SINGLE-quoted YAML
-    `files:` scalar (v3.8.6): drop control chars/newlines and double any single
-    quote (YAML single-quote escaping) so a `'` in the regex cannot close the
-    scalar or inject adjacent YAML fields. YAML unescapes `''` -> `'`, so the
-    regex pre-commit actually applies is unchanged."""
-    rx = "".join(c for c in str(rx) if c >= " " and c != "\x7f" and not ("\x80" <= c <= "\x9f"))
-    return rx.replace("'", "''")
+def _validate_regex(rx: str) -> str:
+    """Validate a --files-regex before it enters the pre-commit `files:` scalar
+    (v3.8.7): reject empty/whitespace-only (which would widen scope to EVERY file)
+    and reject an uncompilable pattern. Returned VERBATIM — json.dumps() handles the
+    YAML quoting, so the pattern is preserved EXACTLY (no lossy control-stripping that
+    could silently change what it matches). Raises ValueError; main() maps it to rc 2."""
+    rx = str(rx)
+    if not rx.strip():
+        raise ValueError("--files-regex is empty — refusing (would match EVERY file). "
+                         "Provide a real scope regex, or omit it for a repo-wide gate.")
+    try:
+        re.compile(rx)
+    except re.error as e:
+        raise ValueError(f"--files-regex is not a valid regex: {e}")
+    return rx
 
 _VALIDATOR_TEMPLATE = '''#!/usr/bin/env python3
 """check_{name}: {desc}
@@ -151,20 +159,20 @@ def test_todo_add_a_failing_case(tmp_path):
     assert p.returncode in (0, 1)
 '''
 
-# The `name:` value is a DOUBLE-QUOTED YAML scalar (v3.8.5): an unquoted desc
-# containing `:` produced invalid YAML ("mapping values are not allowed here")
-# and a leading `#` was parsed as a comment -> null name. _safe_desc already
-# strips backslashes and folds `"` -> `'`, so nothing inside the quotes can
-# escape the scalar.
+# `{desc}` and `{files_regex}` are interpolated as PRE-SERIALIZED JSON scalars
+# (v3.8.7): JSON is a YAML subset, so json.dumps() yields a valid double-quoted YAML
+# scalar that escapes EVERYTHING — `:` / `#` / quotes / control chars / noncharacters
+# like U+FFFE — which the hand-rolled denylists (v3.8.5/v3.8.6) kept missing. The caller
+# passes json.dumps(...) values, so the template carries NO literal quotes of its own.
 _PRECOMMIT_SCOPED = """      - id: check-{dashed}
-        name: "{desc}"
+        name: {desc}
         entry: .substrate/venv/bin/python -I scripts/check_{name}.py
         language: system
-        files: '{files_regex}'
+        files: {files_regex}
         pass_filenames: false"""
 
 _PRECOMMIT_REPO_WIDE = """      - id: check-{dashed}
-        name: "{desc}"
+        name: {desc}
         entry: .substrate/venv/bin/python -I scripts/check_{name}.py
         language: system
         pass_filenames: false
@@ -189,6 +197,12 @@ def main(argv: list[str] | None = None) -> int:
             print(f"new-validator: invalid name {args.name!r}", file=sys.stderr)
             return 2
     desc = _safe_desc(args.desc) or f"check_{name} validator"
+    # Validate the scope regex BEFORE writing any files (no half-scaffold on a bad arg).
+    try:
+        files_regex = _validate_regex(args.files_regex) if args.files_regex is not None else None
+    except ValueError as e:
+        print(f"new-validator: {e}", file=sys.stderr)
+        return 2
 
     validator = ROOT / "scripts" / f"check_{name}.py"
     test = ROOT / "tests" / f"test_validator_{name}.py"
@@ -205,11 +219,13 @@ def main(argv: list[str] | None = None) -> int:
     test.write_text(_TEST_TEMPLATE.format(name=name), encoding="utf-8")
 
     dashed = name.replace("_", "-")
-    if args.files_regex:
-        block = _PRECOMMIT_SCOPED.format(dashed=dashed, desc=desc, name=name,
-                                         files_regex=_safe_regex(args.files_regex))
+    # YAML scalars via JSON serialization (JSON is a YAML subset) — escapes controls,
+    # quotes, `:`/`#`, and noncharacters, and preserves the regex exactly (v3.8.7).
+    if files_regex is not None:
+        block = _PRECOMMIT_SCOPED.format(dashed=dashed, desc=json.dumps(desc), name=name,
+                                         files_regex=json.dumps(files_regex))
     else:
-        block = _PRECOMMIT_REPO_WIDE.format(dashed=dashed, desc=desc, name=name)
+        block = _PRECOMMIT_REPO_WIDE.format(dashed=dashed, desc=json.dumps(desc), name=name)
 
     print(f"new-validator: wrote scripts/check_{name}.py")
     print(f"new-validator: wrote tests/test_validator_{name}.py")

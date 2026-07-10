@@ -397,3 +397,23 @@ required_profile/README.md + design-system/templates + trust anchors), locked by
 `test_doctor_fallback_matches_canonical_inventory` so it can't drift again. Each behavioral fix
 has a regression test; the v3.8.5 green-notify pagination fix has no unit test (GitHub-Actions
 JS) — documented, not silently uncovered.
+
+v3.8.7 is remediation of Codex's THIRD-round re-audit (of v3.8.6) — 6 findings, all real, and
+again two poked holes in v3.8.6 fixes. (1/P2) `substrate_upgrade.py`: the v3.8.6 fix only floored
+`profile` DOWNWARD; render answers still came from agent-writable `install.json`, so a forged
+`remote_governance=0` on a required-remote repo dropped the trusted-base workflow, and a forged
+HIGH profile rendered strict hooks inconsistent with config/lock. Now render answers for SECURITY
+tiers are derived from LIVE CONFIG (not provenance), and EVERY frozen `required_*` tier is floored
+— `required_profile` and `required_remote_governance` (new `_read_required_remote_governance`).
+(2/P2) `memory_log.py` content signature: the v3.8.6 signature used `git diff` (honors
+GIT_EXTERNAL_DIFF/textconv → a real change can render empty) and parsed non-`-z` porcelain
+(git C-quotes non-ASCII names → wrong path, change missed). Now it reads `status --porcelain -z
+-uall` and hashes the RAW on-disk BYTES of every changed/untracked path directly, failing CLOSED
+if any path is unreadable or git status fails. (3/P2) `new_validator.py`: the C0/C1 denylist still
+missed U+FFFE/U+FFFF and could yield `files: ''` (match-everything). Replaced with JSON
+serialization of the `name:`/`files:` scalars (JSON is a YAML subset — escapes controls, quotes,
+noncharacters, and preserves the regex exactly) plus REJECTION of an empty/uncompilable
+--files-regex. (4/P3) `substrate_doctor.py` fallback parity is now also asserted for
+`_COVERAGE_SKIP_PARTS`. (5) test-quality: the new_validator regression drives the real CLI (not
+templates directly); upgrade regressions cover forged-HIGH and required-remote render state.
+Standing residual (documented): the green-notify pagination fix remains JS-only (no unit harness).

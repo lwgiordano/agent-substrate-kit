@@ -41,6 +41,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -216,40 +217,57 @@ def skill_run(name: str, result: str, note: str, verify: bool = False) -> int:
     to reflect it. Block mode (deferred) will require a verified event — an
     unverified `--result pass` is a nudge, not evidence."""
     def _worktree_state():
-        """Return (porcelain_lines, content_signature). porcelain_lines are
-        UNSTRIPPED (status paths are position-encoded — a global strip() would eat
-        the first line's leading status space). porcelain_lines is None if git
-        status cannot be read (fail-closed: unknown is NOT clean). The signature
-        folds tracked-file diffs (staged + unstaged) AND untracked-file CONTENT, so
-        a re-edit of an already-dirty file — whose porcelain LINE is unchanged — is
-        still detected (v3.8.6: the v3.8.5 guard compared only porcelain strings)."""
+        """Return (status_lines, signature). status_lines is None if git status is
+        unreadable; signature is None if ANY changed/untracked path can't be read —
+        both force fail-closed (an unknown tree can never back verified=true). Paths
+        come from `status --porcelain -z -uall` (NUL-delimited, so non-ASCII names are
+        NOT C-quoted) and content is the RAW on-disk BYTES of each changed path read
+        directly — never `git diff` (which honors GIT_EXTERNAL_DIFF/textconv and could
+        render a real change as empty). (v3.8.7 — replaces the v3.8.6 porcelain-string
+        + git-diff signature blind to ext-diff/textconv and C-quoted untracked paths.)"""
         try:
-            st = subprocess.run(["git", "status", "--porcelain"], cwd=ROOT,
-                                capture_output=True, text=True, timeout=15)
+            st = subprocess.run(["git", "status", "--porcelain", "-z", "-uall"],
+                                cwd=ROOT, capture_output=True, timeout=15)
             if st.returncode != 0:
                 return None, None
-            lines = st.stdout.splitlines()
         except Exception:
             return None, None
+        records = [r for r in st.stdout.split(b"\0") if r]
+        lines, paths, i = [], [], 0
+        while i < len(records):
+            rec = records[i]
+            xy = rec[:2].decode("ascii", "replace")
+            path_b = rec[3:]
+            lines.append(xy + " " + path_b.decode("utf-8", "surrogateescape"))
+            paths.append((xy, path_b))
+            # rename/copy record is followed by a SECOND NUL field (the old name) —
+            # skip it; the new name (this record) is what we hash.
+            if xy and (xy[0] in "RC" or xy[1] in "RC"):
+                i += 1
+            i += 1
         h = hashlib.sha256()
-        h.update("\n".join(lines).encode("utf-8", "replace"))
-        h.update(b"\0diff\0")
-        h.update(_git("diff").encode("utf-8", "replace"))
-        h.update(b"\0cached\0")
-        h.update(_git("diff", "--cached").encode("utf-8", "replace"))
-        for ln in lines:
-            if ln.startswith("??") and len(ln) > 3:
-                p = ROOT / ln[3:].strip()
-                try:
-                    if p.is_dir():
-                        for f in sorted(p.rglob("*")):
-                            if f.is_file():
-                                h.update(str(f.relative_to(ROOT)).encode("utf-8", "replace"))
-                                h.update(f.read_bytes())
-                    elif p.is_file():
-                        h.update(p.read_bytes())
-                except Exception:
-                    h.update(b"\0unreadable\0")
+        h.update("\n".join(lines).encode("utf-8", "surrogateescape"))
+        for xy, path_b in paths:
+            if "D" in xy:            # deleted: no working-tree file to hash
+                continue
+            fp = Path(os.fsdecode(path_b))
+            fp = fp if fp.is_absolute() else (ROOT / fp)
+            try:
+                if fp.is_symlink():
+                    h.update(path_b + b"\0symlink\0")
+                    h.update(os.readlink(fp).encode("utf-8", "surrogateescape"))
+                elif fp.is_file():
+                    h.update(path_b + b"\0")
+                    h.update(fp.read_bytes())
+                elif fp.is_dir():    # defensive (-uall lists files, not dirs)
+                    for sub in sorted(fp.rglob("*")):
+                        if sub.is_file():
+                            h.update(str(sub).encode("utf-8", "surrogateescape"))
+                            h.update(sub.read_bytes())
+                else:
+                    return lines, None   # git reports it changed but it's absent
+            except Exception:
+                return lines, None       # unreadable -> fail closed
         return lines, h.hexdigest()
 
     status_lines, sig_before = _worktree_state()

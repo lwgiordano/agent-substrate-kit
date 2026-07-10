@@ -203,6 +203,16 @@ def _read_required_profile(root: Path) -> str:
         return "starter"
 
 
+def _read_required_remote_governance(root: Path) -> str:
+    """The frozen remote-governance lock. "1" means the repo REQUIRES remote
+    governance (the trusted-base workflow), so the render must never turn it off
+    regardless of what the agent-writable install.json/config claims (v3.8.7)."""
+    try:
+        return (root / ".substrate" / "required_remote_governance").read_text(encoding="utf-8").strip()
+    except Exception:
+        return ""
+
+
 def _apply_profile_ratchet(root: Path, target: str) -> None:
     """Re-apply the profile raise AFTER _restore(): .substrate/config and
     required_profile are in PRESERVE_FILES, so the bootstrap's fresh values
@@ -248,7 +258,18 @@ def main(argv=None) -> int:
         return 2
 
     baseline = _load_install_json(root)
-    answers = (baseline or {}).get("answers") or _answers_from_config(root)
+    # Render authority for SECURITY tiers is the LIVE CONFIG, never the agent-writable
+    # install.json provenance (v3.8.7 / P2): forged provenance must not change what gets
+    # rendered. install.json still supplies cosmetic answers config does not carry
+    # (ui/workflow). profile + remote_governance are additionally floored to their frozen
+    # required_* locks below. (The v3.8.6 patch only floored profile DOWNWARD and still
+    # trusted provenance for remote_governance and an inconsistent HIGH profile.)
+    answers = dict((baseline or {}).get("answers") or {})
+    _cfg_answers = _answers_from_config(root)
+    for _k, _v in _cfg_answers.items():
+        answers.setdefault(_k, _v)
+    answers["profile"] = _cfg_answers["profile"]
+    answers["remote_governance"] = _cfg_answers["remote_governance"]
     cur_ver = (baseline or {}).get("kit_version", "unknown")
     if a.profile:
         _rank = {"starter": 0, "standard": 1, "strict": 2}
@@ -286,6 +307,11 @@ def main(argv=None) -> int:
     _lock_profile = _read_required_profile(root)
     if _lock_profile and _rk.get(_lock_profile, -1) > _rk.get(answers.get("profile") or "standard", 1):
         answers["profile"] = _lock_profile
+    # remote_governance is a SEPARATE required_* tier: a repo whose frozen lock says "1"
+    # must never render with it OFF, no matter what config/provenance claims — else a
+    # forged value drops the trusted-base workflow the lock promises (v3.8.7 / P2).
+    if _read_required_remote_governance(root) == "1":
+        answers["remote_governance"] = "1"
 
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)

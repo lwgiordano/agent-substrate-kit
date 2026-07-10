@@ -1247,7 +1247,7 @@ def test_new_validator_scaffold_generates_working_pair(tmp_path) -> None:
     # printed block is a complete pre-commit entry, and nothing auto-edited
     for needle in ("id: check-dq-thresholds", 'name: "DQ thresholds are sane"',
                    "entry: .substrate/venv/bin/python -I scripts/check_dq_thresholds.py",
-                   "language: system", r"files: '^data/.*\.yaml$'"):
+                   "language: system", "files: " + json.dumps(r"^data/.*\.yaml$")):
         assert needle in p.stdout, f"missing {needle!r} in printed block"
     assert not (tmp_path / ".pre-commit-config.yaml").exists()
     # repo-wide variant prints always_run instead of files:
@@ -1533,36 +1533,101 @@ def test_new_validator_desc_cannot_break_generated_python(tmp_path) -> None:
 
 
 def test_new_validator_desc_cannot_break_generated_yaml(tmp_path) -> None:
-    """v3.8.5 (P2): a hostile --desc must not break the generated pre-commit YAML
-    `name:` field. `x: y` was a mapping-value error and a leading `#` nulled the
-    name; the scalar is now double-quoted and _safe_desc folds `"`."""
+    """v3.8.5/v3.8.7 (P2): a hostile --desc or --files-regex must not break the
+    generated pre-commit YAML. Drives the REAL CLI (not the templates directly) so a
+    future rewiring back to raw args would fail here. Covers `:`/`#`, control chars,
+    and noncharacters (U+FFFE/U+FFFF); a quote-bearing regex must round-trip exactly;
+    an empty/invalid --files-regex must be REJECTED (else scope widens to every file)."""
     if not (SCRIPTS / "new_validator.py").exists():
         return
     try:
         import yaml
     except ImportError:
         return
-    import importlib.util
     import textwrap
-    spec = importlib.util.spec_from_file_location(
-        "new_validator", str(SCRIPTS / "new_validator.py"))
-    nv = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(nv)
-    # v3.8.6: also cover C0/C1 control chars (BEL/ESC survive .split() and PyYAML
-    # rejects them even quoted) and a --files-regex bearing single quotes (which
-    # would otherwise close the single-quoted `files:` scalar / inject fields).
-    for hostile in ("x: y", "# hidden", 'a "b": c # e', "trailing\\", ": :",
-                    "bel\x07here", "esc\x1bhere", "del\x7fx"):
-        desc = nv._safe_desc(hostile)
-        for tmpl in (nv._PRECOMMIT_REPO_WIDE, nv._PRECOMMIT_SCOPED):
-            block = tmpl.format(dashed="x", desc=desc, name="x",
-                                files_regex=nv._safe_regex("a'b'c"))
-            doc = yaml.safe_load(textwrap.dedent(block))
-            assert isinstance(doc, list) and isinstance(doc[0].get("name"), str) \
-                and doc[0]["name"], f"hostile desc {hostile!r} broke YAML: {doc!r}"
-            if "files" in doc[0]:
-                assert doc[0]["files"] == "a'b'c", \
-                    f"files-regex round-trip broke: {doc[0]['files']!r}"
+
+    def _block(stdout):
+        seg = stdout.split("drift-tracked):", 1)[1].split("\nThen:", 1)[0]
+        return yaml.safe_load(textwrap.dedent(seg))
+
+    hostile = ("x: y", "# hidden", 'a "b": c # e', "trailing\\", ": :",
+               "bel\x07here", "esc\x1bhere", "￾￿ nonch")
+    for i, h in enumerate(hostile):
+        d = tmp_path / f"d{i}"
+        d.mkdir()
+        p = _run("new_validator.py", [f"v{i}", "--files-regex", "a'b'c", "--desc", h],
+                 "", cwd=d)
+        assert p.returncode == 0, (h, p.stderr)
+        doc = _block(p.stdout)
+        assert isinstance(doc, list) and isinstance(doc[0].get("name"), str) and doc[0]["name"]
+        assert doc[0]["files"] == "a'b'c", f"regex round-trip broke: {doc[0]['files']!r}"
+    # empty / whitespace / uncompilable --files-regex are REJECTED (rc 2)
+    for i, bad in enumerate(("", "   ", "(unclosed")):
+        d = tmp_path / f"bad{i}"
+        d.mkdir()
+        q = _run("new_validator.py", ["vx", "--files-regex", bad], "", cwd=d)
+        assert q.returncode == 2, (bad, q.returncode, q.stdout, q.stderr)
+
+
+def test_upgrade_plain_render_ignores_forged_high_provenance(tmp_path) -> None:
+    """v3.8.7 (P2): render answers come from LIVE CONFIG, not install.json. A forged
+    HIGH profile=strict on a standard config/lock must NOT render strict hooks — an
+    inconsistent, provenance-driven escalation the v3.8.6 low-only floor allowed."""
+    if not (SCRIPTS / "substrate_upgrade.py").exists():
+        return
+    repo = tmp_path / "std"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    r = subprocess.run(["bash", str(ROOT / "bootstrap.sh"), "--target", str(repo),
+                        "--profile", "standard", "--lang", "none", "--no-doctor"],
+                       capture_output=True, text=True, timeout=180)
+    if r.returncode != 0:
+        return
+    assert "check-finding-response" not in (repo / ".pre-commit-config.yaml").read_text()
+    ij = repo / ".substrate" / "install.json"
+    if ij.is_file():
+        d = json.loads(ij.read_text())
+        d.setdefault("answers", {})["profile"] = "strict"   # forge provenance HIGH
+        ij.write_text(json.dumps(d))
+    p = subprocess.run(
+        [sys.executable, "-I", str(repo / "scripts" / "substrate_upgrade.py"),
+         "--from", str(ROOT), "--root", str(repo), "--allow-unverified", "--write", "--force"],
+        capture_output=True, text=True, timeout=180)
+    assert p.returncode == 0, (p.returncode, p.stdout[-400:], p.stderr[-400:])
+    pc = (repo / ".pre-commit-config.yaml").read_text()
+    assert "check-finding-response" not in pc, "forged HIGH provenance escalated the render!"
+    assert (repo / ".substrate" / "required_profile").read_text().strip() == "standard"
+
+
+def test_upgrade_render_floors_remote_governance_to_lock(tmp_path) -> None:
+    """v3.8.7 (P2): a required_remote_governance=1 lock must force the render to keep
+    remote governance ON (the trusted-base workflow), even if install.json/config claim
+    it is off — else forged provenance silently drops a required security gate."""
+    if not (SCRIPTS / "substrate_upgrade.py").exists():
+        return
+    repo = tmp_path / "rg"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    r = subprocess.run(["bash", str(ROOT / "bootstrap.sh"), "--target", str(repo),
+                        "--profile", "standard", "--lang", "none", "--no-doctor"],
+                       capture_output=True, text=True, timeout=180)
+    if r.returncode != 0:
+        return
+    wf = repo / ".github" / "workflows" / "trusted-base-audit.yml"
+    assert not wf.exists(), "standard bootstrap unexpectedly rendered the remote workflow"
+    # Freeze the remote-governance requirement, but leave provenance claiming OFF.
+    (repo / ".substrate" / "required_remote_governance").write_text("1\n", encoding="utf-8")
+    ij = repo / ".substrate" / "install.json"
+    if ij.is_file():
+        d = json.loads(ij.read_text())
+        d.setdefault("answers", {})["remote_governance"] = "0"   # forge OFF
+        ij.write_text(json.dumps(d))
+    p = subprocess.run(
+        [sys.executable, "-I", str(repo / "scripts" / "substrate_upgrade.py"),
+         "--from", str(ROOT), "--root", str(repo), "--allow-unverified", "--write", "--force"],
+        capture_output=True, text=True, timeout=180)
+    assert p.returncode == 0, (p.returncode, p.stdout[-400:], p.stderr[-400:])
+    assert wf.is_file(), "required remote governance did not restore the trusted-base workflow!"
 
 
 def test_enable_profile_repairs_config_stale_below_lock(tmp_path) -> None:
@@ -1632,6 +1697,34 @@ def test_memory_log_verify_detects_content_change_during_check(tmp_path) -> None
     (repo / "scripts" / "run_smoke_verification.py").write_text(
         "import pathlib\n"
         "pathlib.Path('f.txt').write_text('dirty2-changed\\n')\n"
+        "raise SystemExit(0)\n", encoding="utf-8")
+    p = subprocess.run([sys.executable, "-I", str(repo / "scripts" / "memory_log.py"),
+                        "skill-run", "self-audit", "--verify"],
+                       cwd=str(repo), capture_output=True, text=True, timeout=60)
+    assert p.returncode != 0, (p.returncode, p.stdout, p.stderr)
+    ev = repo / ".substrate" / "memory" / "events.jsonl"
+    sk = [json.loads(ln) for ln in ev.read_text().splitlines()
+          if '"skill-run"' in ln][-1]
+    assert sk["data"].get("verify_stale") is True and sk["data"]["verified"] is False
+
+
+def test_memory_log_verify_detects_nonascii_untracked_change(tmp_path) -> None:
+    """v3.8.7 (P2): a change to an already-untracked NON-ASCII file during --verify must
+    be detected. Default porcelain C-quotes such names, so the v3.8.6 signature read the
+    wrong path and missed the change; `--porcelain -z -uall` + raw bytes fixes it."""
+    if not (SCRIPTS / "memory_log.py").exists():
+        return
+    repo = tmp_path / "r"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "x@x"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "x"], cwd=repo, check=True)
+    (repo / ".gitignore").write_text("__pycache__/\n", encoding="utf-8")
+    (repo / "üntracked.txt").write_text("before\n", encoding="utf-8")  # untracked, non-ASCII
+    _stage(repo, "memory_log.py", "_substrate_root.py")
+    (repo / "scripts" / "run_smoke_verification.py").write_text(
+        "import pathlib\n"
+        "pathlib.Path('üntracked.txt').write_text('after-changed\\n')\n"
         "raise SystemExit(0)\n", encoding="utf-8")
     p = subprocess.run([sys.executable, "-I", str(repo / "scripts" / "memory_log.py"),
                         "skill-run", "self-audit", "--verify"],
@@ -3515,6 +3608,9 @@ def test_doctor_fallback_matches_canonical_inventory() -> None:
     assert _fallback("_SENSITIVE_FILES") == set(inv.OWNED_FILES)
     assert _fallback("_SENSITIVE_OPTIONAL_FILES") == set(inv.OPTIONAL_FILES)
     assert _fallback("_SENSITIVE_OPTIONAL_DIRS") == set(inv.OPTIONAL_DIRS)
+    # v3.8.7: the set-literal tier must match too (was omitted despite "exact parity").
+    m = re.search(r"^\s*_COVERAGE_SKIP_PARTS=(\{[^}]*\})", src, re.MULTILINE)
+    assert m and ast.literal_eval(m.group(1)) == set(inv.COVERAGE_SKIP_PARTS)
 
 
 def test_doctor_go_live_runs_and_reports() -> None:

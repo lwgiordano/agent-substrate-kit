@@ -55,8 +55,11 @@ if [[ "$LANG_PRIMARY" == "auto" ]]; then
 fi
 RUN_PREFIX=""; if [[ "$RUNNER" == "uv" ]]; then RUN_PREFIX="uv run"; elif [[ "$RUNNER" == "poetry" ]]; then RUN_PREFIX="poetry run"; elif [[ "$RUNNER" == "auto" && "$LANG_PRIMARY" == "python" ]]; then if command -v uv >/dev/null 2>&1; then RUN_PREFIX="uv run"; elif command -v poetry >/dev/null 2>&1; then RUN_PREFIX="poetry run"; fi; fi
 PROJECT_SLUG="$(basename "$REPO_ROOT" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9._-' '-' | sed 's/^-//; s/-$//')"; [ -n "$PROJECT_SLUG" ] || PROJECT_SLUG="agent-substrate-project"; TODAY="$(date +%F)"
-copy(){ local s="$1" d="$2"; mkdir -p "$(dirname "$d")"; if [ -e "$d" ] && [ "$FORCE" != "yes" ]; then echo "    SKIP ${d#./}"; else cp "$s" "$d"; echo "    +    ${d#./}"; fi; }
-render(){ local s="$1" d="$2"; mkdir -p "$(dirname "$d")"; if [ -e "$d" ] && [ "$FORCE" != "yes" ]; then echo "    SKIP ${d#./}"; else sed -e "s/{{PROJECT_SLUG}}/$PROJECT_SLUG/g" -e "s/{{WORKFLOW}}/$WORKFLOW/g" -e "s/{{UI_ENABLED}}/$UI_ENABLED/g" -e "s/{{RUNNER}}/$RUNNER/g" -e "s/{{PROFILE}}/$PROFILE/g" -e "s/{{LANG}}/$LANG_PRIMARY/g" -e "s#{{RUN_PREFIX}}#$RUN_PREFIX#g" "$s" > "$d"; echo "    +    ${d#./}"; fi; }
+# rm -f the destination BEFORE writing (v3.8.13): plain `cp`/`sed >` FOLLOW a symlinked
+# destination, so a symlink planted at a render target would write through it to an external
+# file. Removing the link first makes cp/sed create a fresh regular file (no-follow write).
+copy(){ local s="$1" d="$2"; mkdir -p "$(dirname "$d")"; if [ -e "$d" ] && [ "$FORCE" != "yes" ]; then echo "    SKIP ${d#./}"; else rm -f "$d"; cp "$s" "$d"; echo "    +    ${d#./}"; fi; }
+render(){ local s="$1" d="$2"; mkdir -p "$(dirname "$d")"; if [ -e "$d" ] && [ "$FORCE" != "yes" ]; then echo "    SKIP ${d#./}"; else rm -f "$d"; sed -e "s/{{PROJECT_SLUG}}/$PROJECT_SLUG/g" -e "s/{{WORKFLOW}}/$WORKFLOW/g" -e "s/{{UI_ENABLED}}/$UI_ENABLED/g" -e "s/{{RUNNER}}/$RUNNER/g" -e "s/{{PROFILE}}/$PROFILE/g" -e "s/{{LANG}}/$LANG_PRIMARY/g" -e "s#{{RUN_PREFIX}}#$RUN_PREFIX#g" "$s" > "$d"; echo "    +    ${d#./}"; fi; }
 # render_precommit: render + strip profile/lang marker blocks.
 #   starter  -> strip standard + strict blocks
 #   standard -> strip strict blocks

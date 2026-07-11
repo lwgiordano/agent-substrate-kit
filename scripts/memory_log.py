@@ -394,6 +394,7 @@ def skill_run(name: str, result: str, note: str, verify: bool = False) -> int:
         if tk.returncode != 0:
             return lines, None
         h.update(b"\0tracked\0")
+        rootr = os.path.realpath(ROOT)
         for pb in tk.stdout.split(b"\0"):
             if not pb:
                 continue
@@ -402,8 +403,17 @@ def skill_run(name: str, result: str, note: str, verify: bool = False) -> int:
             h.update(pb)
             h.update(b"\0")
             try:
+                # No-follow ancestor topology (v3.8.13): if the symlink-resolved real path
+                # ESCAPES root, a symlinked ANCESTOR is redirecting this tracked path to an
+                # external tree — fail closed rather than hash external content as our own.
+                rp = os.path.realpath(fp)
+                if rp != rootr and not rp.startswith(rootr + os.sep):
+                    return lines, None
                 stt = fp.lstat()
-                h.update(f"{stat.S_IFMT(stt.st_mode)}:{stat.S_IMODE(stt.st_mode)}".encode())
+                # st_dev/st_ino/st_nlink (v3.8.13): catch a hard-link/alias swap to an external
+                # same-content victim (inode + link count change while the bytes stay identical).
+                h.update(f"{stat.S_IFMT(stt.st_mode)}:{stat.S_IMODE(stt.st_mode)}:"
+                         f"{stt.st_dev}:{stt.st_ino}:{stt.st_nlink}".encode())
                 if stat.S_ISLNK(stt.st_mode):
                     h.update(b"\0lnk\0")
                     h.update(os.readlink(fp).encode("utf-8", "surrogateescape"))

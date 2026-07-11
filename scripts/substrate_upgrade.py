@@ -66,21 +66,26 @@ def _load_install_json(root: Path) -> dict | None:
         # install.json is agent-writable and drift-EXCLUDED, so a hostile/garbled shape
         # (e.g. a bare JSON string) must not crash the upgrade with an AttributeError when
         # `.get()`/`dict()` are called on it — treat any non-mapping as absent (v3.8.10).
-        return data if isinstance(data, dict) else None
+        if not isinstance(data, dict):
+            return None
+        # A malformed drift map (non-dict owned_file_sha256) must be treated as an UNTRUSTED /
+        # ABSENT baseline — so --write requires --force — NOT as proof of zero drift, which
+        # would let a forged `owned_file_sha256: []` silently overwrite locally-modified owned
+        # files (v3.8.13 / P2). Drift protection can only be trusted with a valid drift map.
+        owned = data.get("owned_file_sha256")
+        if owned is not None and not isinstance(owned, dict):
+            return None
+        return data
     return None
 
 
-def _parse_config(root: Path) -> dict:
-    """Comment-aware, quote-aware parse of .substrate/config, mirroring
+def _parse_config_text(text: str) -> dict:
+    """Comment-aware, quote-aware parse of .substrate/config TEXT, mirroring
     check_substrate_config (v3.8.9): strips bootstrap's inline `# ...` comments and ONE
     layer of surrounding quotes. The old `.strip('"')` left the comment IN the value, so
     `SUBSTRATE_REMOTE_GOVERNANCE="1"   # ...` parsed to `1"   # ...` and was treated as
     OFF — dropping the trusted-base workflow once live config became the render authority."""
     vals: dict[str, str] = {}
-    try:
-        text = (root / ".substrate" / "config").read_text(encoding="utf-8", errors="replace")
-    except Exception:
-        return vals
     for raw in text.splitlines():
         line = raw
         if not line.strip() or line.lstrip().startswith("#"):
@@ -98,10 +103,15 @@ def _parse_config(root: Path) -> dict:
     return vals
 
 
-def _answers_from_config(root: Path) -> dict:
-    """Answers derived from live .substrate/config (the render authority for every
-    config-backed tier). Uses the comment-aware parser above."""
-    vals = _parse_config(root)
+def _parse_config(root: Path) -> dict:
+    try:
+        return _parse_config_text(
+            (root / ".substrate" / "config").read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return {}
+
+
+def _answers_from_vals(vals: dict) -> dict:
     return {
         "profile": vals.get("SUBSTRATE_PROFILE", "standard"),
         "lang": vals.get("SUBSTRATE_LANG", "auto"),
@@ -110,6 +120,26 @@ def _answers_from_config(root: Path) -> dict:
         "sandbox": vals.get("SUBSTRATE_SANDBOX", "0"),
         "remote_governance": vals.get("SUBSTRATE_REMOTE_GOVERNANCE", "0"),
     }
+
+
+def _answers_from_config(root: Path) -> dict:
+    """Answers derived from live .substrate/config (the render authority for every
+    config-backed tier). Uses the comment-aware parser above."""
+    return _answers_from_vals(_parse_config(root))
+
+
+def _answers_from_snapshot(auth: dict) -> dict:
+    """Answers derived EXCLUSIVELY from an authority snapshot's config bytes (v3.8.13):
+    deriving from the SAME snapshot the abort-check compares against closes the gap where
+    a concurrent config/lock change between derive-time and snapshot-time yielded stale
+    answers accepted as fresh."""
+    text = (auth.get("config") or b"").decode("utf-8", "replace")
+    return _answers_from_vals(_parse_config_text(text))
+
+
+def _lock_from_snapshot(auth: dict, name: str) -> str:
+    b = auth.get(name)
+    return b.decode("utf-8", "replace").strip() if isinstance(b, (bytes, bytearray)) else ""
 
 
 def _profile_alias(ans: dict) -> str:
@@ -365,48 +395,36 @@ def main(argv=None) -> int:
         return 2
 
     baseline = _load_install_json(root)
-    # Render authority for SECURITY tiers is the LIVE CONFIG, never the agent-writable
-    # install.json provenance (v3.8.7 / P2): forged provenance must not change what gets
-    # rendered. install.json still supplies cosmetic answers config does not carry
-    # (ui/workflow). profile + remote_governance are additionally floored to their frozen
-    # required_* locks below. (The v3.8.6 patch only floored profile DOWNWARD and still
-    # trusted provenance for remote_governance and an inconsistent HIGH profile.)
+    # Snapshot the render AUTHORITY (live config + frozen locks) FIRST, then derive ALL
+    # answers EXCLUSIVELY from that snapshot (v3.8.13 / P1): deriving from the same bytes
+    # the pre-write abort-check compares against closes the gap where a concurrent
+    # config/lock change between derive-time and snapshot-time yielded stale answers then
+    # accepted as fresh. required_* locks are also read from the snapshot, not fresh disk.
+    _auth0 = _authority_snapshot(root)
+    _cfg_answers = _answers_from_snapshot(_auth0)
     _raw_ans = (baseline or {}).get("answers")
     prov = dict(_raw_ans) if isinstance(_raw_ans, dict) else {}   # answers shape is agent-writable
-    _cfg_answers = _answers_from_config(root)
     answers = dict(prov)
-    # EVERY config-backed render tier comes from LIVE CONFIG, never agent-writable
-    # provenance (v3.8.8 — v3.8.7 only did profile+remote_governance, so a forged
-    # lang/runner/sandbox still dropped the matching hooks, e.g. lang=none removing the
-    # python ruff/pytest gates). These are exactly the keys _answers_from_config reads
-    # from .substrate/config. ui/workflow are NOT stored in config, so provenance
-    # supplies them (config default is only a fallback). required_* tiers floored below.
+    # EVERY config-backed render tier comes from LIVE CONFIG (the snapshot), never agent-
+    # writable provenance (v3.8.7/v3.8.8 — a forged profile/lang/runner/sandbox/remote would
+    # else drop the matching hooks/workflow). ui/workflow are NOT in config, so provenance
+    # supplies them, coerced to a STRING (a forged ui=[] would else reach subprocess argv).
     for _k in ("profile", "lang", "runner", "sandbox", "remote_governance"):
         answers[_k] = _cfg_answers[_k]
-    # ui/workflow come from agent-writable provenance — coerce to a STRING (a forged
-    # ui=[] would otherwise reach subprocess argv and crash the render), falling back to
-    # the config default on any non-string shape (v3.8.11 / P2).
     for _k in ("ui", "workflow"):
         _v = answers.get(_k, _cfg_answers[_k])
         answers[_k] = _v if isinstance(_v, str) else _cfg_answers[_k]
     cur_ver = (baseline or {}).get("kit_version", "unknown")
+    _rk = {"starter": 0, "standard": 1, "strict": 2}
+    _names = {0: "starter", 1: "standard", 2: "strict"}
+    _lock_profile = _lock_from_snapshot(_auth0, "required_profile")
     if a.profile:
-        _rank = {"starter": 0, "standard": 1, "strict": 2}
-        _names = {0: "starter", 1: "standard", 2: "strict"}
-        # SECURITY (v3.8.4/v3.8.5): two INDEPENDENT constraints. The hard FLOOR is the
-        # on-disk required_profile LOCK — owned + frozen, NOT the agent/attacker-writable
-        # install.json — so a mutated provenance file still cannot lower it. The RAISE
-        # baseline is the live config + provenance answers. Anchoring "below" on the lock
-        # (not on a single max()-floor with `<=`) fixes the v3.8.5 equality trap: a config
-        # stale BELOW the lock can now be repaired UP to it, while lowering stays refused.
+        # Two INDEPENDENT constraints, both anchored on the SNAPSHOT (v3.8.4/v3.8.5/v3.8.13):
         #   (a) refuse target < required_profile lock   (never below the floor)
         #   (b) refuse target <= current live profile   (raise-only)
-        lock_rank = _rank.get(_read_required_profile(root), -1)
-        # Raise baseline is the LIVE config only — install.json answers are
-        # agent-writable, so forged-HIGH provenance must not block a legitimate
-        # repair up to the lock (v3.8.6). The lock handles the below-floor case.
-        current_rank = _rank.get(_read_cfg_profile(root), 1)
-        target_rank = _rank[a.profile]
+        lock_rank = _rk.get(_lock_profile, -1)
+        current_rank = _rk.get(_cfg_answers["profile"], 1)   # live config, from the snapshot
+        target_rank = _rk[a.profile]
         if target_rank < lock_rank:
             print(f"upgrade: --profile {a.profile} is below the required_profile lock "
                   f"({_names[lock_rank]}) — the ratchet never lowers a lock.", file=sys.stderr)
@@ -417,25 +435,14 @@ def main(argv=None) -> int:
             return 2
         answers["profile"] = a.profile
 
-    # Never RENDER below the required_profile lock, even on a plain upgrade with no
-    # --profile: answers["profile"] comes from the agent-writable install.json, so a
-    # forged LOW profile must not drop the strict pre-commit hooks the frozen lock
-    # promises (v3.8.6 — P1: the v3.8.5 floor only guarded the --profile branch, so a
-    # plain `upgrade --write` rendered whatever provenance claimed).
-    _rk = {"starter": 0, "standard": 1, "strict": 2}
-    _lock_profile = _read_required_profile(root)
+    # Never RENDER below the frozen required_* locks (all from the SNAPSHOT), even on a plain
+    # upgrade — forged provenance/config must not drop the hooks/workflow the locks promise.
     if _lock_profile and _rk.get(_lock_profile, -1) > _rk.get(answers.get("profile") or "standard", 1):
         answers["profile"] = _lock_profile
-    # remote_governance is a SEPARATE required_* tier: a repo whose frozen lock says "1"
-    # must never render with it OFF, no matter what config/provenance claims — else a
-    # forged value drops the trusted-base workflow the lock promises (v3.8.7 / P2).
-    if _read_required_remote_governance(root) == "1":
+    if _lock_from_snapshot(_auth0, "required_remote_governance") == "1":
         answers["remote_governance"] = "1"
-    if _read_required_sandbox(root) == "1":
+    if _lock_from_snapshot(_auth0, "required_sandbox") == "1":
         answers["sandbox"] = "1"
-    # Snapshot the authority NOW (answers are derived from it); re-checked before the
-    # write to catch a mid-run lock/config change during source resolution (v3.8.10).
-    _auth0 = _authority_snapshot(root)
 
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
@@ -494,22 +501,17 @@ def main(argv=None) -> int:
 
         backup = tmp / "preserve"
         saved = _backup(root, backup)
-        # Transactional authority (v3.8.11 / P1): the render answers were derived from _auth0;
-        # force the backup's authority files to EXACTLY _auth0 so _restore reconstitutes the
-        # state we rendered from — closing the check->backup gap where a concurrent lock/config
-        # change during _backup would otherwise be restored verbatim (a raised lock beside the
-        # old config, rendering no strict hook).
-        for _rel, _bytes in _auth0.items():
-            _bp = backup / ".substrate" / _rel
-            try:
-                if _bytes is None:
-                    if _bp.exists():
-                        _bp.unlink()
-                else:
-                    _bp.parent.mkdir(parents=True, exist_ok=True)
-                    _bp.write_bytes(_bytes)
-            except Exception:
-                pass
+        # Final authority re-check immediately before the mutating render (v3.8.13 / P1):
+        # root is still UNMUTATED here (_backup only COPIED it), so if the authority changed
+        # since _auth0 we simply abort — no stale render, and no lock is ever lowered. The
+        # backup was captured with authority == _auth0 (just verified), so the post-render
+        # _restore reconstitutes exactly the state the answers were derived from. (This
+        # replaces the v3.8.12 transactional overwrite, which could LOWER a concurrently
+        # raised lock — violating raise-only.)
+        if _authority_snapshot(root) != _auth0:
+            print("upgrade: .substrate authority (config / required_* locks) changed before "
+                  "the render — aborting; nothing was mutated. Re-run.", file=sys.stderr)
+            return 2
         alias = _profile_alias(answers)
         cmd = ["bash", str(kit / "bootstrap.sh"), "--target", str(root), "--force", "--no-doctor",
                "--profile", alias, "--lang", answers.get("lang", "auto"),

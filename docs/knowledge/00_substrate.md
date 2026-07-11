@@ -469,6 +469,21 @@ target escapes root — the actual external-write vector — regardless of wheth
 Lesson: when a guard enumerates "the things that will be written", make sure the enumeration is the SUPERSET
 the writer actually touches (here: every render destination, present and future), not a historical snapshot.
 
+v3.8.13 is Codex's EIGHTH-round re-audit (of v3.8.11) — 6 substantive findings, fixed as ONE combined
+release (operator directive). (P1 external-write) the guard was still enumeration-based; the real fix is at
+the WRITE layer — bootstrap's copy()/render() now `rm -f "$d"` before `cp`/`sed >`, so a symlinked render
+target is replaced by a fresh regular file (no-follow) for EVERY destination; the whole-tree guard stays as
+defense-in-depth. (P1 authority) answers were derived BEFORE the `_auth0` snapshot; now `_auth0` is taken
+FIRST and answers derive EXCLUSIVELY from it (`_answers_from_snapshot`/`_lock_from_snapshot`), with a pre-
+render re-check that ABORTS (root still unmutated) on any authority change — replacing the v3.8.12
+transactional overwrite, which could LOWER a concurrently-raised lock (raise-only violation). (P2 provenance)
+a malformed `owned_file_sha256` (non-dict) is now treated as an UNTRUSTED/ABSENT baseline (—write needs
+—force), not proof of zero drift. (P2 memory) the identity now hashes `st_dev/st_ino/st_nlink` (catches a
+hard-link/alias swap to an external same-content victim) and fails closed if a tracked path's realpath
+ESCAPES root (a symlinked ancestor redirecting to an external tree). Cross-cutting lesson: a tamper-evidence
+signature must pin filesystem IDENTITY (inode/nlink/topology), not just content+mode; and a mutating tool
+should FIX-AT-THE-WRITE (no-follow, snapshot-derived, fail-closed) rather than chase every enumeration gap.
+
 v3.8.10 is Codex's SIXTH-round re-audit (of v3.8.9) — 6 substantive findings (operator stopping rule:
 fix everything substantive until a clean pass). THREE in `memory_log.py`: (a) the hidden-path loop
 hashed `read_bytes()` (follows symlinks) not lstat type/mode or `readlink`, so a retargeted symlink

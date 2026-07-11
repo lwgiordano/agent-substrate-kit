@@ -1737,9 +1737,9 @@ def test_upgrade_refuses_escaping_symlink_outside_baseline(tmp_path) -> None:
 
 
 def test_upgrade_transactional_authority_restores_snapshot(tmp_path, monkeypatch) -> None:
-    """v3.8.11 (P1): if required_profile is raised DURING _backup (after the authority
-    check), the transactional restore must reconstitute the _auth0 snapshot — config+lock
-    consistent (standard/standard), not the raced strict lock beside the old config."""
+    """v3.8.13 (P1): if required_profile is raised DURING _backup (after the authority
+    check), the pre-render re-check must ABORT before any mutation — never render the stale
+    _auth0-derived answers, and never LOWER the raced lock (raise-only preserved)."""
     if not (SCRIPTS / "substrate_upgrade.py").exists():
         return
     repo = _bootstrap_std_repo(tmp_path)
@@ -1751,14 +1751,16 @@ def test_upgrade_transactional_authority_restores_snapshot(tmp_path, monkeypatch
     real_backup = su._backup
 
     def racing_backup(root, dest):
-        # concurrent attacker raises the lock mid-backup, after the authority TOCTOU check
+        # concurrent raise mid-backup, after the first authority TOCTOU check
         (root / ".substrate" / "required_profile").write_text("strict\n", encoding="utf-8")
         return real_backup(root, dest)
 
     monkeypatch.setattr(su, "_backup", racing_backup)
-    su.main(["--from", str(ROOT), "--root", str(repo), "--allow-unverified", "--write", "--force"])
-    assert (repo / ".substrate" / "required_profile").read_text().strip() == "standard", \
-        "raced strict lock survived — restore was not transactional"
+    rc = su.main(["--from", str(ROOT), "--root", str(repo), "--allow-unverified", "--write", "--force"])
+    assert rc == 2, "authority race during backup must abort the upgrade"
+    # the raced raise is NOT lowered (raise-only), and nothing was rendered stale
+    assert (repo / ".substrate" / "required_profile").read_text().strip() == "strict", \
+        "the concurrently-raised lock was lowered — raise-only violated"
     assert 'SUBSTRATE_PROFILE="standard"' in (repo / ".substrate" / "config").read_text()
 
 
@@ -1786,6 +1788,33 @@ def test_upgrade_tolerates_malformed_provenance(tmp_path) -> None:
          "--from", str(ROOT), "--root", str(repo), "--allow-unverified", "--write", "--force"],
         capture_output=True, text=True, timeout=180)
     assert "Traceback" not in wr.stderr and "TypeError" not in wr.stderr, wr.stderr[-400:]
+
+
+def test_upgrade_malformed_drift_map_fails_closed(tmp_path) -> None:
+    """v3.8.13 (P2): a malformed owned_file_sha256 (non-dict) must be treated as an
+    UNTRUSTED/ABSENT baseline — so --write WITHOUT --force is refused — not as proof of
+    zero drift that silently overwrites a locally-modified owned file."""
+    if not (SCRIPTS / "substrate_upgrade.py").exists():
+        return
+    repo = _bootstrap_std_repo(tmp_path)
+    if repo is None:
+        return
+    owned = repo / "scripts" / "check_substrate_config.py"
+    if not owned.is_file():
+        return
+    marker = "# LOCAL EDIT v3.8.13\n"
+    owned.write_text(owned.read_text() + marker, encoding="utf-8")   # local modification
+    ij = repo / ".substrate" / "install.json"
+    if ij.is_file():
+        d = json.loads(ij.read_text())
+        d["owned_file_sha256"] = []          # malformed drift map
+        ij.write_text(json.dumps(d))
+    p = subprocess.run(
+        [sys.executable, "-I", str(repo / "scripts" / "substrate_upgrade.py"),
+         "--from", str(ROOT), "--root", str(repo), "--allow-unverified", "--write"],
+        capture_output=True, text=True, timeout=180)
+    assert p.returncode == 2, (p.returncode, p.stdout[-300:], p.stderr[-300:])
+    assert marker in owned.read_text(), "local edit was overwritten despite a malformed drift map"
 
 
 def test_upgrade_fails_when_provenance_not_written(tmp_path) -> None:
@@ -2064,6 +2093,40 @@ def test_memory_log_verify_detects_filemode_change(tmp_path) -> None:
     (repo / "scripts" / "run_smoke_verification.py").write_text(
         "import os\n"
         "os.chmod('f.txt', 0o755)\n"
+        "raise SystemExit(0)\n", encoding="utf-8")
+    p = subprocess.run([sys.executable, "-I", str(repo / "scripts" / "memory_log.py"),
+                        "skill-run", "self-audit", "--verify"],
+                       cwd=str(repo), capture_output=True, text=True, timeout=60)
+    assert p.returncode != 0, (p.returncode, p.stdout, p.stderr)
+    ev = repo / ".substrate" / "memory" / "events.jsonl"
+    sk = [json.loads(ln) for ln in ev.read_text().splitlines()
+          if '"skill-run"' in ln][-1]
+    assert sk["data"].get("verify_stale") is True and sk["data"]["verified"] is False
+
+
+def test_memory_log_verify_detects_hardlink_swap(tmp_path) -> None:
+    """v3.8.13 (P2): replacing a tracked file with a HARD LINK to an external same-content
+    victim (inode/nlink change, bytes identical) must be detected — the signature now hashes
+    st_dev/st_ino/st_nlink, not just content+mode."""
+    if not (SCRIPTS / "memory_log.py").exists():
+        return
+    repo = tmp_path / "r"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "x@x"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "x"], cwd=repo, check=True)
+    (repo / ".gitignore").write_text("__pycache__/\n", encoding="utf-8")
+    (repo / "f.txt").write_text("same\n", encoding="utf-8")
+    subprocess.run(["git", "add", "f.txt", ".gitignore"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "base"], cwd=repo, check=True)
+    victim = tmp_path / "victim.txt"
+    victim.write_text("same\n", encoding="utf-8")   # identical bytes, different inode
+    _stage(repo, "memory_log.py", "_substrate_root.py")
+    # fake check: replace f.txt with a HARD LINK to the external victim (same content bytes)
+    (repo / "scripts" / "run_smoke_verification.py").write_text(
+        "import os\n"
+        "os.remove('f.txt')\n"
+        f"os.link({str(victim)!r}, 'f.txt')\n"
         "raise SystemExit(0)\n", encoding="utf-8")
     p = subprocess.run([sys.executable, "-I", str(repo / "scripts" / "memory_log.py"),
                         "skill-run", "self-audit", "--verify"],

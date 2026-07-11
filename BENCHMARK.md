@@ -4,7 +4,7 @@ A **reproducible** adversarial eval: every malicious task must BLOCK, every beni
 must be ALLOWED. This turns the substrate's block-rate from a self-description into a
 result anyone can re-run and verify.
 
-- **Version:** 3.8.12
+- **Version:** 3.8.13
 - **Generated:** 2026-07-10
 - **Mode:** full
 - **Host:** Linux x86_64, python 3.11.15; resolved sandbox backend: `none`

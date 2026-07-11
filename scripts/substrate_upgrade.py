@@ -169,15 +169,51 @@ def _drifted(root: Path, baseline: dict | None) -> list[str]:
     file). Preserve-set files are excluded — they are expected to differ."""
     if not baseline:
         return []
+    owned = baseline.get("owned_file_sha256", {})
+    if not isinstance(owned, dict):
+        return []   # malformed agent-writable provenance -> no drift claims (v3.8.11 P2:
+                    # the old `.items()` crashed on a list/scalar owned_file_sha256)
     preserve = set(PRESERVE_FILES)
     out = []
-    for rel, want in baseline.get("owned_file_sha256", {}).items():
+    for rel, want in owned.items():
+        if not isinstance(rel, str) or not isinstance(want, str):
+            continue
         if rel in preserve or rel in _DRIFT_EXCLUDE or any(rel.startswith(d + "/") for d in PRESERVE_DIRS):
             continue
         p = root / rel
-        if p.is_file() and _sha256(p) != want:
+        # is_file()/_sha256 follow symlinks — but a symlinked owned dest is a hard tamper
+        # condition handled by _unsafe_owned_dests (abort), so here we only compare regular
+        # files' content.
+        if p.is_file() and not p.is_symlink() and _sha256(p) != want:
             out.append(rel)
     return sorted(out)
+
+
+def _unsafe_owned_dests(root: Path, baseline: dict | None) -> list[str]:
+    """Owned destinations that are SYMLINKS or resolve OUTSIDE root (v3.8.11 / P1). The
+    render's `cp` would FOLLOW such a link and overwrite a file outside the repo, so these
+    are a hard tamper condition — refused even with --force. Covers both the baseline's
+    owned set and the preserve set."""
+    rootr = root.resolve()
+    owned = baseline.get("owned_file_sha256", {}) if isinstance(baseline, dict) else {}
+    rels = [r for r in owned if isinstance(r, str)] + list(PRESERVE_FILES)
+    bad, seen = [], set()
+    for rel in rels:
+        if rel in seen:
+            continue
+        seen.add(rel)
+        p = root / rel
+        try:
+            if p.is_symlink():
+                bad.append(rel)
+                continue
+            if p.exists():
+                rp = p.resolve()
+                if rp != rootr and rootr not in rp.parents:
+                    bad.append(rel)   # a path component escapes root
+        except Exception:
+            bad.append(rel)   # unresolvable -> unsafe, fail closed
+    return sorted(bad)
 
 
 def _backup(root: Path, dest: Path) -> list[str]:
@@ -322,8 +358,12 @@ def main(argv=None) -> int:
     # supplies them (config default is only a fallback). required_* tiers floored below.
     for _k in ("profile", "lang", "runner", "sandbox", "remote_governance"):
         answers[_k] = _cfg_answers[_k]
+    # ui/workflow come from agent-writable provenance — coerce to a STRING (a forged
+    # ui=[] would otherwise reach subprocess argv and crash the render), falling back to
+    # the config default on any non-string shape (v3.8.11 / P2).
     for _k in ("ui", "workflow"):
-        answers.setdefault(_k, _cfg_answers[_k])
+        _v = answers.get(_k, _cfg_answers[_k])
+        answers[_k] = _v if isinstance(_v, str) else _cfg_answers[_k]
     cur_ver = (baseline or {}).get("kit_version", "unknown")
     if a.profile:
         _rank = {"starter": 0, "standard": 1, "strict": 2}
@@ -416,8 +456,35 @@ def main(argv=None) -> int:
                   "Nothing was changed; re-run.", file=sys.stderr)
             return 2
 
+        # External-write guard (v3.8.11 / P1): refuse if any owned destination is a symlink
+        # or resolves outside root — the render's `cp` would FOLLOW it and overwrite a file
+        # outside the repo. Hard tamper condition: refused even with --force.
+        unsafe = _unsafe_owned_dests(root, baseline)
+        if unsafe:
+            print("upgrade: refusing — owned destination(s) are symlinks or resolve outside "
+                  f"the repo (a render would write outside root): {', '.join(unsafe[:8])}"
+                  + (" …" if len(unsafe) > 8 else "") + ". Restore them to regular in-repo "
+                  "files and re-run.", file=sys.stderr)
+            return 2
+
         backup = tmp / "preserve"
         saved = _backup(root, backup)
+        # Transactional authority (v3.8.11 / P1): the render answers were derived from _auth0;
+        # force the backup's authority files to EXACTLY _auth0 so _restore reconstitutes the
+        # state we rendered from — closing the check->backup gap where a concurrent lock/config
+        # change during _backup would otherwise be restored verbatim (a raised lock beside the
+        # old config, rendering no strict hook).
+        for _rel, _bytes in _auth0.items():
+            _bp = backup / ".substrate" / _rel
+            try:
+                if _bytes is None:
+                    if _bp.exists():
+                        _bp.unlink()
+                else:
+                    _bp.parent.mkdir(parents=True, exist_ok=True)
+                    _bp.write_bytes(_bytes)
+            except Exception:
+                pass
         alias = _profile_alias(answers)
         cmd = ["bash", str(kit / "bootstrap.sh"), "--target", str(root), "--force", "--no-doctor",
                "--profile", alias, "--lang", answers.get("lang", "auto"),
@@ -454,11 +521,23 @@ def main(argv=None) -> int:
         # Do NOT claim success if a finalizer failed (v3.8.10 / P2): a failed
         # write_install_json (e.g. install.json is a directory) leaves drift protection /
         # fresh provenance absent, yet the kit files were already applied — surface it.
-        if mf.returncode != 0 or wj.returncode != 0:
+        # Trust the RESULT on disk, not just the finalizer rc (v3.8.11 / P2): write_install_json
+        # can exit 0 yet not have written (e.g. .substrate/install.json is a DIRECTORY), leaving
+        # provenance/drift-protection silently absent. Verify install.json is now a regular file
+        # carrying the new version.
+        prov_ok = False
+        ij = root / ".substrate" / "install.json"
+        try:
+            if ij.is_file() and not ij.is_symlink():
+                _pj = json.loads(ij.read_text(encoding="utf-8"))
+                prov_ok = isinstance(_pj, dict) and _pj.get("kit_version") == new_ver
+        except Exception:
+            prov_ok = False
+        if mf.returncode != 0 or wj.returncode != 0 or not prov_ok:
             print(f"upgrade: kit files applied, but a FINALIZER FAILED (manifest rc={mf.returncode}, "
-                  f"provenance rc={wj.returncode}) — drift protection / fresh provenance may be "
-                  f"incomplete. Review and re-run.\n{((wj.stderr or '') + (mf.stderr or ''))[-800:]}",
-                  file=sys.stderr)
+                  f"provenance rc={wj.returncode}, provenance_written={prov_ok}) — drift protection / "
+                  f"fresh provenance may be incomplete. Review and re-run.\n"
+                  f"{((wj.stderr or '') + (mf.stderr or ''))[-800:]}", file=sys.stderr)
             return 2
         print(f"substrate upgrade: applied {new_ver}. Review `git diff`, run `./manage.sh check`, then commit.")
         return 0

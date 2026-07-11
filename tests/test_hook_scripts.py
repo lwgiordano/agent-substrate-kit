@@ -1682,6 +1682,109 @@ def test_upgrade_answers_from_config_strips_inline_comments(tmp_path) -> None:
     assert ans["sandbox"] == "1", repr(ans["sandbox"])
 
 
+def _bootstrap_std_repo(tmp_path, name="r"):
+    repo = tmp_path / name
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    r = subprocess.run(["bash", str(ROOT / "bootstrap.sh"), "--target", str(repo),
+                        "--profile", "standard", "--lang", "none", "--no-doctor"],
+                       capture_output=True, text=True, timeout=180)
+    return repo if r.returncode == 0 else None
+
+
+def test_upgrade_refuses_symlinked_owned_dest(tmp_path) -> None:
+    """v3.8.11 (P1): an owned destination replaced with a symlink (to an external victim)
+    must make upgrade REFUSE — else the render's `cp` follows it and writes outside the repo."""
+    if not (SCRIPTS / "substrate_upgrade.py").exists():
+        return
+    repo = _bootstrap_std_repo(tmp_path)
+    if repo is None:
+        return
+    victim = tmp_path / "victim.py"
+    victim.write_text("VICTIM\n", encoding="utf-8")
+    owned = repo / "scripts" / "check_substrate_config.py"
+    if owned.exists():
+        owned.unlink()
+    owned.symlink_to(victim)
+    p = subprocess.run(
+        [sys.executable, "-I", str(repo / "scripts" / "substrate_upgrade.py"),
+         "--from", str(ROOT), "--root", str(repo), "--allow-unverified", "--write", "--force"],
+        capture_output=True, text=True, timeout=180)
+    assert p.returncode == 2, (p.returncode, p.stdout[-300:], p.stderr[-300:])
+    assert victim.read_text() == "VICTIM\n", "external victim was overwritten!"
+
+
+def test_upgrade_transactional_authority_restores_snapshot(tmp_path, monkeypatch) -> None:
+    """v3.8.11 (P1): if required_profile is raised DURING _backup (after the authority
+    check), the transactional restore must reconstitute the _auth0 snapshot — config+lock
+    consistent (standard/standard), not the raced strict lock beside the old config."""
+    if not (SCRIPTS / "substrate_upgrade.py").exists():
+        return
+    repo = _bootstrap_std_repo(tmp_path)
+    if repo is None:
+        return
+    import importlib
+    sys.path.insert(0, str(SCRIPTS))
+    su = importlib.import_module("substrate_upgrade")
+    real_backup = su._backup
+
+    def racing_backup(root, dest):
+        # concurrent attacker raises the lock mid-backup, after the authority TOCTOU check
+        (root / ".substrate" / "required_profile").write_text("strict\n", encoding="utf-8")
+        return real_backup(root, dest)
+
+    monkeypatch.setattr(su, "_backup", racing_backup)
+    su.main(["--from", str(ROOT), "--root", str(repo), "--allow-unverified", "--write", "--force"])
+    assert (repo / ".substrate" / "required_profile").read_text().strip() == "standard", \
+        "raced strict lock survived — restore was not transactional"
+    assert 'SUBSTRATE_PROFILE="standard"' in (repo / ".substrate" / "config").read_text()
+
+
+def test_upgrade_tolerates_malformed_provenance(tmp_path) -> None:
+    """v3.8.11 (P2): a malformed agent-writable install.json (owned_file_sha256 as a list,
+    ui as a list) must not crash upgrade — no AttributeError in plan or write."""
+    if not (SCRIPTS / "substrate_upgrade.py").exists():
+        return
+    repo = _bootstrap_std_repo(tmp_path)
+    if repo is None:
+        return
+    ij = repo / ".substrate" / "install.json"
+    if ij.is_file():
+        d = json.loads(ij.read_text())
+        d["owned_file_sha256"] = []          # wrong type (was a mapping)
+        d.setdefault("answers", {})["ui"] = []   # non-scalar answer
+        ij.write_text(json.dumps(d))
+    plan = subprocess.run(
+        [sys.executable, "-I", str(repo / "scripts" / "substrate_upgrade.py"),
+         "--from", str(ROOT), "--root", str(repo), "--allow-unverified", "--plan"],
+        capture_output=True, text=True, timeout=180)
+    assert "Traceback" not in plan.stderr and "AttributeError" not in plan.stderr, plan.stderr[-400:]
+    wr = subprocess.run(
+        [sys.executable, "-I", str(repo / "scripts" / "substrate_upgrade.py"),
+         "--from", str(ROOT), "--root", str(repo), "--allow-unverified", "--write", "--force"],
+        capture_output=True, text=True, timeout=180)
+    assert "Traceback" not in wr.stderr and "TypeError" not in wr.stderr, wr.stderr[-400:]
+
+
+def test_upgrade_fails_when_provenance_not_written(tmp_path) -> None:
+    """v3.8.11 (P2): if the provenance finalizer cannot write (install.json is a DIRECTORY),
+    upgrade must NOT claim success — it verifies the on-disk result, not just the finalizer rc."""
+    if not (SCRIPTS / "substrate_upgrade.py").exists():
+        return
+    repo = _bootstrap_std_repo(tmp_path)
+    if repo is None:
+        return
+    ij = repo / ".substrate" / "install.json"
+    if ij.exists():
+        ij.unlink()
+    ij.mkdir()   # install.json is now a directory — write_install_json cannot write it
+    p = subprocess.run(
+        [sys.executable, "-I", str(repo / "scripts" / "substrate_upgrade.py"),
+         "--from", str(ROOT), "--root", str(repo), "--allow-unverified", "--write", "--force"],
+        capture_output=True, text=True, timeout=180)
+    assert p.returncode == 2, (p.returncode, p.stdout[-300:], p.stderr[-300:])
+
+
 def test_upgrade_load_install_json_rejects_nonmapping(tmp_path) -> None:
     """v3.8.10 (P2): a non-mapping install.json (agent-writable) is treated as ABSENT,
     not crashed on later `.get()`/`dict()` with an AttributeError."""
@@ -1907,6 +2010,38 @@ def test_memory_log_verify_detects_skip_worktree_change(tmp_path) -> None:
         "import subprocess, pathlib\n"
         "subprocess.run(['git', 'update-index', '--skip-worktree', 'f.txt'], check=True)\n"
         "pathlib.Path('f.txt').write_text('changed-hidden\\n')\n"
+        "raise SystemExit(0)\n", encoding="utf-8")
+    p = subprocess.run([sys.executable, "-I", str(repo / "scripts" / "memory_log.py"),
+                        "skill-run", "self-audit", "--verify"],
+                       cwd=str(repo), capture_output=True, text=True, timeout=60)
+    assert p.returncode != 0, (p.returncode, p.stdout, p.stderr)
+    ev = repo / ".substrate" / "memory" / "events.jsonl"
+    sk = [json.loads(ln) for ln in ev.read_text().splitlines()
+          if '"skill-run"' in ln][-1]
+    assert sk["data"].get("verify_stale") is True and sk["data"]["verified"] is False
+
+
+def test_memory_log_verify_detects_filemode_change(tmp_path) -> None:
+    """v3.8.11 (P2): a tracked file's mode flip (0644->0755) during the check must be
+    detected even with `core.filemode=false` (which makes git NOT report it). The full
+    tracked-content pass hashes lstat mode for EVERY tracked path, read directly from disk,
+    so it no longer relies on git's config-controlled change reporting."""
+    if not (SCRIPTS / "memory_log.py").exists():
+        return
+    repo = tmp_path / "r"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "x@x"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "x"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "core.filemode", "false"], cwd=repo, check=True)
+    (repo / ".gitignore").write_text("__pycache__/\n", encoding="utf-8")
+    (repo / "f.txt").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "f.txt", ".gitignore"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "base"], cwd=repo, check=True)
+    _stage(repo, "memory_log.py", "_substrate_root.py")
+    (repo / "scripts" / "run_smoke_verification.py").write_text(
+        "import os\n"
+        "os.chmod('f.txt', 0o755)\n"
         "raise SystemExit(0)\n", encoding="utf-8")
     p = subprocess.run([sys.executable, "-I", str(repo / "scripts" / "memory_log.py"),
                         "skill-run", "self-audit", "--verify"],

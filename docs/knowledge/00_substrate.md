@@ -444,6 +444,21 @@ The memory content-signature has now been hardened across three rounds (working 
 +skip-worktree/flags) — a good illustration that a "hash the tree" evidence primitive has many git
 escape hatches (ext-diff/textconv, C-quoting, the index, assume-unchanged) each needing explicit cover.
 
+v3.8.11 is Codex's SEVENTH-round re-audit (of v3.8.10) — 6 substantive findings incl. an external-write
+P1. UPGRADE: (P1) `_drifted`/bootstrap `cp` followed a symlinked owned destination → an external write;
+added `_unsafe_owned_dests` (refuse if any owned dest is a symlink or resolves outside root, even with
+--force). (P1) the authority TOCTOU still had a check→backup gap; made restore TRANSACTIONAL — the
+backup's authority files are forced to the `_auth0` snapshot the answers were derived from. (P2) partial
+provenance schema — `_drifted` guards a non-dict `owned_file_sha256`, and `ui`/`workflow` are coerced to
+strings before argv; (P2) the finalizer is trusted by RESULT (install.json is a regular file carrying the
+new version), not just its exit code. MEMORY: the three findings (gitlink/fsmonitor/filemode) shared one
+root cause — trusting git's *change-reporting*, which mutable config/env/flags control. Fixed
+architecturally with a FULL tracked-content pass: enumerate every tracked path (`ls-files -z`, fsmonitor
+off) and hash its lstat type/mode + content (symlink target / file bytes / gitlink HEAD) read directly
+from the filesystem; plus `_clean_env` now strips `GIT_CONFIG*` and every snapshot command runs with
+`-c core.fsmonitor=false`. Lesson: don't ask git "what changed" for a tamper-evidence signature — read
+the filesystem yourself for the full tracked set, because every git reporting path is config-steerable.
+
 v3.8.10 is Codex's SIXTH-round re-audit (of v3.8.9) — 6 substantive findings (operator stopping rule:
 fix everything substantive until a clean pass). THREE in `memory_log.py`: (a) the hidden-path loop
 hashed `read_bytes()` (follows symlinks) not lstat type/mode or `readlink`, so a retargeted symlink

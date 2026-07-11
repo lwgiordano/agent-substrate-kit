@@ -165,20 +165,38 @@ _GIT_ROUTING_VARS = (
 
 
 def _clean_env() -> dict:
-    """os.environ minus git REPO-ROUTING vars (v3.8.10): a snapshot command that
-    inherited GIT_INDEX_FILE / GIT_DIR / GIT_WORK_TREE could be pointed at a DIFFERENT
-    index/repo — authenticating a clean alternate while the real tree changed. Stripping
-    them forces git to discover the repo from cwd (ROOT)."""
+    """os.environ minus git REPO-ROUTING and CONFIG-INJECTION vars (v3.8.10/v3.8.11): a
+    snapshot command that inherited GIT_INDEX_FILE / GIT_DIR / GIT_WORK_TREE could be
+    pointed at a DIFFERENT index/repo, and GIT_CONFIG* (GIT_CONFIG_COUNT/KEY_n/VALUE_n,
+    GIT_CONFIG_GLOBAL/SYSTEM) could inject config (e.g. a lying core.fsmonitor) that makes
+    git under-report changes. Stripping them forces git to discover the repo from cwd
+    (ROOT) with only its own on-disk config."""
     e = dict(os.environ)
     for k in _GIT_ROUTING_VARS:
+        e.pop(k, None)
+    for k in [k for k in e if k.startswith("GIT_CONFIG")]:
         e.pop(k, None)
     return e
 
 
 def _git_s(*args: str) -> str:
-    """git in ROOT under the SANITIZED env; stripped stdout, "" on any failure."""
+    """git in ROOT under the SANITIZED env with fsmonitor DISABLED (v3.8.11 — a lying
+    fsmonitor hook must not shape a snapshot); stripped stdout, "" on any failure."""
     try:
-        p = subprocess.run(["git", *args], cwd=ROOT, capture_output=True, text=True,
+        p = subprocess.run(["git", "-c", "core.fsmonitor=false", *args], cwd=ROOT,
+                          capture_output=True, text=True, timeout=15, env=_clean_env())
+        return p.stdout.strip() if p.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+def _submodule_head(path: Path) -> str:
+    """Checked-out commit OID of a gitlink (submodule) worktree, under the sanitized
+    env; "" on failure. Lets the tracked-content signature catch a submodule commit
+    switch that leaves the outer repo's porcelain/index unchanged (v3.8.11)."""
+    try:
+        p = subprocess.run(["git", "-c", "core.fsmonitor=false", "-C", str(path),
+                            "rev-parse", "HEAD"], capture_output=True, text=True,
                           timeout=15, env=_clean_env())
         return p.stdout.strip() if p.returncode == 0 else ""
     except Exception:
@@ -255,7 +273,8 @@ def skill_run(name: str, result: str, note: str, verify: bool = False) -> int:
         render a real change as empty). (v3.8.7 — replaces the v3.8.6 porcelain-string
         + git-diff signature blind to ext-diff/textconv and C-quoted untracked paths.)"""
         try:
-            st = subprocess.run(["git", "status", "--porcelain", "-z", "-uall"],
+            st = subprocess.run(["git", "-c", "core.fsmonitor=false", "status",
+                                 "--porcelain", "-z", "-uall"],
                                 cwd=ROOT, capture_output=True, timeout=15, env=_clean_env())
             if st.returncode != 0:
                 return None, None
@@ -305,8 +324,8 @@ def skill_run(name: str, result: str, note: str, verify: bool = False) -> int:
         # the staged mode/OID/stage/path of every tracked entry, so any staged content
         # change flips an OID. Read failure -> fail closed.
         try:
-            idx = subprocess.run(["git", "ls-files", "-s", "-z"], cwd=ROOT,
-                                capture_output=True, timeout=15, env=_clean_env())
+            idx = subprocess.run(["git", "-c", "core.fsmonitor=false", "ls-files", "-s", "-z"],
+                                cwd=ROOT, capture_output=True, timeout=15, env=_clean_env())
         except Exception:
             return lines, None
         if idx.returncode != 0:
@@ -320,8 +339,8 @@ def skill_run(name: str, result: str, note: str, verify: bool = False) -> int:
         # every flagged path (catches a content change to one ALREADY flagged); fail closed
         # on read failure.
         try:
-            lv = subprocess.run(["git", "ls-files", "-v", "-z"], cwd=ROOT,
-                                capture_output=True, timeout=15, env=_clean_env())
+            lv = subprocess.run(["git", "-c", "core.fsmonitor=false", "ls-files", "-v", "-z"],
+                                cwd=ROOT, capture_output=True, timeout=15, env=_clean_env())
         except Exception:
             return lines, None
         if lv.returncode != 0:
@@ -359,6 +378,48 @@ def skill_run(name: str, result: str, note: str, verify: bool = False) -> int:
                     h.update(b"\0absent\0")
                 except Exception:
                     return lines, None
+        # FULL tracked-content identity (v3.8.11): mutable git config/env/flags — fsmonitor,
+        # core.filemode, skip-worktree, assume-unchanged — all control what git REPORTS as
+        # changed, so trusting status/ls-files flags is a losing game. Read the filesystem
+        # OURSELVES: enumerate EVERY tracked path (`ls-files -z`, fsmonitor disabled) and hash
+        # its lstat type/mode + content (symlink target / file bytes / gitlink HEAD). This
+        # catches a metadata or content change to ANY tracked file regardless of how git is
+        # told to hide it (filemode=false mode flip, fsmonitor-valid lie, hidden flags). Fail
+        # closed on any read error.
+        try:
+            tk = subprocess.run(["git", "-c", "core.fsmonitor=false", "ls-files", "-z"],
+                                cwd=ROOT, capture_output=True, timeout=30, env=_clean_env())
+        except Exception:
+            return lines, None
+        if tk.returncode != 0:
+            return lines, None
+        h.update(b"\0tracked\0")
+        for pb in tk.stdout.split(b"\0"):
+            if not pb:
+                continue
+            fp = Path(os.fsdecode(pb))
+            fp = fp if fp.is_absolute() else (ROOT / fp)
+            h.update(pb)
+            h.update(b"\0")
+            try:
+                stt = fp.lstat()
+                h.update(f"{stat.S_IFMT(stt.st_mode)}:{stat.S_IMODE(stt.st_mode)}".encode())
+                if stat.S_ISLNK(stt.st_mode):
+                    h.update(b"\0lnk\0")
+                    h.update(os.readlink(fp).encode("utf-8", "surrogateescape"))
+                elif stat.S_ISREG(stt.st_mode):
+                    h.update(b"\0reg\0")
+                    h.update(fp.read_bytes())
+                elif stat.S_ISDIR(stt.st_mode):
+                    # gitlink (submodule): hash its checked-out HEAD so a commit switch shows
+                    h.update(b"\0gitlink\0")
+                    h.update(_submodule_head(fp).encode())
+                else:
+                    h.update(b"\0oth\0")
+            except FileNotFoundError:
+                h.update(b"\0absent\0")
+            except Exception:
+                return lines, None
         return lines, h.hexdigest()
 
     def _identity():

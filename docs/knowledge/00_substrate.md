@@ -459,6 +459,16 @@ from the filesystem; plus `_clean_env` now strips `GIT_CONFIG*` and every snapsh
 `-c core.fsmonitor=false`. Lesson: don't ask git "what changed" for a tamper-evidence signature — read
 the filesystem yourself for the full tracked set, because every git reporting path is config-steerable.
 
+v3.8.12 is CLAUDE-self-found (staying ahead of the audit loop): the v3.8.11 external-write guard was
+INCOMPLETE. bootstrap's `copy()` (`cp "$s" "$d"`) and `render()` (`sed … > "$d"`) both FOLLOW a
+symlinked destination, and they write to EVERY rendered path — but `_unsafe_owned_dests` only checked the
+OLD baseline's owned set + preserve files, so a symlink planted at a NEW-version render target (a path not
+in the old baseline) was still followed → external write. `_unsafe_owned_dests` now ALSO does a whole-tree
+scan (`os.walk`, followlinks=False, skipping .git/venv/caches) and refuses ANY symlink under root whose
+target escapes root — the actual external-write vector — regardless of whether the path is baseline-listed.
+Lesson: when a guard enumerates "the things that will be written", make sure the enumeration is the SUPERSET
+the writer actually touches (here: every render destination, present and future), not a historical snapshot.
+
 v3.8.10 is Codex's SIXTH-round re-audit (of v3.8.9) — 6 substantive findings (operator stopping rule:
 fix everything substantive until a clean pass). THREE in `memory_log.py`: (a) the hidden-path loop
 hashed `read_bytes()` (follows symlinks) not lstat type/mode or `readlink`, so a retargeted symlink

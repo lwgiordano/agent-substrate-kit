@@ -1714,6 +1714,28 @@ def test_upgrade_refuses_symlinked_owned_dest(tmp_path) -> None:
     assert victim.read_text() == "VICTIM\n", "external victim was overwritten!"
 
 
+def test_upgrade_refuses_escaping_symlink_outside_baseline(tmp_path) -> None:
+    """v3.8.12 (P1): the external-write guard must also catch a symlink at a path NOT in the
+    old baseline — bootstrap's cp/sed> follow it too, and it writes to every rendered path.
+    Whole-tree escaping-symlink scan."""
+    if not (SCRIPTS / "substrate_upgrade.py").exists():
+        return
+    repo = _bootstrap_std_repo(tmp_path)
+    if repo is None:
+        return
+    victim = tmp_path / "victim2.py"
+    victim.write_text("VICTIM2\n", encoding="utf-8")
+    # a path that is NOT tracked in the baseline owned set
+    sneak = repo / "scripts" / "__sneak.py"
+    sneak.symlink_to(victim)
+    p = subprocess.run(
+        [sys.executable, "-I", str(repo / "scripts" / "substrate_upgrade.py"),
+         "--from", str(ROOT), "--root", str(repo), "--allow-unverified", "--write", "--force"],
+        capture_output=True, text=True, timeout=180)
+    assert p.returncode == 2, (p.returncode, p.stdout[-300:], p.stderr[-300:])
+    assert victim.read_text() == "VICTIM2\n", "external victim (non-baseline path) was overwritten!"
+
+
 def test_upgrade_transactional_authority_restores_snapshot(tmp_path, monkeypatch) -> None:
     """v3.8.11 (P1): if required_profile is raised DURING _backup (after the authority
     check), the transactional restore must reconstitute the _auth0 snapshot — config+lock

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -189,30 +190,54 @@ def _drifted(root: Path, baseline: dict | None) -> list[str]:
     return sorted(out)
 
 
+_SYMLINK_SCAN_SKIP = {".git", "venv", ".venv", "node_modules", "__pycache__",
+                      ".pytest_cache", ".ruff_cache", ".mypy_cache"}
+
+
 def _unsafe_owned_dests(root: Path, baseline: dict | None) -> list[str]:
-    """Owned destinations that are SYMLINKS or resolve OUTSIDE root (v3.8.11 / P1). The
-    render's `cp` would FOLLOW such a link and overwrite a file outside the repo, so these
-    are a hard tamper condition — refused even with --force. Covers both the baseline's
-    owned set and the preserve set."""
+    """Destinations a render `cp`/`sed >` would FOLLOW to write outside the repo (P1).
+    bootstrap's copy()/render() follow a symlinked destination, and they write to EVERY
+    rendered path — not just the ones the OLD baseline recorded — so a v3.8.11 check of
+    only the baseline+preserve set missed a symlink planted at a NEW-version path. This
+    now does TWO things (v3.8.12):
+      1. Flag any SYMLINK at a baseline-owned / preserve path (even one pointing in-repo).
+      2. Whole-tree scan: flag ANY symlink anywhere under root whose target ESCAPES root —
+         the external-write vector, regardless of whether the path is in the baseline.
+    Hard tamper condition — refused even with --force."""
     rootr = root.resolve()
-    owned = baseline.get("owned_file_sha256", {}) if isinstance(baseline, dict) else {}
-    rels = [r for r in owned if isinstance(r, str)] + list(PRESERVE_FILES)
     bad, seen = [], set()
-    for rel in rels:
-        if rel in seen:
-            continue
-        seen.add(rel)
+
+    def _flag(rel):
+        if rel not in seen:
+            seen.add(rel)
+            bad.append(rel)
+
+    owned = baseline.get("owned_file_sha256", {}) if isinstance(baseline, dict) else {}
+    for rel in [r for r in owned if isinstance(r, str)] + list(PRESERVE_FILES):
         p = root / rel
         try:
             if p.is_symlink():
-                bad.append(rel)
-                continue
-            if p.exists():
+                _flag(rel)
+            elif p.exists():
                 rp = p.resolve()
                 if rp != rootr and rootr not in rp.parents:
-                    bad.append(rel)   # a path component escapes root
+                    _flag(rel)   # a path component escapes root
         except Exception:
-            bad.append(rel)   # unresolvable -> unsafe, fail closed
+            _flag(rel)           # unresolvable -> unsafe, fail closed
+    # Whole-tree escaping-symlink scan (followlinks=False so we never descend a link).
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        dirnames[:] = [d for d in dirnames if d not in _SYMLINK_SCAN_SKIP]
+        for name in list(dirnames) + filenames:
+            p = Path(dirpath) / name
+            if not p.is_symlink():
+                continue
+            rel = os.path.relpath(p, root)
+            try:
+                rp = p.resolve()
+                if rp != rootr and rootr not in rp.parents:
+                    _flag(rel)
+            except Exception:
+                _flag(rel)       # dangling / unresolvable link -> unsafe, fail closed
     return sorted(bad)
 
 

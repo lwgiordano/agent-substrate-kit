@@ -190,17 +190,26 @@ def _git_s(*args: str) -> str:
         return ""
 
 
-def _submodule_head(path: Path) -> str:
-    """Checked-out commit OID of a gitlink (submodule) worktree, under the sanitized
-    env; "" on failure. Lets the tracked-content signature catch a submodule commit
-    switch that leaves the outer repo's porcelain/index unchanged (v3.8.11)."""
+def _submodule_state(path: Path) -> str:
+    """Identity of a gitlink (submodule) worktree: its checked-out HEAD PLUS its dirty
+    index/worktree porcelain, under the sanitized env; "" on failure. Catches BOTH a commit
+    switch AND a same-HEAD dirty change to the submodule contents (v3.8.14 — v3.8.11 hashed
+    only HEAD, so a dirty same-HEAD submodule authenticated as unchanged)."""
+    head, status = "", ""
     try:
         p = subprocess.run(["git", "-c", "core.fsmonitor=false", "-C", str(path),
                             "rev-parse", "HEAD"], capture_output=True, text=True,
                           timeout=15, env=_clean_env())
-        return p.stdout.strip() if p.returncode == 0 else ""
+        if p.returncode == 0:
+            head = p.stdout.strip()
+        s = subprocess.run(["git", "-c", "core.fsmonitor=false", "-C", str(path),
+                            "status", "--porcelain", "-z", "-uall"], capture_output=True,
+                          text=True, timeout=15, env=_clean_env())
+        if s.returncode == 0:
+            status = s.stdout
     except Exception:
         return ""
+    return head + "\0status\0" + status
 
 
 def _git(*args: str) -> str:
@@ -297,7 +306,18 @@ def skill_run(name: str, result: str, note: str, verify: bool = False) -> int:
                 lines[-1] += " <- " + old.decode("utf-8", "surrogateescape")
             i += 1
         h = hashlib.sha256()
-        h.update("\n".join(lines).encode("utf-8", "surrogateescape"))
+
+        def _hu(*parts):
+            # Length-prefix EVERY variable field so record boundaries cannot collide
+            # (v3.8.14 / P1): the old `path + NUL + content` concatenation was ambiguous —
+            # one record's content could absorb the next record's `path\0`, so two DIFFERENT
+            # trees hashed to the SAME byte stream. An 8-byte big-endian length before each
+            # field makes the encoding injective.
+            for p in parts:
+                h.update(len(p).to_bytes(8, "big"))
+                h.update(p)
+
+        _hu(b"status", "\n".join(lines).encode("utf-8", "surrogateescape"))
         for xy, path_b in paths:
             if "D" in xy:            # deleted: no working-tree file to hash
                 continue
@@ -305,24 +325,20 @@ def skill_run(name: str, result: str, note: str, verify: bool = False) -> int:
             fp = fp if fp.is_absolute() else (ROOT / fp)
             try:
                 if fp.is_symlink():
-                    h.update(path_b + b"\0symlink\0")
-                    h.update(os.readlink(fp).encode("utf-8", "surrogateescape"))
+                    _hu(path_b, b"symlink", os.readlink(fp).encode("utf-8", "surrogateescape"))
                 elif fp.is_file():
-                    h.update(path_b + b"\0")
-                    h.update(fp.read_bytes())
+                    _hu(path_b, b"file", fp.read_bytes())
                 elif fp.is_dir():    # defensive (-uall lists files, not dirs)
                     for sub in sorted(fp.rglob("*")):
                         if sub.is_file():
-                            h.update(str(sub).encode("utf-8", "surrogateescape"))
-                            h.update(sub.read_bytes())
+                            _hu(str(sub).encode("utf-8", "surrogateescape"), b"subfile", sub.read_bytes())
                 else:
                     return lines, None   # git reports it changed but it's absent
             except Exception:
                 return lines, None       # unreadable -> fail closed
-        # Index identity (v3.8.8): a staged-blob swap that leaves working-tree bytes and
-        # the porcelain letters unchanged is otherwise invisible. `ls-files -s -z` lists
-        # the staged mode/OID/stage/path of every tracked entry, so any staged content
-        # change flips an OID. Read failure -> fail closed.
+        # Index identity (v3.8.8): a staged-blob swap that leaves working-tree bytes and the
+        # porcelain letters unchanged is otherwise invisible. `ls-files -s -z` lists the staged
+        # mode/OID/stage/path of every tracked entry. Read failure -> fail closed.
         try:
             idx = subprocess.run(["git", "-c", "core.fsmonitor=false", "ls-files", "-s", "-z"],
                                 cwd=ROOT, capture_output=True, timeout=15, env=_clean_env())
@@ -330,14 +346,10 @@ def skill_run(name: str, result: str, note: str, verify: bool = False) -> int:
             return lines, None
         if idx.returncode != 0:
             return lines, None
-        h.update(b"\0index\0")
-        h.update(idx.stdout)
-        # skip-worktree / assume-unchanged HIDE a tracked path from porcelain AND leave its
-        # staged OID unchanged, so a change to its working bytes is otherwise invisible
-        # (v3.8.9). `ls-files -v -z` tags each entry: a lowercase tag = assume-unchanged,
-        # 'S' = skip-worktree. Hash the flag map (catches a toggle) AND the on-disk bytes of
-        # every flagged path (catches a content change to one ALREADY flagged); fail closed
-        # on read failure.
+        _hu(b"index", idx.stdout)
+        # skip-worktree / assume-unchanged flag MAP (v3.8.9): a flag TOGGLE must show. The
+        # CONTENT of flagged paths is covered by the full tracked pass below (which enumerates
+        # ALL tracked paths regardless of flags), so this only records the flag map now.
         try:
             lv = subprocess.run(["git", "-c", "core.fsmonitor=false", "ls-files", "-v", "-z"],
                                 cwd=ROOT, capture_output=True, timeout=15, env=_clean_env())
@@ -345,47 +357,13 @@ def skill_run(name: str, result: str, note: str, verify: bool = False) -> int:
             return lines, None
         if lv.returncode != 0:
             return lines, None
-        h.update(b"\0flags\0")
-        h.update(lv.stdout)
-        for rec in lv.stdout.split(b"\0"):
-            if len(rec) < 3 or rec[1:2] != b" ":
-                continue
-            tag = rec[0:1]
-            if tag.islower() or tag == b"S":
-                pb = rec[2:]
-                fp = Path(os.fsdecode(pb))
-                fp = fp if fp.is_absolute() else (ROOT / fp)
-                h.update(b"\0hidden\0")
-                h.update(pb)
-                h.update(b"\0")
-                try:
-                    # lstat (NO deref): a mode flip (0644->0755), a file<->symlink swap, or
-                    # a symlink RETARGET to an identical-bytes file were all invisible to a
-                    # plain read_bytes() (which follows the link) (v3.8.10).
-                    stt = fp.lstat()
-                    h.update(f"{stat.S_IFMT(stt.st_mode)}:{stat.S_IMODE(stt.st_mode)}".encode())
-                    if stat.S_ISLNK(stt.st_mode):
-                        h.update(b"\0lnk\0")
-                        h.update(os.readlink(fp).encode("utf-8", "surrogateescape"))
-                    elif stat.S_ISREG(stt.st_mode):
-                        h.update(b"\0reg\0")
-                        h.update(fp.read_bytes())
-                    elif stat.S_ISDIR(stt.st_mode):
-                        h.update(b"\0dir\0")   # flagged gitlink/dir — type recorded, not walked
-                    else:
-                        h.update(b"\0oth\0")
-                except FileNotFoundError:
-                    h.update(b"\0absent\0")
-                except Exception:
-                    return lines, None
+        _hu(b"flags", lv.stdout)
         # FULL tracked-content identity (v3.8.11): mutable git config/env/flags — fsmonitor,
         # core.filemode, skip-worktree, assume-unchanged — all control what git REPORTS as
         # changed, so trusting status/ls-files flags is a losing game. Read the filesystem
         # OURSELVES: enumerate EVERY tracked path (`ls-files -z`, fsmonitor disabled) and hash
-        # its lstat type/mode + content (symlink target / file bytes / gitlink HEAD). This
-        # catches a metadata or content change to ANY tracked file regardless of how git is
-        # told to hide it (filemode=false mode flip, fsmonitor-valid lie, hidden flags). Fail
-        # closed on any read error.
+        # its lstat identity + content (symlink target / file bytes / gitlink HEAD+dirty state).
+        # Fail closed on any read error.
         try:
             tk = subprocess.run(["git", "-c", "core.fsmonitor=false", "ls-files", "-z"],
                                 cwd=ROOT, capture_output=True, timeout=30, env=_clean_env())
@@ -393,15 +371,13 @@ def skill_run(name: str, result: str, note: str, verify: bool = False) -> int:
             return lines, None
         if tk.returncode != 0:
             return lines, None
-        h.update(b"\0tracked\0")
+        _hu(b"tracked")
         rootr = os.path.realpath(ROOT)
         for pb in tk.stdout.split(b"\0"):
             if not pb:
                 continue
             fp = Path(os.fsdecode(pb))
             fp = fp if fp.is_absolute() else (ROOT / fp)
-            h.update(pb)
-            h.update(b"\0")
             try:
                 # No-follow ancestor topology (v3.8.13): if the symlink-resolved real path
                 # ESCAPES root, a symlinked ANCESTOR is redirecting this tracked path to an
@@ -412,22 +388,20 @@ def skill_run(name: str, result: str, note: str, verify: bool = False) -> int:
                 stt = fp.lstat()
                 # st_dev/st_ino/st_nlink (v3.8.13): catch a hard-link/alias swap to an external
                 # same-content victim (inode + link count change while the bytes stay identical).
-                h.update(f"{stat.S_IFMT(stt.st_mode)}:{stat.S_IMODE(stt.st_mode)}:"
-                         f"{stt.st_dev}:{stt.st_ino}:{stt.st_nlink}".encode())
+                meta = (f"{stat.S_IFMT(stt.st_mode)}:{stat.S_IMODE(stt.st_mode)}:"
+                        f"{stt.st_dev}:{stt.st_ino}:{stt.st_nlink}").encode()
                 if stat.S_ISLNK(stt.st_mode):
-                    h.update(b"\0lnk\0")
-                    h.update(os.readlink(fp).encode("utf-8", "surrogateescape"))
+                    _hu(pb, b"lnk", meta, os.readlink(fp).encode("utf-8", "surrogateescape"))
                 elif stat.S_ISREG(stt.st_mode):
-                    h.update(b"\0reg\0")
-                    h.update(fp.read_bytes())
+                    _hu(pb, b"reg", meta, fp.read_bytes())
                 elif stat.S_ISDIR(stt.st_mode):
-                    # gitlink (submodule): hash its checked-out HEAD so a commit switch shows
-                    h.update(b"\0gitlink\0")
-                    h.update(_submodule_head(fp).encode())
+                    # gitlink (submodule): HEAD + dirty worktree/index state (v3.8.14), so a
+                    # commit switch AND a same-HEAD dirty change to the submodule both show.
+                    _hu(pb, b"gitlink", meta, _submodule_state(fp).encode("utf-8", "surrogateescape"))
                 else:
-                    h.update(b"\0oth\0")
+                    _hu(pb, b"oth", meta)
             except FileNotFoundError:
-                h.update(b"\0absent\0")
+                _hu(pb, b"absent")
             except Exception:
                 return lines, None
         return lines, h.hexdigest()

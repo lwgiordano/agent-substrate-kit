@@ -484,6 +484,22 @@ ESCAPES root (a symlinked ancestor redirecting to an external tree). Cross-cutti
 signature must pin filesystem IDENTITY (inode/nlink/topology), not just content+mode; and a mutating tool
 should FIX-AT-THE-WRITE (no-follow, snapshot-derived, fail-closed) rather than chase every enumeration gap.
 
+v3.8.14 is Codex's NINTH-round re-audit (of v3.8.13) — 5 substantive findings, fixed combined. (P1
+hash-canonicalization) the memory signature concatenated `path + NUL + content` without length-prefixes,
+so two DIFFERENT untracked-file states hashed to the SAME byte stream (a record-boundary collision). Fixed
+with an injective encoding: `_hu()` length-prefixes EVERY variable field (8-byte big-endian). (P1 symlinked
+PARENT) the v3.8.13 write-layer `rm -f "$d"` removed only the leaf; a symlinked ANCESTOR dir was still
+followed by cp/mkdir. bootstrap now refuses at startup if ANY symlink in the target escapes it (python3
+os.walk realpath scan) — guarding DIRECT bootstrap, not only the upgrade path (which the _unsafe_owned_dests
+tree scan already covered). (P1 authority race) the check->render window let a concurrent raise be clobbered;
+the upgrade now captures the locks as the LAST read before the render and reconciles required_* RAISE-ONLY
+after restore (never lowers a concurrent raise) — the residual sub-ms window vs a non-cooperating raw writer
+is documented, not silently claimed closed. (P2 dirty gitlink) the gitlink identity now hashes HEAD + the
+submodule's dirty porcelain, not just HEAD. (P2 missing drift map) a MISSING owned_file_sha256 key (not only
+a non-dict value) now makes the baseline untrusted/absent (--write needs --force). Cross-cutting: hash
+encodings feeding a security decision must be INJECTIVE (length-prefix), and "remove the leaf before writing"
+is not "no-follow" until ancestors are covered too.
+
 v3.8.10 is Codex's SIXTH-round re-audit (of v3.8.9) — 6 substantive findings (operator stopping rule:
 fix everything substantive until a clean pass). THREE in `memory_log.py`: (a) the hidden-path loop
 hashed `read_bytes()` (follows symlinks) not lstat type/mode or `readlink`, so a retargeted symlink

@@ -1817,6 +1817,78 @@ def test_upgrade_malformed_drift_map_fails_closed(tmp_path) -> None:
     assert marker in owned.read_text(), "local edit was overwritten despite a malformed drift map"
 
 
+def test_upgrade_missing_drift_map_key_fails_closed(tmp_path) -> None:
+    """v3.8.14 (P2): a MISSING owned_file_sha256 key (not just a non-dict value) must also
+    make the baseline untrusted/absent — --write without --force is refused, not treated as
+    zero drift that silently overwrites a local edit."""
+    if not (SCRIPTS / "substrate_upgrade.py").exists():
+        return
+    repo = _bootstrap_std_repo(tmp_path)
+    if repo is None:
+        return
+    owned = repo / "scripts" / "check_substrate_config.py"
+    if not owned.is_file():
+        return
+    marker = "# LOCAL EDIT missing-key\n"
+    owned.write_text(owned.read_text() + marker, encoding="utf-8")
+    ij = repo / ".substrate" / "install.json"
+    if ij.is_file():
+        d = json.loads(ij.read_text())
+        d.pop("owned_file_sha256", None)     # DELETE the drift map key entirely
+        ij.write_text(json.dumps(d))
+    p = subprocess.run(
+        [sys.executable, "-I", str(repo / "scripts" / "substrate_upgrade.py"),
+         "--from", str(ROOT), "--root", str(repo), "--allow-unverified", "--write"],
+        capture_output=True, text=True, timeout=180)
+    assert p.returncode == 2, (p.returncode, p.stdout[-300:], p.stderr[-300:])
+    assert marker in owned.read_text(), "local edit overwritten despite a missing drift map"
+
+
+def test_upgrade_raise_only_reconciles_concurrent_raise(tmp_path, monkeypatch) -> None:
+    """v3.8.14 (P1): a concurrent raise landing in the check->render window must SURVIVE — the
+    upgrade reconciles required_* locks raise-only after restore, never lowering them."""
+    if not (SCRIPTS / "substrate_upgrade.py").exists():
+        return
+    repo = _bootstrap_std_repo(tmp_path)
+    if repo is None:
+        return
+    import importlib
+    sys.path.insert(0, str(SCRIPTS))
+    su = importlib.import_module("substrate_upgrade")
+    real_alias = su._profile_alias
+
+    def racing_alias(ans):
+        # runs AFTER the final authority check but before the lock capture -> a raise here
+        # is captured by _locks_pre and must be reconciled back up after bootstrap+restore.
+        (repo / ".substrate" / "required_profile").write_text("strict\n", encoding="utf-8")
+        return real_alias(ans)
+
+    monkeypatch.setattr(su, "_profile_alias", racing_alias)
+    su.main(["--from", str(ROOT), "--root", str(repo), "--allow-unverified", "--write", "--force"])
+    assert (repo / ".substrate" / "required_profile").read_text().strip() == "strict", \
+        "concurrent raise was lowered — raise-only reconciliation failed"
+
+
+def test_bootstrap_refuses_symlinked_parent_escape(tmp_path) -> None:
+    """v3.8.14 (P1): DIRECT bootstrap must refuse when a target subdir is a symlink escaping
+    the repo — the v3.8.13 leaf-only rm -f did not cover a symlinked PARENT dir, so cp/mkdir
+    would write outside the repo."""
+    if not (ROOT / "bootstrap.sh").exists():
+        return
+    external = tmp_path / "external_scripts"
+    external.mkdir()
+    (external / "victim.py").write_text("VICTIM\n", encoding="utf-8")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    (repo / "scripts").symlink_to(external)   # symlinked PARENT dir -> outside the repo
+    p = subprocess.run(["bash", str(ROOT / "bootstrap.sh"), "--target", str(repo),
+                        "--profile", "standard", "--lang", "none", "--no-doctor", "--force"],
+                       capture_output=True, text=True, timeout=120)
+    assert p.returncode == 2, (p.returncode, p.stdout[-300:], p.stderr[-300:])
+    assert (external / "victim.py").read_text() == "VICTIM\n", "external victim was overwritten!"
+
+
 def test_upgrade_fails_when_provenance_not_written(tmp_path) -> None:
     """v3.8.11 (P2): if the provenance finalizer cannot write (install.json is a DIRECTORY),
     upgrade must NOT claim success — it verifies the on-disk result, not just the finalizer rc."""
@@ -1849,8 +1921,15 @@ def test_upgrade_load_install_json_rejects_nonmapping(tmp_path) -> None:
     for bad in ('"attacker-controlled"', "[1, 2, 3]", "42", "null"):
         (sub / "install.json").write_text(bad, encoding="utf-8")
         assert su._load_install_json(tmp_path) is None, bad
+    # v3.8.14: a dict WITHOUT a valid owned_file_sha256 map is now UNTRUSTED/absent too.
     (sub / "install.json").write_text('{"answers": {"profile": "strict"}}', encoding="utf-8")
-    assert su._load_install_json(tmp_path) == {"answers": {"profile": "strict"}}
+    assert su._load_install_json(tmp_path) is None
+    (sub / "install.json").write_text('{"answers": {"profile": "strict"}, "owned_file_sha256": []}',
+                                       encoding="utf-8")
+    assert su._load_install_json(tmp_path) is None
+    ok = {"answers": {"profile": "strict"}, "owned_file_sha256": {}}
+    (sub / "install.json").write_text(json.dumps(ok), encoding="utf-8")
+    assert su._load_install_json(tmp_path) == ok
 
 
 def test_upgrade_authority_snapshot_detects_lock_change(tmp_path) -> None:
@@ -2127,6 +2206,80 @@ def test_memory_log_verify_detects_hardlink_swap(tmp_path) -> None:
         "import os\n"
         "os.remove('f.txt')\n"
         f"os.link({str(victim)!r}, 'f.txt')\n"
+        "raise SystemExit(0)\n", encoding="utf-8")
+    p = subprocess.run([sys.executable, "-I", str(repo / "scripts" / "memory_log.py"),
+                        "skill-run", "self-audit", "--verify"],
+                       cwd=str(repo), capture_output=True, text=True, timeout=60)
+    assert p.returncode != 0, (p.returncode, p.stdout, p.stderr)
+    ev = repo / ".substrate" / "memory" / "events.jsonl"
+    sk = [json.loads(ln) for ln in ev.read_text().splitlines()
+          if '"skill-run"' in ln][-1]
+    assert sk["data"].get("verify_stale") is True and sk["data"]["verified"] is False
+
+
+def test_memory_log_verify_record_boundary_no_collision(tmp_path) -> None:
+    """v3.8.14 (P1): two DIFFERENT untracked-file states must not hash to the same byte
+    stream. Codex's collision: before a=A / b='b.bin\\0Z'; during the check a='Ab.bin\\0' /
+    b=Z — the unprefixed `path\\0content` streams were identical. Length-prefixing detects it."""
+    if not (SCRIPTS / "memory_log.py").exists():
+        return
+    repo = tmp_path / "r"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "x@x"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "x"], cwd=repo, check=True)
+    # ignore the staged scripts/ so only a.bin/b.bin are untracked and hashed
+    (repo / ".gitignore").write_text("__pycache__/\nscripts/\n", encoding="utf-8")
+    subprocess.run(["git", "add", ".gitignore"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "base"], cwd=repo, check=True)
+    (repo / "a.bin").write_bytes(b"A")
+    (repo / "b.bin").write_bytes(b"b.bin\x00Z")
+    _stage(repo, "memory_log.py", "_substrate_root.py")
+    (repo / "scripts" / "run_smoke_verification.py").write_text(
+        "import pathlib\n"
+        "pathlib.Path('a.bin').write_bytes(b'Ab.bin\\x00')\n"
+        "pathlib.Path('b.bin').write_bytes(b'Z')\n"
+        "raise SystemExit(0)\n", encoding="utf-8")
+    p = subprocess.run([sys.executable, "-I", str(repo / "scripts" / "memory_log.py"),
+                        "skill-run", "self-audit", "--verify"],
+                       cwd=str(repo), capture_output=True, text=True, timeout=60)
+    assert p.returncode != 0, (p.returncode, p.stdout, p.stderr)
+    ev = repo / ".substrate" / "memory" / "events.jsonl"
+    sk = [json.loads(ln) for ln in ev.read_text().splitlines()
+          if '"skill-run"' in ln][-1]
+    assert sk["data"].get("verify_stale") is True and sk["data"]["verified"] is False
+
+
+def test_memory_log_verify_detects_dirty_gitlink(tmp_path) -> None:
+    """v3.8.14 (P2): a same-HEAD DIRTY change to a submodule's tracked content during the
+    check must be detected — the gitlink identity now hashes HEAD + the submodule's dirty
+    porcelain, not just HEAD."""
+    if not (SCRIPTS / "memory_log.py").exists():
+        return
+    inner = tmp_path / "inner"
+    inner.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=inner, check=True)
+    subprocess.run(["git", "config", "user.email", "x@x"], cwd=inner, check=True)
+    subprocess.run(["git", "config", "user.name", "x"], cwd=inner, check=True)
+    (inner / "f").write_text("clean\n", encoding="utf-8")
+    subprocess.run(["git", "add", "f"], cwd=inner, check=True)
+    subprocess.run(["git", "commit", "-qm", "i"], cwd=inner, check=True)
+    repo = tmp_path / "r"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "x@x"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "x"], cwd=repo, check=True)
+    (repo / ".gitignore").write_text("__pycache__/\nscripts/\n", encoding="utf-8")
+    add = subprocess.run(["git", "-c", "protocol.file.allow=always", "submodule", "add",
+                          str(inner), "sub"], cwd=repo, capture_output=True, text=True)
+    if add.returncode != 0:
+        return   # submodule add unsupported in this env
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "base"], cwd=repo, check=True)
+    _stage(repo, "memory_log.py", "_substrate_root.py")
+    (repo / "scripts" / "run_smoke_verification.py").write_text(
+        "import pathlib\n"
+        "pathlib.Path('sub/f').write_text('DIRTY\\n')\n"   # same submodule HEAD, dirty content
         "raise SystemExit(0)\n", encoding="utf-8")
     p = subprocess.run([sys.executable, "-I", str(repo / "scripts" / "memory_log.py"),
                         "skill-run", "self-audit", "--verify"],

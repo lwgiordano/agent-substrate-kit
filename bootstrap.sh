@@ -45,6 +45,28 @@ case "$LANG_PRIMARY" in auto|python|node|go|none) ;; *) echo "invalid lang"; exi
 case "$UI_ENABLED" in yes|no|true|false|ui|no-ui) ;; *) echo "invalid ui"; exit 1;; esac
 [[ "$UI_ENABLED" == "true" || "$UI_ENABLED" == "ui" ]] && UI_ENABLED="yes"; [[ "$UI_ENABLED" == "false" || "$UI_ENABLED" == "no-ui" ]] && UI_ENABLED="no"
 mkdir -p "$TARGET"; cd "$TARGET"; REPO_ROOT="$(pwd)"
+# v3.8.14 (P1): refuse if ANY symlink in the target ESCAPES it — copy()/render()/`mkdir -p`
+# would follow a symlinked ANCESTOR and write outside the repo (the v3.8.13 leaf-only rm -f
+# did not cover a symlinked PARENT dir). Guards DIRECT bootstrap too, not just via upgrade.
+if command -v python3 >/dev/null 2>&1; then
+  python3 - "$REPO_ROOT" <<'PYEOF' || exit 2
+import os, sys
+root = os.path.realpath(sys.argv[1])
+bad = []
+for dp, dns, fns in os.walk(root):
+    dns[:] = [d for d in dns if d not in (".git", "venv", ".venv", "node_modules")]
+    for n in list(dns) + fns:
+        p = os.path.join(dp, n)
+        if os.path.islink(p):
+            rp = os.path.realpath(p)
+            if rp != root and not rp.startswith(root + os.sep):
+                bad.append(p + " -> " + rp)
+if bad:
+    sys.stderr.write("bootstrap: refusing — symlink(s) escape the repo (a render would "
+                     "write outside it):\n" + "\n".join(bad) + "\n")
+    sys.exit(2)
+PYEOF
+fi
 [ -d .git ] || { echo "==> Initializing git repository"; git init >/dev/null; }
 # Language auto-detect: existing project markers win; empty repo defaults to python.
 if [[ "$LANG_PRIMARY" == "auto" ]]; then

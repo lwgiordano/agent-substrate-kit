@@ -68,12 +68,11 @@ def _load_install_json(root: Path) -> dict | None:
         # `.get()`/`dict()` are called on it — treat any non-mapping as absent (v3.8.10).
         if not isinstance(data, dict):
             return None
-        # A malformed drift map (non-dict owned_file_sha256) must be treated as an UNTRUSTED /
-        # ABSENT baseline — so --write requires --force — NOT as proof of zero drift, which
-        # would let a forged `owned_file_sha256: []` silently overwrite locally-modified owned
-        # files (v3.8.13 / P2). Drift protection can only be trusted with a valid drift map.
-        owned = data.get("owned_file_sha256")
-        if owned is not None and not isinstance(owned, dict):
+        # Drift protection can only be trusted with a VALID drift map. A MISSING or non-dict
+        # owned_file_sha256 makes the baseline UNTRUSTED / ABSENT — so --write requires --force
+        # — never a proof of zero drift that would silently overwrite locally-modified owned
+        # files (v3.8.13 non-dict; v3.8.14 also the missing/incomplete-key case / P2).
+        if not isinstance(data.get("owned_file_sha256"), dict):
             return None
         return data
     return None
@@ -140,6 +139,17 @@ def _answers_from_snapshot(auth: dict) -> dict:
 def _lock_from_snapshot(auth: dict, name: str) -> str:
     b = auth.get(name)
     return b.decode("utf-8", "replace").strip() if isinstance(b, (bytes, bytearray)) else ""
+
+
+def _lock_ge(a: str, b: str) -> str:
+    """RAISE-only max of two lock values — profile ranks for required_profile, else the
+    binary '1' wins over '0'/anything (v3.8.14). Used to reconcile a concurrent raise that
+    landed just before the render so the upgrade never LOWERS it."""
+    if a in _PROF_RANK and b in _PROF_RANK:
+        return a if _PROF_RANK[a] >= _PROF_RANK[b] else b
+    if a == "1" or b == "1":
+        return "1"
+    return a or b
 
 
 def _profile_alias(ans: dict) -> str:
@@ -517,6 +527,15 @@ def main(argv=None) -> int:
                "--profile", alias, "--lang", answers.get("lang", "auto"),
                "--runner", answers.get("runner", "auto"), "--workflow", answers.get("workflow", "superpowers"),
                "--ui", answers.get("ui", "no")]
+        # Capture the required_* lock values as the LAST read before the mutation (v3.8.14 / P1):
+        # a concurrent RAISE landing between the check above and the render would be clobbered by
+        # bootstrap+restore, so we reconcile raise-only after restore (never lower it). The
+        # residual sub-ms window — a raw non-cooperating writer between this read and bootstrap's
+        # first write — is documented, not silently claimed closed (a mandatory lock the substrate
+        # cannot impose on arbitrary processes would be required to fully close it).
+        _lock_names = ("required_profile", "required_remote_governance", "required_sandbox")
+        _snap_pre = _authority_snapshot(root)
+        _locks_pre = {_n: _lock_from_snapshot(_snap_pre, _n) for _n in _lock_names}
         r = _run(cmd)
         if r.returncode != 0:
             _restore(root, backup, saved)
@@ -526,6 +545,19 @@ def main(argv=None) -> int:
         _restore(root, backup, saved)
         if a.profile:
             _apply_profile_ratchet(root, a.profile)
+        # Raise-only lock reconciliation (v3.8.14 / P1): never leave a required_* lock LOWER than
+        # the value observed just before the render — a concurrent raise that landed in the
+        # check->render window must survive (bootstrap+restore would otherwise clobber it down).
+        for _n in _lock_names:
+            _cur = _lock_from_snapshot(_authority_snapshot(root), _n)
+            _want = _lock_ge(_cur or "", _locks_pre.get(_n) or "")
+            if _want and _want != _cur:
+                try:
+                    (root / ".substrate" / _n).write_text(_want + "\n", encoding="utf-8")
+                    print(f"upgrade: raise-only reconcile: {_n} {_cur or '(unset)'} -> {_want}",
+                          file=sys.stderr)
+                except Exception:
+                    pass
 
         # consistency + fresh provenance
         mf = _run([sys.executable, "-I", str(root / "scripts" / "update_manifest.py"), "--fix"], cwd=root)

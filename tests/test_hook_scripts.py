@@ -2027,6 +2027,88 @@ def test_upgrade_raise_only_reconciles_concurrent_raise(tmp_path, monkeypatch) -
     assert rc == 2, "upgrade claimed success despite a concurrent raise (stale render)"
 
 
+def test_upgrade_fails_when_config_deleted_after_restore(tmp_path, monkeypatch) -> None:
+    """v3.8.20 (P1, upgrade:750): a standard-profile render's answers EQUAL the all-default
+    parse of a MISSING config, so deleting .substrate/config after _restore passed the v3.8.19
+    answers-equality postcondition ("default-equivalent absence") and upgrade returned 0 with
+    NO config on disk. The concrete end-state invariant (authority files must exist as regular
+    files; config must carry SUBSTRATE_PROFILE) now fails it."""
+    if not (SCRIPTS / "substrate_upgrade.py").exists():
+        return
+    repo = _bootstrap_std_repo(tmp_path)
+    if repo is None:
+        return
+    import importlib
+    sys.path.insert(0, str(SCRIPTS))
+    su = importlib.import_module("substrate_upgrade")
+    real_restore = su._restore
+
+    def deleting_restore(root, backup, saved):
+        real_restore(root, backup, saved)
+        (root / ".substrate" / "config").unlink()   # authority vanishes after restore
+
+    monkeypatch.setattr(su, "_restore", deleting_restore)
+    rc = su.main(["--from", str(ROOT), "--root", str(repo), "--allow-unverified", "--write", "--force"])
+    assert rc == 2, "upgrade claimed success with no .substrate/config on disk"
+
+
+def test_upgrade_fails_when_lock_truncated_after_reconcile(tmp_path, monkeypatch) -> None:
+    """v3.8.20 (auditor BLOCK on the upgrade:750 fix): existence-only postcondition checks
+    reopened default-equivalent absence via TRUNCATION — an empty required_profile written
+    AFTER the raise-only reconcile read (so reconcile never fires) but before the postcondition
+    snapshot is falsy, was floor-skipped, and passed. Lock content must be a value bootstrap
+    could have written (a profile name / '0' / '1'); empty or garbage now fails rc 2."""
+    if not (SCRIPTS / "substrate_upgrade.py").exists():
+        return
+    repo = _bootstrap_std_repo(tmp_path)
+    if repo is None:
+        return
+    import importlib
+    sys.path.insert(0, str(SCRIPTS))
+    su = importlib.import_module("substrate_upgrade")
+    real_lock_ge = su._lock_ge
+    calls = {"n": 0}
+
+    def truncating_lock_ge(a, b):
+        # the reconcile loop calls _lock_ge once per lock (profile, remote, sandbox in order);
+        # truncate required_profile during the LAST call — after reconcile already read it as
+        # intact, before the postcondition snapshot.
+        calls["n"] += 1
+        if calls["n"] == 3:
+            (repo / ".substrate" / "required_profile").write_text("", encoding="utf-8")
+        return real_lock_ge(a, b)
+
+    monkeypatch.setattr(su, "_lock_ge", truncating_lock_ge)
+    rc = su.main(["--from", str(ROOT), "--root", str(repo), "--allow-unverified", "--write", "--force"])
+    assert rc == 2, "upgrade claimed success with a truncated (empty) required_profile lock"
+
+
+def test_upgrade_flags_unvouched_file_in_replaced_skill_dir(tmp_path) -> None:
+    """v3.8.20 (P2, upgrade:350): bootstrap replaces skill dirs WHOLESALE (`rm -rf` + `cp -R`),
+    DELETING local files that are not leaves of the new kit — the leaf-only overwrite set never
+    saw them, so `--write` without --force silently destroyed an unvouched local file. Files
+    under a replaced dir are now completeness-checked like overwrite targets."""
+    if not (SCRIPTS / "substrate_upgrade.py").exists():
+        return
+    repo = _bootstrap_std_repo(tmp_path)
+    if repo is None:
+        return
+    skills = sorted(d.name for d in (ROOT / "skills").iterdir() if d.is_dir()) \
+        if (ROOT / "skills").is_dir() else []
+    if not skills:
+        return
+    victim = repo / ".claude" / "skills" / skills[0] / "LOCAL_NOTE.md"
+    victim.parent.mkdir(parents=True, exist_ok=True)
+    victim.write_text("precious local addition\n", encoding="utf-8")   # unvouched: added post-install
+    p = subprocess.run(
+        [sys.executable, "-I", str(repo / "scripts" / "substrate_upgrade.py"),
+         "--from", str(ROOT), "--root", str(repo), "--allow-unverified", "--write"],
+        capture_output=True, text=True, timeout=180)
+    assert p.returncode == 2, (p.returncode, p.stdout[-300:], p.stderr[-300:])
+    assert victim.read_text(encoding="utf-8") == "precious local addition\n", \
+        "the local file under a replaced skill dir was deleted without --force"
+
+
 def test_bootstrap_refuses_symlinked_parent_escape(tmp_path) -> None:
     """v3.8.14 (P1): DIRECT bootstrap must refuse when a target subdir is a symlink escaping
     the repo — the v3.8.13 leaf-only rm -f did not cover a symlinked PARENT dir, so cp/mkdir
@@ -2045,6 +2127,26 @@ def test_bootstrap_refuses_symlinked_parent_escape(tmp_path) -> None:
                        capture_output=True, text=True, timeout=120)
     assert p.returncode == 2, (p.returncode, p.stdout[-300:], p.stderr[-300:])
     assert (external / "victim.py").read_text() == "VICTIM\n", "external victim was overwritten!"
+
+
+def test_bootstrap_refuses_git_aliased_ancestor(tmp_path) -> None:
+    """v3.8.20 (bootstrap:85): `.substrate -> .git` resolves INSIDE the repo, so the v3.8.15
+    inside-root _safe_dest passed it and `wprep .substrate/config` overwrote .git/config,
+    corrupting the repo. The exact-parent invariant (real parent must EQUAL the literal
+    logical parent) refuses any aliased ancestor — including git internals."""
+    if not (ROOT / "bootstrap.sh").exists():
+        return
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    git_config_before = (repo / ".git" / "config").read_bytes()
+    (repo / ".substrate").symlink_to(".git")   # in-repo alias: evades the escape scan
+    p = subprocess.run(["bash", str(ROOT / "bootstrap.sh"), "--target", str(repo),
+                        "--profile", "standard", "--lang", "none", "--no-doctor", "--force"],
+                       capture_output=True, text=True, timeout=120)
+    assert p.returncode == 2, (p.returncode, p.stdout[-300:], p.stderr[-300:])
+    assert (repo / ".git" / "config").read_bytes() == git_config_before, \
+        ".git/config was clobbered through the .substrate alias!"
 
 
 def test_bootstrap_direct_write_no_follows_planted_symlink(tmp_path) -> None:
@@ -2463,6 +2565,44 @@ def test_memory_log_verify_detects_tracked_but_ignored_content_change(tmp_path) 
     (repo / "scripts" / "run_smoke_verification.py").write_text(
         "import pathlib\n"
         "pathlib.Path('data.txt').write_text('AFTER\\n')\n"
+        "raise SystemExit(0)\n", encoding="utf-8")
+    p = subprocess.run([sys.executable, "-I", str(repo / "scripts" / "memory_log.py"),
+                        "skill-run", "self-audit", "--verify"],
+                       cwd=str(repo), capture_output=True, text=True, timeout=60)
+    assert p.returncode != 0, (p.returncode, p.stdout, p.stderr)
+    ev = repo / ".substrate" / "memory" / "events.jsonl"
+    sk = [json.loads(ln) for ln in ev.read_text().splitlines()
+          if '"skill-run"' in ln][-1]
+    assert sk["data"].get("verify_stale") is True and sk["data"]["verified"] is False
+
+
+def test_memory_log_verify_detects_tracked_ignored_mode_flip(tmp_path) -> None:
+    """v3.8.20 (memory:255): a 0644->0755 MODE flip on a TRACKED-but-ignored file under
+    core.filemode=false is invisible to the temp-index write-tree (add -A skips ignored paths;
+    fileMode=true can't see a path that isn't staged), to the real index (filemode=false never
+    re-records worktree modes), and to a bytes-only raw hash — only the permission bits folded
+    into _raw_tracked_hash catch it."""
+    if not (SCRIPTS / "memory_log.py").exists():
+        return
+    repo = tmp_path / "r"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "x@x"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "x"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "core.filemode", "false"], cwd=repo, check=True)
+    (repo / "data.txt").write_text("SAME\n", encoding="utf-8")
+    os.chmod(repo / "data.txt", 0o644)
+    (repo / ".gitignore").write_text("__pycache__/\nscripts/\n", encoding="utf-8")
+    subprocess.run(["git", "add", "data.txt", ".gitignore"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "base"], cwd=repo, check=True)
+    # also ignore data.txt: still tracked, but a fresh temp index drops it entirely
+    (repo / ".gitignore").write_text("__pycache__/\nscripts/\ndata.txt\n", encoding="utf-8")
+    subprocess.run(["git", "add", ".gitignore"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "ignore data"], cwd=repo, check=True)
+    _stage(repo, "memory_log.py", "_substrate_root.py")
+    (repo / "scripts" / "run_smoke_verification.py").write_text(
+        "import os\n"
+        "os.chmod('data.txt', 0o755)\n"   # mode flip, bytes unchanged
         "raise SystemExit(0)\n", encoding="utf-8")
     p = subprocess.run([sys.executable, "-I", str(repo / "scripts" / "memory_log.py"),
                         "skill-run", "self-audit", "--verify"],

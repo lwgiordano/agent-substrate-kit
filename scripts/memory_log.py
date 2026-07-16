@@ -227,9 +227,11 @@ def _raw_tracked_hash():
     filters — so a `filter.*.clean` that canonicalizes differing raw bytes to one blob hides a
     real content change — and (b) is fed by a fresh temp index whose `add -A` DROPS gitignored
     paths, so a tracked-but-ignored file's raw change vanishes from the tree OID. The checker
-    reads RAW bytes, so the signature must too. This folds in the literal on-disk bytes (and
-    symlink targets) the checker would read. Length-prefixed (path, then content) so it is
-    injective / collision-resistant. None on any failure (fail closed). v3.8.18 (memory:209)."""
+    reads RAW bytes, so the signature must too. This folds in the literal on-disk bytes,
+    symlink targets, and regular-file permission bits (v3.8.20 / memory:255 — a mode flip on a
+    tracked-but-ignored path is invisible to both the temp-index tree and a bytes-only hash).
+    Length-prefixed (path, then content) so it is injective / collision-resistant. None on any
+    failure (fail closed). v3.8.18 (memory:209)."""
     try:
         ls = subprocess.run(["git", "-c", "core.fsmonitor=false", "ls-files", "-z"],
                             cwd=ROOT, capture_output=True, timeout=60, env=_clean_env())
@@ -255,7 +257,11 @@ def _raw_tracked_hash():
             elif stat.S_ISREG(lst.st_mode):
                 with open(fp, "rb") as fh:
                     content = fh.read()
-                h.update(f"|file:{len(content)}:".encode())
+                # Fold the PERMISSION BITS in too (v3.8.20 / memory:255): a 0644->0755 flip on a
+                # tracked-but-ignored path is invisible to the temp-index write-tree (add -A skips
+                # ignored paths) and to a bytes-only raw hash; and under core.filemode=false the
+                # real index never re-records it either. lstat is the checker's-eye view.
+                h.update(f"|file:{stat.S_IMODE(lst.st_mode):o}:{len(content)}:".encode())
                 h.update(content)
             else:
                 h.update(f"|other:{lst.st_mode}|".encode())   # fifo/socket/etc. — record the type

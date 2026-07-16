@@ -79,10 +79,19 @@ RUN_PREFIX=""; if [[ "$RUNNER" == "uv" ]]; then RUN_PREFIX="uv run"; elif [[ "$R
 PROJECT_SLUG="$(basename "$REPO_ROOT" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9._-' '-' | sed 's/^-//; s/-$//')"; [ -n "$PROJECT_SLUG" ] || PROJECT_SLUG="agent-substrate-project"; TODAY="$(date +%F)"
 # Per-write no-follow guard (v3.8.15): the startup escaping-symlink scan is check-then-write;
 # a symlink planted AFTER it would still be followed. Re-resolve the destination's real parent
-# dir immediately before EACH write and refuse if it is not inside the repo — a per-write
-# invariant, not a one-time scan. (Residual: a symlink planted between this `pwd -P` and the
-# cp/sed is a sub-ms window a shell installer cannot fully close without OS-level locking.)
-_safe_dest(){ local d="$1" pd; pd="$(cd "$(dirname "$d")" 2>/dev/null && pwd -P)" || { echo "bootstrap: refusing — cannot resolve destination dir for ${d#./}" >&2; exit 2; }; case "$pd" in "$REPO_ROOT_REAL"|"$REPO_ROOT_REAL"/*) : ;; *) echo "bootstrap: refusing write outside the repo: ${d#./} (real parent -> $pd)" >&2; exit 2 ;; esac; }
+# dir immediately before EACH write. v3.8.20 (bootstrap:85): "inside the repo" is NOT enough —
+# an in-repo-POINTING symlinked ancestor (`.substrate -> .git`) aliased a write into protected
+# git internals while staying under root. The invariant is now EXACT-PARENT: the destination's
+# REAL parent must equal its LOGICAL parent ($REPO_ROOT_REAL/<dirname>), so ANY symlinked
+# ancestor — escaping, aliasing, or .git-internal — is refused. Bootstrap mkdir -p's its own
+# real dirs, so a legit install never trips this. (Residual: a symlink planted between this
+# `pwd -P` and the cp/sed is a sub-ms window a shell installer cannot fully close without
+# OS-level locking.)
+_safe_dest(){ local d="$1" pd ld ex; pd="$(cd "$(dirname "$d")" 2>/dev/null && pwd -P)" || { echo "bootstrap: refusing — cannot resolve destination dir for ${d#./}" >&2; exit 2; }
+  ld="$(dirname "$d")"; ld="${ld#./}"
+  case "$ld" in .|"") ex="$REPO_ROOT_REAL" ;; /*) ex="$ld" ;; *) ex="$REPO_ROOT_REAL/$ld" ;; esac
+  case "$ex" in "$REPO_ROOT_REAL"|"$REPO_ROOT_REAL"/*) : ;; *) echo "bootstrap: refusing write outside the repo: ${d#./} (expected parent $ex)" >&2; exit 2 ;; esac
+  [ "$pd" = "$ex" ] || { echo "bootstrap: refusing — parent dir of ${d#./} is aliased/outside the repo (real: $pd, expected: $ex)" >&2; exit 2; }; }
 # rm -f the destination BEFORE writing (v3.8.13): plain `cp`/`sed >` FOLLOW a symlinked
 # destination, so a symlink planted at a render target would write through it to an external
 # file. Removing the link first makes cp/sed create a fresh regular file (no-follow write).

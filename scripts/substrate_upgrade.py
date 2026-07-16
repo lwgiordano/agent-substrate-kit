@@ -283,6 +283,23 @@ def _drifted(root: Path, baseline: dict | None, kit: Path | None = None) -> list
                 p = root / rel
                 if p.is_file() and not p.is_symlink() and rel in coverage and rel not in ownkeys:
                     out.append(rel)   # render target the baseline should vouch for, but doesn't
+            # v3.8.20 (P2, finding upgrade:350): the leaf set above misses DELETION effects.
+            # bootstrap replaces skill dirs WHOLESALE (`rm -rf` + `cp -R`), so a LOCAL file
+            # under one of those dirs that is not a leaf of the new kit is silently DELETED —
+            # scan the local files under each replaced dir too: present + in the vouch surface
+            # + unvouched -> drift (needs --force), same rule as the overwrite targets.
+            for d in _kit_replaced_dirs(kit):
+                base = root / d
+                if not base.is_dir():
+                    continue
+                for p in sorted(base.rglob("*")):
+                    if not p.is_file() or p.is_symlink():
+                        continue
+                    rel = p.relative_to(root).as_posix()
+                    if rel in preserve or rel in _DRIFT_EXCLUDE or any(rel.startswith(pd + "/") for pd in PRESERVE_DIRS):
+                        continue
+                    if rel in coverage and rel not in ownkeys:
+                        out.append(rel)   # would be DELETED by the dir replacement, unvouched
     return sorted(set(out))
 
 
@@ -394,6 +411,20 @@ def _kit_overwrite_set(kit: Path) -> set[str]:
     return out
 
 
+def _kit_replaced_dirs(kit: Path) -> set[str]:
+    """Dirs the new kit's bootstrap --force replaces WHOLESALE (`rm -rf` + `cp -R`) rather than
+    file-by-file, so EVERY local file under them is deleted/replaced — not only the new kit's
+    leaves (v3.8.20 / upgrade:350). Mirrors bootstrap.sh's skills loop."""
+    out: set[str] = set()
+    skills = kit / "skills"
+    if skills.is_dir():
+        for sd in sorted(skills.iterdir()):
+            if sd.is_dir():
+                out.add(f".claude/skills/{sd.name}")
+                out.add(f".agents/skills/{sd.name}")
+    return out
+
+
 _SYMLINK_SCAN_SKIP = {".git", "venv", ".venv", "node_modules", "__pycache__",
                       ".pytest_cache", ".ruff_cache", ".mypy_cache"}
 
@@ -403,10 +434,13 @@ def _unsafe_owned_dests(root: Path, baseline: dict | None) -> list[str]:
     bootstrap's copy()/render() follow a symlinked destination, and they write to EVERY
     rendered path — not just the ones the OLD baseline recorded — so a v3.8.11 check of
     only the baseline+preserve set missed a symlink planted at a NEW-version path. This
-    now does TWO things (v3.8.12):
+    now does THREE things (v3.8.12; 3 added v3.8.20):
       1. Flag any SYMLINK at a baseline-owned / preserve path (even one pointing in-repo).
       2. Whole-tree scan: flag ANY symlink anywhere under root whose target ESCAPES root —
          the external-write vector, regardless of whether the path is in the baseline.
+      3. Flag any owned/preserve path whose RESOLVED path differs from its literal path
+         (a symlinked ANCESTOR aliasing it, e.g. `.substrate -> .git`) — backup/restore and
+         the render would silently read/write through the alias into the aliased target.
     Hard tamper condition — refused even with --force."""
     rootr = root.resolve()
     bad, seen = [], set()
@@ -426,6 +460,15 @@ def _unsafe_owned_dests(root: Path, baseline: dict | None) -> list[str]:
                 rp = p.resolve()
                 if rp != rootr and rootr not in rp.parents:
                     _flag(rel)   # a path component escapes root
+                elif rp != rootr / rel and str(rp).casefold() != str(rootr / rel).casefold():
+                    _flag(rel)   # ALIASED path component (e.g. `.substrate -> .git`): resolves
+                    #              in-repo but NOT to its literal path, so backup/restore and the
+                    #              render would read/write through the alias (v3.8.20, the
+                    #              upgrade-side companion to bootstrap's exact-parent _safe_dest).
+                    #              casefold: on a case-INSENSITIVE fs (macOS APFS) resolve() may
+                    #              return canonical casing for a NON-aliased file — a case-only
+                    #              difference is never an alias (aliases differ in components),
+                    #              so it must not hard-brick the upgrade (v3.8.20 auditor WARN).
         except Exception:
             _flag(rel)           # unresolvable -> unsafe, fail closed
     # Whole-tree escaping-symlink scan (followlinks=False so we never descend a link).
@@ -748,6 +791,40 @@ def main(argv=None) -> int:
         # consistently. (Residual: a raise between THIS read and process exit remains, as
         # documented — no smaller window exists without OS-level locking.)
         _auth_now = _authority_snapshot(root)
+        # v3.8.20 (P1, finding upgrade:750): _answers_from_snapshot treats a MISSING config as
+        # b"" -> {} -> all-DEFAULT answers, so when the rendered answers equal the defaults
+        # (a plain standard install), an authority file DELETED after _restore compared EQUAL
+        # ("default-equivalent absence") and the upgrade returned 0 with no config on disk.
+        # Success must first require the CONCRETE end state: every authority file present as a
+        # regular (non-symlink) file with readable snapshot bytes, and config carrying an
+        # explicit SUBSTRATE_PROFILE line (bootstrap always writes one — only the newer optional
+        # keys may legitimately be absent in a config restored from an ancient install, so we
+        # do not require those and no legacy upgrade is false-failed).
+        _broken = []
+        for _n in ("config", "required_profile", "required_remote_governance", "required_sandbox"):
+            _p = root / ".substrate" / _n
+            if _auth_now.get(_n) is None or not _p.is_file() or _p.is_symlink():
+                _broken.append(_n)
+        if "SUBSTRATE_PROFILE" not in _parse_config_text(
+                (_auth_now.get("config") or b"").decode("utf-8", "replace")):
+            _broken.append("config:SUBSTRATE_PROFILE")
+        # Lock CONTENT must also be a value bootstrap could have written (v3.8.20 auditor
+        # BLOCK): existence alone reopened the same hole via TRUNCATION — an empty (or
+        # garbage) required_profile after the reconcile read is falsy, so the raise-floor
+        # below silently treated it as "no lock" and the postcondition passed with the lock
+        # effectively lowered. Bootstrap always writes a profile name / "0" / "1", so a
+        # valid-value requirement can never false-fail a legitimate install of any age.
+        if _lock_from_snapshot(_auth_now, "required_profile") not in _PROF_RANK:
+            _broken.append("required_profile:value")
+        for _n in ("required_remote_governance", "required_sandbox"):
+            if _lock_from_snapshot(_auth_now, _n) not in ("0", "1"):
+                _broken.append(_n + ":value")
+        if _broken:
+            print("upgrade: authority END STATE is invalid after the render — missing/symlinked/"
+                  f"unreadable: {', '.join(sorted(set(_broken)))}. Refusing to claim success "
+                  "without a concrete on-disk authority; restore .substrate and re-run "
+                  "`upgrade --write`.", file=sys.stderr)
+            return 2
         _final = _answers_from_snapshot(_auth_now)
         _fl = _lock_from_snapshot(_auth_now, "required_profile")
         if _fl and _rk.get(_fl, -1) > _rk.get(_final.get("profile") or "standard", 1):

@@ -604,6 +604,34 @@ bootstrap. Cross-cutting: claim success from the END STATE, not from the code pa
 guard needs a surface enumeration, tie it to the enumeration the protected artifact was BUILT with
 (baseline coverage), then guard the guard with a parity test against the real producer.
 
+v3.8.20 is Codex's THIRTEENTH-round re-audit (of v3.8.19) — 4 substantive findings, all verified and
+fixed combined. (P1 bootstrap:85) `_safe_dest`'s "real parent inside the repo" invariant passed an
+in-repo-POINTING alias: `.substrate -> .git` kept every write under root while routing it into git
+internals (`wprep .substrate/config` overwrote `.git/config`). The invariant is now EXACT-PARENT — the
+destination's real parent must EQUAL its literal logical parent (`$REPO_ROOT_REAL/<dirname>`), refusing
+ANY symlinked ancestor: escaping, aliasing, or git-internal. Bootstrap mkdir -p's real dirs for all its
+dests, so no legitimate install trips it. The upgrade engine got the same class closed pre-flight:
+`_unsafe_owned_dests` clause 3 flags any owned/preserve path whose resolved path differs from its literal
+path. (P1 upgrade:750) the v3.8.19 postcondition compared DERIVED answers, and `_answers_from_snapshot`
+maps a MISSING config to all-DEFAULT answers — so on a standard-profile render (answers == defaults),
+deleting `.substrate/config` after `_restore` compared EQUAL ("default-equivalent absence") and the
+upgrade claimed success with no config on disk. The postcondition now requires the CONCRETE end state
+first: all four authority files present as regular non-symlink files with readable bytes, and config
+carrying an explicit SUBSTRATE_PROFILE key (only that key, so an ancient restored config lacking the
+newer optional keys is not false-failed). (P2 memory:255) `_raw_tracked_hash` hashed bytes but not
+metadata: a 0644->0755 flip on a tracked-but-IGNORED path under core.filemode=false is invisible to the
+temp-index write-tree (ignored paths never staged), the real index (filemode=false), and a bytes-only
+hash — the permission bits (S_IMODE, octal) are now folded into each regular-file record. (P2
+upgrade:350) `_kit_overwrite_set` enumerated new-kit LEAVES, but bootstrap replaces skill dirs WHOLESALE
+(`rm -rf` + `cp -R`), so a local file under a replaced dir that is NOT a new-kit leaf was silently
+DELETED with no drift flag; `_kit_replaced_dirs` now mirrors bootstrap's replacement semantics and
+`_drifted` completeness-checks every present-but-unvouched file under those dirs (a local
+`.claude/skills/custom-skill/` dir NOT in the kit is untouched by bootstrap and correctly not flagged).
+Cross-cutting: "inside the repo" is not a write-safety property when aliasing exists — the invariant must
+bind the LITERAL path; a postcondition must assert concrete artifact EXISTENCE before comparing derived
+values (absence can equal defaults); and an overwrite-set is incomplete without the DELETION effects of
+wholesale directory replacement.
+
 v3.8.10 is Codex's SIXTH-round re-audit (of v3.8.9) — 6 substantive findings (operator stopping rule:
 fix everything substantive until a clean pass). THREE in `memory_log.py`: (a) the hidden-path loop
 hashed `read_bytes()` (follows symlinks) not lstat type/mode or `readlink`, so a retargeted symlink

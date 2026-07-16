@@ -246,11 +246,30 @@ def _drifted(root: Path, baseline: dict | None) -> list[str]:
                 continue
             if rel not in ownkeys:
                 out.append(rel)   # present under a managed dir but unvouched by the baseline
+    # v3.8.17 (P2, finding upgrade:252): the dir scan above missed RESERVED top-level managed
+    # FILES (e.g. `manage.sh`) — an attacker could edit manage.sh AND delete its owned-map entry
+    # and the completeness cross-check would never see it (it lives under no scanned dir). Extend
+    # to the reserved top-level files a project NEVER authors. This deliberately does NOT scan the
+    # whole write_install_json owned set (tests/, .claude/, .github/workflows/, docs/knowledge/):
+    # projects legitimately add their own files there, so an unvouched file is expected, not
+    # tamper — scanning them would FALSE-FLAG a well-behaved repo (cut functionality). Only
+    # substrate-RESERVED surfaces (scripts/ by the hard rules, plus the fixed entrypoints below)
+    # are safe to treat "present-but-unvouched" as drift.
+    for rel in _COMPLETENESS_SCAN_FILES:
+        if rel in preserve or rel in _DRIFT_EXCLUDE:
+            continue
+        p = root / rel
+        if p.is_file() and not p.is_symlink() and rel not in ownkeys:
+            out.append(rel)   # a reserved managed entrypoint present but unvouched by the baseline
     return sorted(set(out))
 
 
 _COMPLETENESS_SCAN_DIRS = ("scripts",)
 _COMPLETENESS_SCAN_EXTS = (".py", ".sh")
+# Reserved top-level managed files a project never authors (unlike tests/ or .claude/), so a
+# present-but-unvouched instance is tamper, not a legitimate project file. `manage.sh` is the
+# substrate CLI entrypoint; bootstrap --force overwrites it, so an upgrade must gate on it too.
+_COMPLETENESS_SCAN_FILES = ("manage.sh",)
 
 
 _SYMLINK_SCAN_SKIP = {".git", "venv", ".venv", "node_modules", "__pycache__",

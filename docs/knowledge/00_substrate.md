@@ -537,6 +537,24 @@ unchanged. Cross-cutting lesson: when you are verifying a property some other to
 canonically (here, git's notion of tracked content), ANCHOR the check to that tool's output instead of
 reconstructing it — a reconstruction has to chase every attribute the real thing already handles.
 
+v3.8.17 continues the architectural convergence (following v3.8.16's memory re-design) into the upgrade
+engine's drift gate — closing finding upgrade:252 (baseline completeness scope). The v3.8.15 completeness
+cross-check catches an attacker who EDITS a substrate-owned file AND DELETES its `owned_file_sha256` entry
+(so the hash-diff loop never sees it) by scanning a managed dir for present-but-unvouched files — but it
+scanned ONLY `scripts/`. A RESERVED top-level managed FILE, `manage.sh`, lives under no scanned dir, so the
+same edit+delete evasion on the substrate CLI entrypoint slipped through and `--write` without `--force`
+would overwrite it silently. Fix: `_drifted` now also completeness-scans `_COMPLETENESS_SCAN_FILES =
+("manage.sh",)`. The deliberate scope choice mirrors the memory lesson (anchor to the canonical thing, but
+don't over-broaden): it does NOT scan the full `write_install_json` owned set (tests/, .claude/,
+.github/workflows/, docs/knowledge/) because projects legitimately author their own files there and flagging
+an unvouched file as drift would FALSE-FLAG a well-behaved repo — cutting functionality. Only
+substrate-RESERVED surfaces a project never authors (scripts/ by the hard rules, plus manage.sh) are safe to
+treat present-but-unvouched as tamper. A security-auditor pass confirmed manage.sh is the correct/sufficient
+addition (AGENTS.md/CLAUDE.md/.substrate/config are preserve-listed and project-editable; pytest.ini and
+.pre-commit-config.yaml a project may author, so they stay out). Cross-cutting: a completeness/coverage scan
+is only as good as its SURFACE — enumerate the reserved surface deliberately, and never widen it onto
+paths where legitimate project content lives.
+
 v3.8.10 is Codex's SIXTH-round re-audit (of v3.8.9) — 6 substantive findings (operator stopping rule:
 fix everything substantive until a clean pass). THREE in `memory_log.py`: (a) the hidden-path loop
 hashed `read_bytes()` (follows symlinks) not lstat type/mode or `readlink`, so a retargeted symlink

@@ -1873,6 +1873,36 @@ def test_upgrade_incomplete_drift_map_fails_closed(tmp_path) -> None:
     assert marker in owned.read_text(), "local edit overwritten despite an incomplete drift map"
 
 
+def test_upgrade_completeness_covers_reserved_toplevel_file(tmp_path) -> None:
+    """v3.8.17 (P2, finding upgrade:252): the completeness cross-check only scanned scripts/, so a
+    RESERVED top-level managed file (manage.sh) that is edited AND has its owned-map entry deleted
+    was never flagged — --write without --force silently overwrote a locally-modified entrypoint.
+    manage.sh is now completeness-scanned like scripts/: present-but-unvouched -> drift (needs --force)."""
+    if not (SCRIPTS / "substrate_upgrade.py").exists():
+        return
+    repo = _bootstrap_std_repo(tmp_path)
+    if repo is None:
+        return
+    mgr = repo / "manage.sh"
+    if not mgr.is_file():
+        return
+    marker = "# LOCAL EDIT manage.sh completeness\n"
+    mgr.write_text(mgr.read_text(encoding="utf-8") + marker, encoding="utf-8")   # local modification
+    ij = repo / ".substrate" / "install.json"
+    if ij.is_file():
+        d = json.loads(ij.read_text())
+        m = d.get("owned_file_sha256")
+        if isinstance(m, dict):
+            m.pop("manage.sh", None)   # forge: drop the entry so the hash-diff loop never sees it
+        ij.write_text(json.dumps(d))
+    p = subprocess.run(
+        [sys.executable, "-I", str(repo / "scripts" / "substrate_upgrade.py"),
+         "--from", str(ROOT), "--root", str(repo), "--allow-unverified", "--write"],
+        capture_output=True, text=True, timeout=180)
+    assert p.returncode == 2, (p.returncode, p.stdout[-300:], p.stderr[-300:])
+    assert marker in mgr.read_text(), "manage.sh edit overwritten despite being unvouched by the baseline"
+
+
 def test_upgrade_raise_only_reconciles_concurrent_raise(tmp_path, monkeypatch) -> None:
     """v3.8.14 (P1): a concurrent raise landing in the check->render window must SURVIVE — the
     upgrade reconciles required_* locks raise-only after restore, never lowering them."""

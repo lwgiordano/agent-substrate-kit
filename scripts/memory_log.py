@@ -190,28 +190,6 @@ def _git_s(*args: str) -> str:
         return ""
 
 
-def _submodule_state(path: Path) -> str:
-    """Identity of a gitlink (submodule) worktree: its checked-out HEAD PLUS its dirty
-    index/worktree porcelain, under the sanitized env; "" on failure. Catches BOTH a commit
-    switch AND a same-HEAD dirty change to the submodule contents (v3.8.14 — v3.8.11 hashed
-    only HEAD, so a dirty same-HEAD submodule authenticated as unchanged)."""
-    head, status = "", ""
-    try:
-        p = subprocess.run(["git", "-c", "core.fsmonitor=false", "-C", str(path),
-                            "rev-parse", "HEAD"], capture_output=True, text=True,
-                          timeout=15, env=_clean_env())
-        if p.returncode == 0:
-            head = p.stdout.strip()
-        s = subprocess.run(["git", "-c", "core.fsmonitor=false", "-C", str(path),
-                            "status", "--porcelain", "-z", "-uall"], capture_output=True,
-                          text=True, timeout=15, env=_clean_env())
-        if s.returncode == 0:
-            status = s.stdout
-    except Exception:
-        return ""
-    return head + "\0status\0" + status
-
-
 def _git(*args: str) -> str:
     return _git_output(ROOT, *args)
 
@@ -395,9 +373,13 @@ def skill_run(name: str, result: str, note: str, verify: bool = False) -> int:
                 elif stat.S_ISREG(stt.st_mode):
                     _hu(pb, b"reg", meta, fp.read_bytes())
                 elif stat.S_ISDIR(stt.st_mode):
-                    # gitlink (submodule): HEAD + dirty worktree/index state (v3.8.14), so a
-                    # commit switch AND a same-HEAD dirty change to the submodule both show.
-                    _hu(pb, b"gitlink", meta, _submodule_state(fp).encode("utf-8", "surrogateescape"))
+                    # gitlink (submodule): the tamper-evidence signature cannot cheaply prove a
+                    # submodule's FULL tracked integrity (submodule-local skip-worktree /
+                    # core.filemode / staged-blob swaps / broken .git discovery all evade a
+                    # HEAD+porcelain hash), so FAIL CLOSED rather than ever authenticate an
+                    # unverifiable submodule (v3.8.15). A repo WITH a submodule simply never
+                    # gets verified=true from --verify — honest over a false pass.
+                    return lines, None
                 else:
                     _hu(pb, b"oth", meta)
             except FileNotFoundError:

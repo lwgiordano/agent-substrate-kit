@@ -1844,6 +1844,35 @@ def test_upgrade_missing_drift_map_key_fails_closed(tmp_path) -> None:
     assert marker in owned.read_text(), "local edit overwritten despite a missing drift map"
 
 
+def test_upgrade_incomplete_drift_map_fails_closed(tmp_path) -> None:
+    """v3.8.15 (P2): a VALID owned_file_sha256 dict with the edited file's ENTRY REMOVED must
+    still be caught — a managed file present but unvouched by the baseline is drift, so --write
+    without --force is refused rather than silently overwriting the local edit."""
+    if not (SCRIPTS / "substrate_upgrade.py").exists():
+        return
+    repo = _bootstrap_std_repo(tmp_path)
+    if repo is None:
+        return
+    owned = repo / "scripts" / "check_substrate_config.py"
+    if not owned.is_file():
+        return
+    marker = "# LOCAL EDIT incomplete-map\n"
+    owned.write_text(owned.read_text() + marker, encoding="utf-8")
+    ij = repo / ".substrate" / "install.json"
+    if ij.is_file():
+        d = json.loads(ij.read_text())
+        m = d.get("owned_file_sha256")
+        if isinstance(m, dict):
+            m.pop("scripts/check_substrate_config.py", None)   # forge: drop only THIS entry
+        ij.write_text(json.dumps(d))
+    p = subprocess.run(
+        [sys.executable, "-I", str(repo / "scripts" / "substrate_upgrade.py"),
+         "--from", str(ROOT), "--root", str(repo), "--allow-unverified", "--write"],
+        capture_output=True, text=True, timeout=180)
+    assert p.returncode == 2, (p.returncode, p.stdout[-300:], p.stderr[-300:])
+    assert marker in owned.read_text(), "local edit overwritten despite an incomplete drift map"
+
+
 def test_upgrade_raise_only_reconciles_concurrent_raise(tmp_path, monkeypatch) -> None:
     """v3.8.14 (P1): a concurrent raise landing in the check->render window must SURVIVE — the
     upgrade reconciles required_* locks raise-only after restore, never lowering them."""
@@ -1864,9 +1893,12 @@ def test_upgrade_raise_only_reconciles_concurrent_raise(tmp_path, monkeypatch) -
         return real_alias(ans)
 
     monkeypatch.setattr(su, "_profile_alias", racing_alias)
-    su.main(["--from", str(ROOT), "--root", str(repo), "--allow-unverified", "--write", "--force"])
+    rc = su.main(["--from", str(ROOT), "--root", str(repo), "--allow-unverified", "--write", "--force"])
+    # v3.8.15: the raise is preserved (never lowered) AND the upgrade FAILS rather than claim
+    # success with a render stale vs the new lock — a re-run then renders consistently.
     assert (repo / ".substrate" / "required_profile").read_text().strip() == "strict", \
         "concurrent raise was lowered — raise-only reconciliation failed"
+    assert rc == 2, "upgrade claimed success despite a concurrent raise (stale render)"
 
 
 def test_bootstrap_refuses_symlinked_parent_escape(tmp_path) -> None:
@@ -2251,9 +2283,10 @@ def test_memory_log_verify_record_boundary_no_collision(tmp_path) -> None:
 
 
 def test_memory_log_verify_detects_dirty_gitlink(tmp_path) -> None:
-    """v3.8.14 (P2): a same-HEAD DIRTY change to a submodule's tracked content during the
-    check must be detected — the gitlink identity now hashes HEAD + the submodule's dirty
-    porcelain, not just HEAD."""
+    """v3.8.15 (P2): a repo containing a gitlink (submodule) FAILS CLOSED — the signature can't
+    cheaply prove submodule integrity (submodule-local skip-worktree/filemode/staged swaps evade
+    a HEAD+porcelain hash), so --verify is never verified=true there. A dirty submodule change
+    during the check is therefore reported stale (as is any submodule state — honest over false)."""
     if not (SCRIPTS / "memory_log.py").exists():
         return
     inner = tmp_path / "inner"

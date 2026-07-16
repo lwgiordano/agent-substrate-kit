@@ -500,6 +500,22 @@ a non-dict value) now makes the baseline untrusted/absent (--write needs --force
 encodings feeding a security decision must be INJECTIVE (length-prefix), and "remove the leaf before writing"
 is not "no-follow" until ancestors are covered too.
 
+v3.8.15 is Codex's TENTH-round re-audit (of v3.8.14) — 4 substantive findings, fixed combined. (P2 memory
+gitlink) hashing a submodule's HEAD+porcelain is still evadable (submodule-local skip-worktree/filemode/
+staged swaps); the signature now FAILS CLOSED on any tracked gitlink — a repo with a submodule never gets
+verified=true (honest over a false pass). (P1 bootstrap TOCTOU) the startup escaping-symlink scan is
+check-then-write; added a PER-WRITE `_safe_dest` guard in copy()/render() that re-resolves the destination's
+real parent (`pwd -P`) and refuses if it is outside the repo — a per-write invariant, not a one-time scan
+(sub-ms plant-between-check-and-cp residual documented). (P1 upgrade race) the v3.8.14 raise-only
+reconciliation preserved the lock but left config/hooks stale (internally inconsistent "success"); now if a
+concurrent raise is reconciled the upgrade FAILS (rc 2) so a re-run renders consistently against the raised
+lock. (P2 upgrade baseline) a valid owned_file_sha256 dict with one entry REMOVED still fail-opened; _drifted
+now cross-checks the security-critical managed dir (scripts/) and flags any present file the render would
+overwrite that the baseline does not vouch for -> drift (needs --force). Cross-cutting: when you cannot
+cheaply VERIFY something (submodule integrity), FAIL CLOSED rather than approximate; a check-then-act guard
+needs a per-operation invariant; and never claim success after a security reconciliation left state
+internally inconsistent.
+
 v3.8.10 is Codex's SIXTH-round re-audit (of v3.8.9) — 6 substantive findings (operator stopping rule:
 fix everything substantive until a clean pass). THREE in `memory_log.py`: (a) the hidden-path loop
 hashed `read_bytes()` (follows symlinks) not lstat type/mode or `readlink`, so a retargeted symlink

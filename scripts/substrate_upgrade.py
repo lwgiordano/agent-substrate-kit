@@ -227,7 +227,30 @@ def _drifted(root: Path, baseline: dict | None) -> list[str]:
         # files' content.
         if p.is_file() and not p.is_symlink() and _sha256(p) != want:
             out.append(rel)
-    return sorted(out)
+    # Completeness cross-check (v3.8.15 / P2): the owned map is agent-writable, so an attacker
+    # can EDIT an owned file AND DELETE its entry so the hash loop above never sees it. Scan the
+    # security-critical managed dir(s): any regular file present that the render would overwrite
+    # but that has NO baseline hash is UNVERIFIABLE -> flag as drift (needs --force). (Project
+    # files legitimately never live under scripts/ — it is substrate-reserved by the hard rules —
+    # so this does not false-flag a well-behaved repo.)
+    ownkeys = set(owned)
+    for d in _COMPLETENESS_SCAN_DIRS:
+        base = root / d
+        if not base.is_dir():
+            continue
+        for p in sorted(base.rglob("*")):
+            if not p.is_file() or p.is_symlink() or p.suffix not in _COMPLETENESS_SCAN_EXTS:
+                continue
+            rel = p.relative_to(root).as_posix()
+            if rel in preserve or rel in _DRIFT_EXCLUDE or any(rel.startswith(pd + "/") for pd in PRESERVE_DIRS):
+                continue
+            if rel not in ownkeys:
+                out.append(rel)   # present under a managed dir but unvouched by the baseline
+    return sorted(set(out))
+
+
+_COMPLETENESS_SCAN_DIRS = ("scripts",)
+_COMPLETENESS_SCAN_EXTS = (".py", ".sh")
 
 
 _SYMLINK_SCAN_SKIP = {".git", "venv", ".venv", "node_modules", "__pycache__",
@@ -548,6 +571,7 @@ def main(argv=None) -> int:
         # Raise-only lock reconciliation (v3.8.14 / P1): never leave a required_* lock LOWER than
         # the value observed just before the render — a concurrent raise that landed in the
         # check->render window must survive (bootstrap+restore would otherwise clobber it down).
+        _reconciled = False
         for _n in _lock_names:
             _cur = _lock_from_snapshot(_authority_snapshot(root), _n)
             _want = _lock_ge(_cur or "", _locks_pre.get(_n) or "")
@@ -556,8 +580,20 @@ def main(argv=None) -> int:
                     (root / ".substrate" / _n).write_text(_want + "\n", encoding="utf-8")
                     print(f"upgrade: raise-only reconcile: {_n} {_cur or '(unset)'} -> {_want}",
                           file=sys.stderr)
+                    _reconciled = True
                 except Exception:
                     pass
+        # A reconciliation means a concurrent RAISE landed after our render answers were fixed,
+        # so the freshly rendered config/hooks are STALE relative to the now-higher lock (e.g.
+        # required_profile=strict but SUBSTRATE_PROFILE="standard" and no strict hook). Do NOT
+        # claim success with that internally-inconsistent state — fail so the operator re-runs,
+        # which will render consistently against the raised lock (v3.8.15 / P1). The lock is
+        # preserved raised (never lowered); only fresh provenance is skipped.
+        if _reconciled:
+            print("upgrade: a required_* lock was RAISED concurrently during the render — the "
+                  "rendered config/hooks are stale relative to the new lock. The raise was "
+                  "preserved; re-run `upgrade --write` to render consistently.", file=sys.stderr)
+            return 2
 
         # consistency + fresh provenance
         mf = _run([sys.executable, "-I", str(root / "scripts" / "update_manifest.py"), "--fix"], cwd=root)

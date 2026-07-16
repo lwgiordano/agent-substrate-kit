@@ -44,7 +44,7 @@ esac
 case "$LANG_PRIMARY" in auto|python|node|go|none) ;; *) echo "invalid lang"; exit 1;; esac
 case "$UI_ENABLED" in yes|no|true|false|ui|no-ui) ;; *) echo "invalid ui"; exit 1;; esac
 [[ "$UI_ENABLED" == "true" || "$UI_ENABLED" == "ui" ]] && UI_ENABLED="yes"; [[ "$UI_ENABLED" == "false" || "$UI_ENABLED" == "no-ui" ]] && UI_ENABLED="no"
-mkdir -p "$TARGET"; cd "$TARGET"; REPO_ROOT="$(pwd)"
+mkdir -p "$TARGET"; cd "$TARGET"; REPO_ROOT="$(pwd)"; REPO_ROOT_REAL="$(pwd -P)"
 # v3.8.14 (P1): refuse if ANY symlink in the target ESCAPES it — copy()/render()/`mkdir -p`
 # would follow a symlinked ANCESTOR and write outside the repo (the v3.8.13 leaf-only rm -f
 # did not cover a symlinked PARENT dir). Guards DIRECT bootstrap too, not just via upgrade.
@@ -77,11 +77,17 @@ if [[ "$LANG_PRIMARY" == "auto" ]]; then
 fi
 RUN_PREFIX=""; if [[ "$RUNNER" == "uv" ]]; then RUN_PREFIX="uv run"; elif [[ "$RUNNER" == "poetry" ]]; then RUN_PREFIX="poetry run"; elif [[ "$RUNNER" == "auto" && "$LANG_PRIMARY" == "python" ]]; then if command -v uv >/dev/null 2>&1; then RUN_PREFIX="uv run"; elif command -v poetry >/dev/null 2>&1; then RUN_PREFIX="poetry run"; fi; fi
 PROJECT_SLUG="$(basename "$REPO_ROOT" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9._-' '-' | sed 's/^-//; s/-$//')"; [ -n "$PROJECT_SLUG" ] || PROJECT_SLUG="agent-substrate-project"; TODAY="$(date +%F)"
+# Per-write no-follow guard (v3.8.15): the startup escaping-symlink scan is check-then-write;
+# a symlink planted AFTER it would still be followed. Re-resolve the destination's real parent
+# dir immediately before EACH write and refuse if it is not inside the repo — a per-write
+# invariant, not a one-time scan. (Residual: a symlink planted between this `pwd -P` and the
+# cp/sed is a sub-ms window a shell installer cannot fully close without OS-level locking.)
+_safe_dest(){ local d="$1" pd; pd="$(cd "$(dirname "$d")" 2>/dev/null && pwd -P)" || { echo "bootstrap: refusing — cannot resolve destination dir for ${d#./}" >&2; exit 2; }; case "$pd" in "$REPO_ROOT_REAL"|"$REPO_ROOT_REAL"/*) : ;; *) echo "bootstrap: refusing write outside the repo: ${d#./} (real parent -> $pd)" >&2; exit 2 ;; esac; }
 # rm -f the destination BEFORE writing (v3.8.13): plain `cp`/`sed >` FOLLOW a symlinked
 # destination, so a symlink planted at a render target would write through it to an external
 # file. Removing the link first makes cp/sed create a fresh regular file (no-follow write).
-copy(){ local s="$1" d="$2"; mkdir -p "$(dirname "$d")"; if [ -e "$d" ] && [ "$FORCE" != "yes" ]; then echo "    SKIP ${d#./}"; else rm -f "$d"; cp "$s" "$d"; echo "    +    ${d#./}"; fi; }
-render(){ local s="$1" d="$2"; mkdir -p "$(dirname "$d")"; if [ -e "$d" ] && [ "$FORCE" != "yes" ]; then echo "    SKIP ${d#./}"; else rm -f "$d"; sed -e "s/{{PROJECT_SLUG}}/$PROJECT_SLUG/g" -e "s/{{WORKFLOW}}/$WORKFLOW/g" -e "s/{{UI_ENABLED}}/$UI_ENABLED/g" -e "s/{{RUNNER}}/$RUNNER/g" -e "s/{{PROFILE}}/$PROFILE/g" -e "s/{{LANG}}/$LANG_PRIMARY/g" -e "s#{{RUN_PREFIX}}#$RUN_PREFIX#g" "$s" > "$d"; echo "    +    ${d#./}"; fi; }
+copy(){ local s="$1" d="$2"; mkdir -p "$(dirname "$d")"; _safe_dest "$d"; if [ -e "$d" ] && [ "$FORCE" != "yes" ]; then echo "    SKIP ${d#./}"; else rm -f "$d"; cp "$s" "$d"; echo "    +    ${d#./}"; fi; }
+render(){ local s="$1" d="$2"; mkdir -p "$(dirname "$d")"; _safe_dest "$d"; if [ -e "$d" ] && [ "$FORCE" != "yes" ]; then echo "    SKIP ${d#./}"; else rm -f "$d"; sed -e "s/{{PROJECT_SLUG}}/$PROJECT_SLUG/g" -e "s/{{WORKFLOW}}/$WORKFLOW/g" -e "s/{{UI_ENABLED}}/$UI_ENABLED/g" -e "s/{{RUNNER}}/$RUNNER/g" -e "s/{{PROFILE}}/$PROFILE/g" -e "s/{{LANG}}/$LANG_PRIMARY/g" -e "s#{{RUN_PREFIX}}#$RUN_PREFIX#g" "$s" > "$d"; echo "    +    ${d#./}"; fi; }
 # render_precommit: render + strip profile/lang marker blocks.
 #   starter  -> strip standard + strict blocks
 #   standard -> strip strict blocks

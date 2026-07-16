@@ -516,6 +516,27 @@ cheaply VERIFY something (submodule integrity), FAIL CLOSED rather than approxim
 needs a per-operation invariant; and never claim success after a security reconciliation left state
 internally inconsistent.
 
+v3.8.16 is an ARCHITECTURAL re-design of the memory `--verify` signature, not another point patch —
+it retires the whack-a-mole tail that produced findings v3.8.10 (a,b,c), v3.8.14, and v3.8.15's memory
+items. Every prior memory finding was the same shape: the hand-rolled `_worktree_state` re-derived the
+worktree fingerprint by hand (walking git-status paths, lstat-ing types/modes/inodes, hashing hidden
+files, length-prefixing to avoid collisions), and each round Codex found one more attribute the walk
+did not canonicalize the way git does (symlink target vs bytes, filemode, skip-worktree, gitlink,
+hardlink-swap, path encoding). Re-deriving git's own content model in Python is a losing game. The fix:
+delegate canonicalization to git. `_worktree_state` now stages the FULL worktree into a throwaway index
+(`GIT_INDEX_FILE` pointed at a `tempfile.TemporaryDirectory`, `git -c core.fsmonitor=false -c
+core.fileMode=true add -A`) and takes `git write-tree` — a content-addressed tree OID over exactly the
+bytes+modes+paths git tracks, computed by git, gitignored files excluded, no skip-worktree bits on a
+fresh index. The verify signature is that OID folded with a hash of the temp index (so index-only staging
+differences still register), and it still FAILS CLOSED on any tracked gitlink (mode 160000 in the index)
+since a submodule's content is not in the superproject tree. This DELETES the entire lstat/inode/flag/
+length-prefix walk and the class of "you missed attribute N" findings with it: whatever git's content
+model canonicalizes, the OID reflects, by construction. All git calls still run under the sanitized
+`_clean_env` (routing vars stripped) and identity (full HEAD OID + symbolic ref, fail-closed) is
+unchanged. Cross-cutting lesson: when you are verifying a property some other tool already computes
+canonically (here, git's notion of tracked content), ANCHOR the check to that tool's output instead of
+reconstructing it — a reconstruction has to chase every attribute the real thing already handles.
+
 v3.8.10 is Codex's SIXTH-round re-audit (of v3.8.9) — 6 substantive findings (operator stopping rule:
 fix everything substantive until a clean pass). THREE in `memory_log.py`: (a) the hidden-path loop
 hashed `read_bytes()` (follows symlinks) not lstat type/mode or `readlink`, so a retargeted symlink

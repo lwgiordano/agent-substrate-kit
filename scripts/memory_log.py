@@ -43,9 +43,9 @@ import hashlib
 import json
 import os
 import re
-import stat
 import subprocess
 import sys
+import tempfile
 from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
@@ -194,6 +194,32 @@ def _git(*args: str) -> str:
     return _git_output(ROOT, *args)
 
 
+def _write_tree_oid():
+    """Content-addressed OID of the FULL dirty+untracked worktree, via `git write-tree` over
+    a TEMPORARY index (the user's real index is untouched). `add -A` stages every non-ignored
+    path (git blobs content, records modes, stores symlinks as blobs — no following); write-tree
+    then yields an immutable, collision-resistant tree OID. Sanitized env + fsmonitor off so
+    mutable git config can't steer it; core.fileMode=true so a mode flip is recorded. Returns
+    the OID string, or None on any failure (fail closed). (v3.8.16 — delegates canonicalization
+    to git instead of hand-rolling a worktree signature.)"""
+    try:
+        with tempfile.TemporaryDirectory(prefix="substrate-verify-") as td:
+            env = _clean_env()
+            env["GIT_INDEX_FILE"] = os.path.join(td, "index")
+            add = subprocess.run(
+                ["git", "-c", "core.fsmonitor=false", "-c", "core.fileMode=true", "add", "-A"],
+                cwd=ROOT, capture_output=True, timeout=120, env=env)
+            if add.returncode != 0:
+                return None
+            wt = subprocess.run(["git", "-c", "core.fsmonitor=false", "write-tree"],
+                                cwd=ROOT, capture_output=True, text=True, timeout=30, env=env)
+            if wt.returncode != 0:
+                return None
+            return wt.stdout.strip() or None
+    except Exception:
+        return None
+
+
 # skill-run free-text fields are agent-authored and durable. Nothing re-injects
 # them into model context TODAY (completion_gate reads only type/skill/ts), but
 # harden at the write like session_handoff does — future consumers (memory tail
@@ -251,14 +277,18 @@ def skill_run(name: str, result: str, note: str, verify: bool = False) -> int:
     to reflect it. Block mode (deferred) will require a verified event — an
     unverified `--result pass` is a nudge, not evidence."""
     def _worktree_state():
-        """Return (status_lines, signature). status_lines is None if git status is
-        unreadable; signature is None if ANY changed/untracked path can't be read —
-        both force fail-closed (an unknown tree can never back verified=true). Paths
-        come from `status --porcelain -z -uall` (NUL-delimited, so non-ASCII names are
-        NOT C-quoted) and content is the RAW on-disk BYTES of each changed path read
-        directly — never `git diff` (which honors GIT_EXTERNAL_DIFF/textconv and could
-        render a real change as empty). (v3.8.7 — replaces the v3.8.6 porcelain-string
-        + git-diff signature blind to ext-diff/textconv and C-quoted untracked paths.)"""
+        """Return (status_lines, signature). `status_lines` feeds the human-facing
+        changed_files/dirty fields. `signature` is a CONTENT-ADDRESSED git tree OID of the
+        full dirty+untracked worktree, produced by `git write-tree` over a TEMPORARY index
+        (the user's real index is untouched) — git canonicalizes content, modes, symlinks
+        (stored as blobs) and renames, so there is NO hand-rolled encoding to get wrong and
+        NO filesystem escape hatch to chase. This REPLACES the v3.8.7–v3.8.15 length-prefix /
+        lstat / inode / ls-files-flag signature and its whole findings tail (v3.8.16), while
+        KEEPING dirty-tree verification (the temp index makes the snapshot non-intrusive).
+        signature is None on any failure (fail closed). A tracked GITLINK (submodule, index
+        mode 160000) is not integrity-verifiable from the superproject tree, so we FAIL CLOSED
+        whenever one is present in the INDEX — even if its worktree path is absent/removed."""
+        # Human-facing status (also confirms git is readable); fsmonitor off + sanitized env.
         try:
             st = subprocess.run(["git", "-c", "core.fsmonitor=false", "status",
                                  "--porcelain", "-z", "-uall"],
@@ -267,56 +297,16 @@ def skill_run(name: str, result: str, note: str, verify: bool = False) -> int:
                 return None, None
         except Exception:
             return None, None
-        records = [r for r in st.stdout.split(b"\0") if r]
-        lines, paths, i = [], [], 0
+        lines, records, i = [], [r for r in st.stdout.split(b"\0") if r], 0
         while i < len(records):
             rec = records[i]
             xy = rec[:2].decode("ascii", "replace")
-            path_b = rec[3:]
-            lines.append(xy + " " + path_b.decode("utf-8", "surrogateescape"))
-            paths.append((xy, path_b))
-            # rename/copy records are followed by a SECOND NUL field = the OLD name.
-            # Fold it into the signature (don't discard) so switching a rename's source
-            # with identical content (a.txt->c.txt vs b.txt->c.txt) is still detected.
+            lines.append(xy + " " + rec[3:].decode("utf-8", "surrogateescape"))
             if xy and (xy[0] in "RC" or xy[1] in "RC"):
-                i += 1
-                old = records[i] if i < len(records) else b""
-                lines[-1] += " <- " + old.decode("utf-8", "surrogateescape")
+                i += 1   # a rename/copy record is followed by the OLD-name field — skip it
             i += 1
-        h = hashlib.sha256()
-
-        def _hu(*parts):
-            # Length-prefix EVERY variable field so record boundaries cannot collide
-            # (v3.8.14 / P1): the old `path + NUL + content` concatenation was ambiguous —
-            # one record's content could absorb the next record's `path\0`, so two DIFFERENT
-            # trees hashed to the SAME byte stream. An 8-byte big-endian length before each
-            # field makes the encoding injective.
-            for p in parts:
-                h.update(len(p).to_bytes(8, "big"))
-                h.update(p)
-
-        _hu(b"status", "\n".join(lines).encode("utf-8", "surrogateescape"))
-        for xy, path_b in paths:
-            if "D" in xy:            # deleted: no working-tree file to hash
-                continue
-            fp = Path(os.fsdecode(path_b))
-            fp = fp if fp.is_absolute() else (ROOT / fp)
-            try:
-                if fp.is_symlink():
-                    _hu(path_b, b"symlink", os.readlink(fp).encode("utf-8", "surrogateescape"))
-                elif fp.is_file():
-                    _hu(path_b, b"file", fp.read_bytes())
-                elif fp.is_dir():    # defensive (-uall lists files, not dirs)
-                    for sub in sorted(fp.rglob("*")):
-                        if sub.is_file():
-                            _hu(str(sub).encode("utf-8", "surrogateescape"), b"subfile", sub.read_bytes())
-                else:
-                    return lines, None   # git reports it changed but it's absent
-            except Exception:
-                return lines, None       # unreadable -> fail closed
-        # Index identity (v3.8.8): a staged-blob swap that leaves working-tree bytes and the
-        # porcelain letters unchanged is otherwise invisible. `ls-files -s -z` lists the staged
-        # mode/OID/stage/path of every tracked entry. Read failure -> fail closed.
+        # Fail closed on any tracked GITLINK, detected in the INDEX (mode 160000) so a
+        # deinitialized/removed submodule worktree still fails closed (round-11 finding).
         try:
             idx = subprocess.run(["git", "-c", "core.fsmonitor=false", "ls-files", "-s", "-z"],
                                 cwd=ROOT, capture_output=True, timeout=15, env=_clean_env())
@@ -324,69 +314,16 @@ def skill_run(name: str, result: str, note: str, verify: bool = False) -> int:
             return lines, None
         if idx.returncode != 0:
             return lines, None
-        _hu(b"index", idx.stdout)
-        # skip-worktree / assume-unchanged flag MAP (v3.8.9): a flag TOGGLE must show. The
-        # CONTENT of flagged paths is covered by the full tracked pass below (which enumerates
-        # ALL tracked paths regardless of flags), so this only records the flag map now.
-        try:
-            lv = subprocess.run(["git", "-c", "core.fsmonitor=false", "ls-files", "-v", "-z"],
-                                cwd=ROOT, capture_output=True, timeout=15, env=_clean_env())
-        except Exception:
+        for entry in idx.stdout.split(b"\0"):
+            if entry[:6] == b"160000":
+                return lines, None   # gitlink present -> unverifiable -> fail closed
+        # Signature = the worktree tree OID (content/mode/symlink, canonicalized by git) folded
+        # with a hash of the real index (`ls-files -s`), so a staged-blob swap that leaves the
+        # worktree unchanged is still flagged. Both come from git's own object model.
+        oid = _write_tree_oid()
+        if oid is None:
             return lines, None
-        if lv.returncode != 0:
-            return lines, None
-        _hu(b"flags", lv.stdout)
-        # FULL tracked-content identity (v3.8.11): mutable git config/env/flags — fsmonitor,
-        # core.filemode, skip-worktree, assume-unchanged — all control what git REPORTS as
-        # changed, so trusting status/ls-files flags is a losing game. Read the filesystem
-        # OURSELVES: enumerate EVERY tracked path (`ls-files -z`, fsmonitor disabled) and hash
-        # its lstat identity + content (symlink target / file bytes / gitlink HEAD+dirty state).
-        # Fail closed on any read error.
-        try:
-            tk = subprocess.run(["git", "-c", "core.fsmonitor=false", "ls-files", "-z"],
-                                cwd=ROOT, capture_output=True, timeout=30, env=_clean_env())
-        except Exception:
-            return lines, None
-        if tk.returncode != 0:
-            return lines, None
-        _hu(b"tracked")
-        rootr = os.path.realpath(ROOT)
-        for pb in tk.stdout.split(b"\0"):
-            if not pb:
-                continue
-            fp = Path(os.fsdecode(pb))
-            fp = fp if fp.is_absolute() else (ROOT / fp)
-            try:
-                # No-follow ancestor topology (v3.8.13): if the symlink-resolved real path
-                # ESCAPES root, a symlinked ANCESTOR is redirecting this tracked path to an
-                # external tree — fail closed rather than hash external content as our own.
-                rp = os.path.realpath(fp)
-                if rp != rootr and not rp.startswith(rootr + os.sep):
-                    return lines, None
-                stt = fp.lstat()
-                # st_dev/st_ino/st_nlink (v3.8.13): catch a hard-link/alias swap to an external
-                # same-content victim (inode + link count change while the bytes stay identical).
-                meta = (f"{stat.S_IFMT(stt.st_mode)}:{stat.S_IMODE(stt.st_mode)}:"
-                        f"{stt.st_dev}:{stt.st_ino}:{stt.st_nlink}").encode()
-                if stat.S_ISLNK(stt.st_mode):
-                    _hu(pb, b"lnk", meta, os.readlink(fp).encode("utf-8", "surrogateescape"))
-                elif stat.S_ISREG(stt.st_mode):
-                    _hu(pb, b"reg", meta, fp.read_bytes())
-                elif stat.S_ISDIR(stt.st_mode):
-                    # gitlink (submodule): the tamper-evidence signature cannot cheaply prove a
-                    # submodule's FULL tracked integrity (submodule-local skip-worktree /
-                    # core.filemode / staged-blob swaps / broken .git discovery all evade a
-                    # HEAD+porcelain hash), so FAIL CLOSED rather than ever authenticate an
-                    # unverifiable submodule (v3.8.15). A repo WITH a submodule simply never
-                    # gets verified=true from --verify — honest over a false pass.
-                    return lines, None
-                else:
-                    _hu(pb, b"oth", meta)
-            except FileNotFoundError:
-                _hu(pb, b"absent")
-            except Exception:
-                return lines, None
-        return lines, h.hexdigest()
+        return lines, oid + ":" + hashlib.sha256(idx.stdout).hexdigest()
 
     def _identity():
         # success-aware full HEAD OID + symbolic ref, under the sanitized env; "" -> None

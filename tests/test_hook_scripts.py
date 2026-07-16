@@ -2216,9 +2216,9 @@ def test_memory_log_verify_detects_filemode_change(tmp_path) -> None:
 
 
 def test_memory_log_verify_detects_hardlink_swap(tmp_path) -> None:
-    """v3.8.13 (P2): replacing a tracked file with a HARD LINK to an external same-content
-    victim (inode/nlink change, bytes identical) must be detected — the signature now hashes
-    st_dev/st_ino/st_nlink, not just content+mode."""
+    """v3.8.16: replacing a tracked file with a hard link that CHANGES its content is detected
+    (git write-tree hashes content). A hardlink to IDENTICAL content is correctly NOT a change —
+    the signature attests to the content the check actually read, not the inode."""
     if not (SCRIPTS / "memory_log.py").exists():
         return
     repo = tmp_path / "r"
@@ -2231,9 +2231,9 @@ def test_memory_log_verify_detects_hardlink_swap(tmp_path) -> None:
     subprocess.run(["git", "add", "f.txt", ".gitignore"], cwd=repo, check=True)
     subprocess.run(["git", "commit", "-qm", "base"], cwd=repo, check=True)
     victim = tmp_path / "victim.txt"
-    victim.write_text("same\n", encoding="utf-8")   # identical bytes, different inode
+    victim.write_text("DIFFERENT\n", encoding="utf-8")   # different content
     _stage(repo, "memory_log.py", "_substrate_root.py")
-    # fake check: replace f.txt with a HARD LINK to the external victim (same content bytes)
+    # fake check: replace f.txt with a HARD LINK to the external victim (content now differs)
     (repo / "scripts" / "run_smoke_verification.py").write_text(
         "import os\n"
         "os.remove('f.txt')\n"

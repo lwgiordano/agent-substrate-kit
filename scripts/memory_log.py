@@ -43,6 +43,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -220,6 +221,49 @@ def _write_tree_oid():
         return None
 
 
+def _raw_tracked_hash():
+    """SHA-256 over the RAW worktree bytes of every TRACKED path (`git ls-files -z`), read
+    directly from disk. `git write-tree` stores git's OBJECT model, which (a) applies `clean`
+    filters — so a `filter.*.clean` that canonicalizes differing raw bytes to one blob hides a
+    real content change — and (b) is fed by a fresh temp index whose `add -A` DROPS gitignored
+    paths, so a tracked-but-ignored file's raw change vanishes from the tree OID. The checker
+    reads RAW bytes, so the signature must too. This folds in the literal on-disk bytes (and
+    symlink targets) the checker would read. Length-prefixed (path, then content) so it is
+    injective / collision-resistant. None on any failure (fail closed). v3.8.18 (memory:209)."""
+    try:
+        ls = subprocess.run(["git", "-c", "core.fsmonitor=false", "ls-files", "-z"],
+                            cwd=ROOT, capture_output=True, timeout=60, env=_clean_env())
+        if ls.returncode != 0:
+            return None
+        h = hashlib.sha256()
+        for path in sorted(p for p in ls.stdout.split(b"\0") if p):
+            h.update(f"{len(path)}:".encode())
+            h.update(path)
+            fp = os.path.join(ROOT, os.fsdecode(path))
+            try:
+                lst = os.lstat(fp)
+            except FileNotFoundError:
+                h.update(b"|absent|")   # genuinely gone (ENOENT) — a real, recordable state
+                continue
+            # Any OTHER lstat error (EACCES/ELOOP/…) is NOT "absent": let it propagate to the
+            # outer handler so the signature is None (fail closed), never a stable hash that
+            # could match across a content change we couldn't actually read (v3.8.18 auditor).
+            if stat.S_ISLNK(lst.st_mode):
+                target = os.readlink(fp).encode("utf-8", "surrogateescape")
+                h.update(f"|link:{len(target)}:".encode())
+                h.update(target)
+            elif stat.S_ISREG(lst.st_mode):
+                with open(fp, "rb") as fh:
+                    content = fh.read()
+                h.update(f"|file:{len(content)}:".encode())
+                h.update(content)
+            else:
+                h.update(f"|other:{lst.st_mode}|".encode())   # fifo/socket/etc. — record the type
+        return h.hexdigest()
+    except Exception:
+        return None
+
+
 # skill-run free-text fields are agent-authored and durable. Nothing re-injects
 # them into model context TODAY (completion_gate reads only type/skill/ts), but
 # harden at the write like session_handoff does — future consumers (memory tail
@@ -278,13 +322,14 @@ def skill_run(name: str, result: str, note: str, verify: bool = False) -> int:
     unverified `--result pass` is a nudge, not evidence."""
     def _worktree_state():
         """Return (status_lines, signature). `status_lines` feeds the human-facing
-        changed_files/dirty fields. `signature` is a CONTENT-ADDRESSED git tree OID of the
-        full dirty+untracked worktree, produced by `git write-tree` over a TEMPORARY index
-        (the user's real index is untouched) — git canonicalizes content, modes, symlinks
-        (stored as blobs) and renames, so there is NO hand-rolled encoding to get wrong and
-        NO filesystem escape hatch to chase. This REPLACES the v3.8.7–v3.8.15 length-prefix /
-        lstat / inode / ls-files-flag signature and its whole findings tail (v3.8.16), while
-        KEEPING dirty-tree verification (the temp index makes the snapshot non-intrusive).
+        changed_files/dirty fields. `signature` folds three git-derived views of the worktree:
+        (1) a CONTENT-ADDRESSED tree OID from `git write-tree` over a TEMPORARY index (the real
+        index is untouched) — git canonicalizes content, modes, symlinks and renames, replacing
+        the v3.8.7–v3.8.15 hand-rolled lstat/inode/flag signature (v3.8.16); (2) a hash of the
+        real index (`ls-files -s`) so a staged-blob swap is caught; and (3) a RAW-byte hash of
+        every tracked path (`_raw_tracked_hash`). (3) exists because the tree OID is git's OBJECT
+        model — it applies `clean` filters and its fresh temp index drops gitignored paths — so
+        the OID alone is NOT faithful to the raw bytes the checker reads (v3.8.18 / memory:209).
         signature is None on any failure (fail closed). A tracked GITLINK (submodule, index
         mode 160000) is not integrity-verifiable from the superproject tree, so we FAIL CLOSED
         whenever one is present in the INDEX — even if its worktree path is absent/removed."""
@@ -318,12 +363,17 @@ def skill_run(name: str, result: str, note: str, verify: bool = False) -> int:
             if entry[:6] == b"160000":
                 return lines, None   # gitlink present -> unverifiable -> fail closed
         # Signature = the worktree tree OID (content/mode/symlink, canonicalized by git) folded
-        # with a hash of the real index (`ls-files -s`), so a staged-blob swap that leaves the
-        # worktree unchanged is still flagged. Both come from git's own object model.
+        # with a hash of the real index (`ls-files -s`, so a staged-blob swap that leaves the
+        # worktree unchanged is still flagged) AND a RAW-byte hash of every tracked path. The
+        # raw hash is what makes the signature faithful to what the CHECKER reads: the tree OID
+        # is git's object model, which applies `clean` filters and drops gitignored paths, so
+        # neither the OID nor the index hash alone reflects a filtered / tracked-ignored raw
+        # change (v3.8.18 / memory:209). All three come from git's tracked set + the real files.
         oid = _write_tree_oid()
-        if oid is None:
+        raw = _raw_tracked_hash()
+        if oid is None or raw is None:
             return lines, None
-        return lines, oid + ":" + hashlib.sha256(idx.stdout).hexdigest()
+        return lines, oid + ":" + hashlib.sha256(idx.stdout).hexdigest() + ":" + raw
 
     def _identity():
         # success-aware full HEAD OID + symbolic ref, under the sanitized env; "" -> None

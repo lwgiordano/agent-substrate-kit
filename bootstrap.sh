@@ -88,12 +88,23 @@ _safe_dest(){ local d="$1" pd; pd="$(cd "$(dirname "$d")" 2>/dev/null && pwd -P)
 # file. Removing the link first makes cp/sed create a fresh regular file (no-follow write).
 copy(){ local s="$1" d="$2"; mkdir -p "$(dirname "$d")"; _safe_dest "$d"; if [ -e "$d" ] && [ "$FORCE" != "yes" ]; then echo "    SKIP ${d#./}"; else rm -f "$d"; cp "$s" "$d"; echo "    +    ${d#./}"; fi; }
 render(){ local s="$1" d="$2"; mkdir -p "$(dirname "$d")"; _safe_dest "$d"; if [ -e "$d" ] && [ "$FORCE" != "yes" ]; then echo "    SKIP ${d#./}"; else rm -f "$d"; sed -e "s/{{PROJECT_SLUG}}/$PROJECT_SLUG/g" -e "s/{{WORKFLOW}}/$WORKFLOW/g" -e "s/{{UI_ENABLED}}/$UI_ENABLED/g" -e "s/{{RUNNER}}/$RUNNER/g" -e "s/{{PROFILE}}/$PROFILE/g" -e "s/{{LANG}}/$LANG_PRIMARY/g" -e "s#{{RUN_PREFIX}}#$RUN_PREFIX#g" "$s" > "$d"; echo "    +    ${d#./}"; fi; }
+# wprep / wappend: the SAME per-write no-follow invariant copy()/render() inline, for the
+# DIRECT redirection sites below (render_precommit + the config/lock/sandbox/docs/metadata
+# `>`/`>>` writes). v3.8.13's _safe_dest guard was wired only into copy()/render(), so these
+# raw redirections followed a PERSISTENT symlinked destination straight out of the repo — a
+# deterministic external write, not the documented sub-ms race (v3.8.18 / bootstrap:136).
+#   wprep  (truncating `>`): validate the real parent is in-repo, then unlink any leaf so `>`
+#          creates a fresh regular file instead of following a planted link.
+#   wappend (`>>` to .gitattributes/.gitignore, which must KEEP existing content): validate the
+#          parent and REFUSE if the leaf is a symlink (a legit tracked dotfile is a regular file).
+wprep(){ mkdir -p "$(dirname "$1")"; _safe_dest "$1"; rm -f "$1"; }
+wappend(){ _safe_dest "$1"; if [ -L "$1" ]; then echo "bootstrap: refusing — $1 is a symlink (would append outside the repo)" >&2; exit 2; fi; }
 # render_precommit: render + strip profile/lang marker blocks.
 #   starter  -> strip standard + strict blocks
 #   standard -> strip strict blocks
 #   strict   -> keep all
 #   lang != python -> strip python-only blocks
-render_precommit(){ local s="$1" d="$2"; mkdir -p "$(dirname "$d")"
+render_precommit(){ local s="$1" d="$2"; mkdir -p "$(dirname "$d")"; _safe_dest "$d"
   if [ -e "$d" ] && [ "$FORCE" != "yes" ]; then echo "    SKIP ${d#./}"; return; fi
   local tmp; tmp="$(mktemp)"
   # {{PY}} = substrate-venv python (always present after `manage.sh setup`,
@@ -108,7 +119,7 @@ render_precommit(){ local s="$1" d="$2"; mkdir -p "$(dirname "$d")"
   if [[ "$LANG_PRIMARY" != "python" ]]; then
     awk '/^ *# >>> python-only$/{skip=1} /^ *# <<< python-only$/{skip=0; next} !skip' "$tmp" > "$tmp.2" && mv "$tmp.2" "$tmp"
   fi
-  grep -v '^ *# >>> \|^ *# <<< ' "$tmp" > "$d"; rm -f "$tmp"; echo "    +    ${d#./}"
+  rm -f "$d"; grep -v '^ *# >>> \|^ *# <<< ' "$tmp" > "$d"; rm -f "$tmp"; echo "    +    ${d#./}"
 }
 echo "==> Installing Agent Substrate Kit v3 into $REPO_ROOT (profile=$PROFILE lang=$LANG_PRIMARY)"
 # scripts/ is RESERVED by the substrate. If the target already has a scripts/ with the
@@ -134,6 +145,7 @@ for f in "$KIT_DIR"/scripts/*; do [ -f "$f" ] || continue; copy "$f" "scripts/$(
 if [[ "$PROFILE" == "strict" ]]; then for f in "$KIT_DIR"/extras/*.py; do [ -f "$f" ] || continue; copy "$f" "scripts/$(basename "$f")"; chmod +x "scripts/$(basename "$f")" || true; done; fi
 # Substrate config: manage.sh + doctor read this. Operator may edit LINT/TYPECHECK/TEST commands.
 if [ ! -e .substrate/config ] || [ "$FORCE" == "yes" ]; then
+  wprep .substrate/config
   { echo "# Written by bootstrap.sh; parsed as DATA by scripts/_substrate_config.sh."; echo "# Do NOT source this file as shell."
     echo "SUBSTRATE_PROFILE=\"$PROFILE\""
     echo "SUBSTRATE_LANG=\"$LANG_PRIMARY\""
@@ -153,16 +165,16 @@ fi
 # and the runtime hook refuse to go BELOW it, so a PR can't flip strict->standard
 # to disable strict-only behavior. CODEOWNED + frozen by the trusted-base guard;
 # lowering it is a deliberate, reviewed act. (Re)written to match the install.
-echo "$PROFILE" > .substrate/required_profile; echo "    +    .substrate/required_profile"
+wprep .substrate/required_profile; echo "$PROFILE" > .substrate/required_profile; echo "    +    .substrate/required_profile"
 # Sandbox LOCK: the minimum containment requirement, frozen like required_profile.
 # `--profile strict+sandbox` pins this to 1, so a PR can RAISE but never silently
 # DISABLE containment (check_substrate_config + trusted-base enforce it). v3.5.1.
-echo "$SANDBOX" > .substrate/required_sandbox; echo "    +    .substrate/required_sandbox"
+wprep .substrate/required_sandbox; echo "$SANDBOX" > .substrate/required_sandbox; echo "    +    .substrate/required_sandbox"
 # Remote-governance LOCK: the minimum remote-governance requirement, frozen like
 # required_profile/required_sandbox. `--profile *+remote` pins this to 1 so a PR can
 # RAISE but never silently DISABLE remote governance (check_substrate_config +
 # trusted-base enforce it). Orthogonal to the profile — decoupled from strict. v3.6.0.
-echo "$REMOTE_GOVERNANCE" > .substrate/required_remote_governance; echo "    +    .substrate/required_remote_governance"
+wprep .substrate/required_remote_governance; echo "$REMOTE_GOVERNANCE" > .substrate/required_remote_governance; echo "    +    .substrate/required_remote_governance"
 # Release/upgrade TRUST ANCHOR (v3.7.13): copy the kit maintainer's minisign public key so
 # this repo can VERIFY the authenticity of a kit release before applying an upgrade
 # (scripts/verify_release.py / `./manage.sh verify-release`). Public key only — no secret.
@@ -174,6 +186,7 @@ fi
 # backend=auto prefers @anthropic-ai/sandbox-runtime (srt) if present, else the OS-native
 # primitive (Linux bubblewrap / macOS seatbelt), else none (fail-closed in strict+sandbox).
 if [ ! -e .substrate/sandbox.json ] || [ "$FORCE" == "yes" ]; then
+  wprep .substrate/sandbox.json
   { echo '{'
     echo '  "backend": "auto",'
     echo '  "network": "deny",'
@@ -189,7 +202,7 @@ render_precommit "$KIT_DIR/templates/pre-commit-config.yaml.template" .pre-commi
 render "$KIT_DIR/templates/manage.sh.template" manage.sh; chmod +x manage.sh
 render "$KIT_DIR/templates/codex/config.toml.template" .codex/config.toml; render "$KIT_DIR/templates/codex/hooks.json.template" .codex/hooks.json; render "$KIT_DIR/templates/claude/settings.json.template" .claude/settings.json
 # Skills: copy the whole skill dir (SKILL.md + any references/) to both harnesses.
-for sd in "$KIT_DIR"/skills/*; do [ -d "$sd" ] || continue; sn="$(basename "$sd")"; mkdir -p ".agents/skills" ".claude/skills"
+for sd in "$KIT_DIR"/skills/*; do [ -d "$sd" ] || continue; sn="$(basename "$sd")"; mkdir -p ".agents/skills" ".claude/skills"; _safe_dest ".claude/skills/$sn"; _safe_dest ".agents/skills/$sn"
   if [ -d ".claude/skills/$sn" ] && [ "$FORCE" != "yes" ]; then echo "    SKIP .claude/skills/$sn"; else rm -rf ".claude/skills/$sn"; cp -R "$sd" ".claude/skills/$sn"; echo "    +    .claude/skills/$sn"; fi
   if [ -d ".agents/skills/$sn" ] && [ "$FORCE" != "yes" ]; then echo "    SKIP .agents/skills/$sn"; else rm -rf ".agents/skills/$sn"; cp -R "$sd" ".agents/skills/$sn"; echo "    +    .agents/skills/$sn"; fi
 done
@@ -197,7 +210,7 @@ mkdir -p .claude/agents .codex/agents; for f in "$KIT_DIR"/agents/claude/*; do [
 mkdir -p docs/decisions docs/postmortems docs/knowledge docs/templates docs/blind-spot-checklists
 copy "$KIT_DIR/templates/0000-adr-template.md" docs/decisions/0000-template.md; copy "$KIT_DIR/templates/postmortem_template.md" docs/postmortems/_template.md; copy "$KIT_DIR/templates/knowledge_doc_template.md" docs/knowledge/_template.md; copy "$KIT_DIR/templates/finding_response.md" docs/templates/finding_response.md; copy "$KIT_DIR/templates/diy_ultrareview_prompts.md" docs/templates/diy_ultrareview_prompts.md
 for f in "$KIT_DIR"/templates/blind-spot-checklists/*.md; do [ -f "$f" ] && copy "$f" "docs/blind-spot-checklists/$(basename "$f")"; done
-if [ ! -e docs/HISTORY.md ] || [ "$FORCE" == "yes" ]; then cat > docs/HISTORY.md <<'HISTORY'
+if [ ! -e docs/HISTORY.md ] || [ "$FORCE" == "yes" ]; then wprep docs/HISTORY.md; cat > docs/HISTORY.md <<'HISTORY'
 # HISTORY.md — Append-only project changelog
 
 **DO NOT EDIT prior entries.** Update only via `scripts/append_history.py`.
@@ -205,7 +218,7 @@ This file is `merge=union` in `.gitattributes` so concurrent branch entries comb
 
 HISTORY
 echo "    +    docs/HISTORY.md"; fi
-if [ ! -e docs/README.md ] || [ "$FORCE" == "yes" ]; then cat > docs/README.md <<'DOCS'
+if [ ! -e docs/README.md ] || [ "$FORCE" == "yes" ]; then wprep docs/README.md; cat > docs/README.md <<'DOCS'
 # docs/
 
 Project documentation index.
@@ -219,13 +232,13 @@ Project documentation index.
   checklist-auditor subagent, not by the main context).
 DOCS
 echo "    +    docs/README.md"; fi
-[ -e docs/ARCHITECTURE.md ] || { echo '# Architecture
+[ -e docs/ARCHITECTURE.md ] || { wprep docs/ARCHITECTURE.md; echo '# Architecture
 
 TODO.' > docs/ARCHITECTURE.md; echo "    +    docs/ARCHITECTURE.md"; }
-[ -e docs/INTENT.md ] || { echo '# Intent
+[ -e docs/INTENT.md ] || { wprep docs/INTENT.md; echo '# Intent
 
 TODO.' > docs/INTENT.md; echo "    +    docs/INTENT.md"; }
-if [ ! -e docs/knowledge/00_substrate.md ] || [ "$FORCE" == "yes" ]; then { echo '---'; echo 'purpose: Universal Agent Substrate Kit v3 files installed in this repo.'; echo "last_human_reviewed: $TODAY"; echo 'covers:'; find scripts -maxdepth 1 -type f \( -name '*.py' -o -name '*.sh' \) | sort | while read -r p; do echo "  - $p"; done; echo '---'; echo; echo '# Substrate'; echo; echo 'This document covers the installed AI/self-audit substrate scripts.'; } > docs/knowledge/00_substrate.md; echo "    +    docs/knowledge/00_substrate.md"; fi
+if [ ! -e docs/knowledge/00_substrate.md ] || [ "$FORCE" == "yes" ]; then wprep docs/knowledge/00_substrate.md; { echo '---'; echo 'purpose: Universal Agent Substrate Kit v3 files installed in this repo.'; echo "last_human_reviewed: $TODAY"; echo 'covers:'; find scripts -maxdepth 1 -type f \( -name '*.py' -o -name '*.sh' \) | sort | while read -r p; do echo "  - $p"; done; echo '---'; echo; echo '# Substrate'; echo; echo 'This document covers the installed AI/self-audit substrate scripts.'; } > docs/knowledge/00_substrate.md; echo "    +    docs/knowledge/00_substrate.md"; fi
 # Consumer install OMITS the kit's heavy behavioral self-tests (test_hook_scripts,
 # test_doc_consistency): on byte-identical vendored code they re-prove what the kit's
 # OWN CI already proves, adding ~2 min to every consumer CI run for ~zero marginal
@@ -285,18 +298,19 @@ mkdir -p .github/instructions; for f in "$KIT_DIR"/templates/github/*.instructio
 mkdir -p .github/hooks; copy "$KIT_DIR/templates/github/exfil-guard.hook.json" .github/hooks/exfil-guard.json
 # Language-aware Dependabot: the project ecosystem + github-actions.
 if [ ! -e .github/dependabot.yml ] || [ "$FORCE" == "yes" ]; then
+  wprep .github/dependabot.yml
   case "$LANG_PRIMARY" in node) ECO="npm";; go) ECO="gomod";; python) ECO="pip";; *) ECO="";; esac
   { echo "# Dependabot — generated for lang=$LANG_PRIMARY. See docs for tuning."; echo "version: 2"; echo "updates:";
     if [ -n "$ECO" ]; then echo "  - package-ecosystem: \"$ECO\""; echo "    directory: \"/\""; echo "    schedule: {interval: \"weekly\"}"; echo "    open-pull-requests-limit: 5"; echo "    labels: [\"dependencies\", \"$LANG_PRIMARY\"]"; fi
     echo "  - package-ecosystem: \"github-actions\""; echo "    directory: \"/\""; echo "    schedule: {interval: \"weekly\"}"; echo "    open-pull-requests-limit: 3"; echo "    labels: [\"dependencies\", \"ci\"]";
   } > .github/dependabot.yml; echo "    +    .github/dependabot.yml"
 fi
-if [ "$UI_ENABLED" == "yes" ]; then mkdir -p design-system/pages design-system/tokens; [ -e design-system/MASTER.md ] || { echo '# Design System Master
+if [ "$UI_ENABLED" == "yes" ]; then mkdir -p design-system/pages design-system/tokens; [ -e design-system/MASTER.md ] || { wprep design-system/MASTER.md; echo '# Design System Master
 
 TODO.' > design-system/MASTER.md; echo "    +    design-system/MASTER.md"; }; fi
-if [ ! -e .gitattributes ] || ! grep -q 'docs/HISTORY.md' .gitattributes; then echo 'docs/HISTORY.md merge=union' >> .gitattributes; echo "    +    .gitattributes"; fi
-[ -e .gitignore ] || touch .gitignore; for line in docs/CURRENT_SESSION.md docs/.todo_state.json .substrate/memory/tasks/ .substrate/traces/ .substrate/venv/ .substrate/dep_cooldown_cache.json 'ai/audits/*/audit-report.json' __pycache__/ .venv/ .pytest_cache/ .ruff_cache/ .mypy_cache/ node_modules/ dist/ build/; do grep -qxF "$line" .gitignore || echo "$line" >> .gitignore; done
-[ -e docs/.todo_state.json ] || echo '{"version":1,"items":[]}' > docs/.todo_state.json
+if [ ! -e .gitattributes ] || ! grep -q 'docs/HISTORY.md' .gitattributes; then wappend .gitattributes; echo 'docs/HISTORY.md merge=union' >> .gitattributes; echo "    +    .gitattributes"; fi
+wappend .gitignore; [ -e .gitignore ] || touch .gitignore; for line in docs/CURRENT_SESSION.md docs/.todo_state.json .substrate/memory/tasks/ .substrate/traces/ .substrate/venv/ .substrate/dep_cooldown_cache.json 'ai/audits/*/audit-report.json' __pycache__/ .venv/ .pytest_cache/ .ruff_cache/ .mypy_cache/ node_modules/ dist/ build/; do grep -qxF "$line" .gitignore || echo "$line" >> .gitignore; done
+[ -e docs/.todo_state.json ] || { wprep docs/.todo_state.json; echo '{"version":1,"items":[]}' > docs/.todo_state.json; }
 python3 scripts/update_manifest.py --fix >/dev/null || python scripts/update_manifest.py --fix >/dev/null
 # Provenance + drift baseline for `./manage.sh upgrade` (v3.7.14): record the kit
 # version/commit/source, the FULL answer set, and a hash of every owned file.

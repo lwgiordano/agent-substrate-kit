@@ -1951,6 +1951,34 @@ def test_bootstrap_refuses_symlinked_parent_escape(tmp_path) -> None:
     assert (external / "victim.py").read_text() == "VICTIM\n", "external victim was overwritten!"
 
 
+def test_bootstrap_direct_write_no_follows_planted_symlink(tmp_path) -> None:
+    """v3.8.18 (bootstrap:136): the DIRECT redirection sites (.substrate/config, required_* locks,
+    sandbox.json, docs, dependabot) previously wrote through a planted symlink — the v3.8.13
+    _safe_dest+`rm -f` no-follow guard was wired ONLY into copy()/render(). An in-repo-POINTING
+    symlink evades the escaping-symlink startup scan, so before the wprep guard `> .substrate/config`
+    followed the link and clobbered its target. wprep now unlinks the leaf first: the target file is
+    preserved and config is written as a fresh regular file."""
+    if not (ROOT / "bootstrap.sh").exists():
+        return
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    sentinel = repo / "SENTINEL.txt"
+    sentinel.write_text("PRECIOUS\n", encoding="utf-8")
+    (repo / ".substrate").mkdir()
+    # in-repo target -> NOT flagged by the escaping-symlink startup scan; only wprep catches it
+    (repo / ".substrate" / "config").symlink_to("../SENTINEL.txt")
+    p = subprocess.run(["bash", str(ROOT / "bootstrap.sh"), "--target", str(repo),
+                        "--profile", "standard", "--lang", "none", "--no-doctor", "--force"],
+                       capture_output=True, text=True, timeout=120)
+    assert p.returncode == 0, (p.returncode, p.stdout[-300:], p.stderr[-300:])
+    assert sentinel.read_text(encoding="utf-8") == "PRECIOUS\n", \
+        "a direct write followed the symlink and clobbered its in-repo target"
+    cfg = repo / ".substrate" / "config"
+    assert cfg.is_file() and not cfg.is_symlink(), "config should be a fresh regular file, not the symlink"
+    assert 'SUBSTRATE_PROFILE="standard"' in cfg.read_text(encoding="utf-8")
+
+
 def test_upgrade_fails_when_provenance_not_written(tmp_path) -> None:
     """v3.8.11 (P2): if the provenance finalizer cannot write (install.json is a DIRECTORY),
     upgrade must NOT claim success — it verifies the on-disk result, not just the finalizer rc."""
@@ -2268,6 +2296,77 @@ def test_memory_log_verify_detects_hardlink_swap(tmp_path) -> None:
         "import os\n"
         "os.remove('f.txt')\n"
         f"os.link({str(victim)!r}, 'f.txt')\n"
+        "raise SystemExit(0)\n", encoding="utf-8")
+    p = subprocess.run([sys.executable, "-I", str(repo / "scripts" / "memory_log.py"),
+                        "skill-run", "self-audit", "--verify"],
+                       cwd=str(repo), capture_output=True, text=True, timeout=60)
+    assert p.returncode != 0, (p.returncode, p.stdout, p.stderr)
+    ev = repo / ".substrate" / "memory" / "events.jsonl"
+    sk = [json.loads(ln) for ln in ev.read_text().splitlines()
+          if '"skill-run"' in ln][-1]
+    assert sk["data"].get("verify_stale") is True and sk["data"]["verified"] is False
+
+
+def test_memory_log_verify_detects_clean_filtered_content_change(tmp_path) -> None:
+    """v3.8.18 (memory:209): a `clean` filter that canonicalizes differing raw bytes to ONE blob
+    must not hide a real content change. write-tree stores the FILTERED blob (and `git status`
+    also compares filtered content, so the change is invisible there too), leaving the tree OID
+    and index hash unmoved — only the raw-byte hash (_raw_tracked_hash), which reads the actual
+    on-disk bytes the checker sees, detects it."""
+    if not (SCRIPTS / "memory_log.py").exists():
+        return
+    repo = tmp_path / "r"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "x@x"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "x"], cwd=repo, check=True)
+    # a clean filter that emits the SAME bytes regardless of input (consumes stdin to avoid EPIPE)
+    subprocess.run(["git", "config", "filter.const.clean", "cat >/dev/null && printf CONST"],
+                   cwd=repo, check=True)
+    (repo / ".gitattributes").write_text("f.txt filter=const\n", encoding="utf-8")
+    (repo / ".gitignore").write_text("__pycache__/\nscripts/\n", encoding="utf-8")
+    (repo / "f.txt").write_text("BEFORE\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "base"], cwd=repo, check=True)
+    _stage(repo, "memory_log.py", "_substrate_root.py")
+    (repo / "scripts" / "run_smoke_verification.py").write_text(
+        "import pathlib\n"
+        "pathlib.Path('f.txt').write_text('AFTER\\n')\n"
+        "raise SystemExit(0)\n", encoding="utf-8")
+    p = subprocess.run([sys.executable, "-I", str(repo / "scripts" / "memory_log.py"),
+                        "skill-run", "self-audit", "--verify"],
+                       cwd=str(repo), capture_output=True, text=True, timeout=60)
+    assert p.returncode != 0, (p.returncode, p.stdout, p.stderr)
+    ev = repo / ".substrate" / "memory" / "events.jsonl"
+    sk = [json.loads(ln) for ln in ev.read_text().splitlines()
+          if '"skill-run"' in ln][-1]
+    assert sk["data"].get("verify_stale") is True and sk["data"]["verified"] is False
+
+
+def test_memory_log_verify_detects_tracked_but_ignored_content_change(tmp_path) -> None:
+    """v3.8.18 (memory:209): a TRACKED file that also matches .gitignore has its raw change
+    DROPPED by write-tree's fresh temp index (`add -A` skips ignored paths) and unchanged in the
+    real index (the staged blob is untouched) — only the raw-byte hash over `git ls-files` (which
+    still lists tracked-ignored paths) catches it."""
+    if not (SCRIPTS / "memory_log.py").exists():
+        return
+    repo = tmp_path / "r"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "x@x"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "x"], cwd=repo, check=True)
+    (repo / "data.txt").write_text("BEFORE\n", encoding="utf-8")
+    (repo / ".gitignore").write_text("__pycache__/\nscripts/\n", encoding="utf-8")   # data.txt tracked
+    subprocess.run(["git", "add", "data.txt", ".gitignore"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "base"], cwd=repo, check=True)
+    # now ALSO ignore data.txt — it stays tracked in the index, but a fresh temp index drops it
+    (repo / ".gitignore").write_text("__pycache__/\nscripts/\ndata.txt\n", encoding="utf-8")
+    subprocess.run(["git", "add", ".gitignore"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "ignore data"], cwd=repo, check=True)
+    _stage(repo, "memory_log.py", "_substrate_root.py")
+    (repo / "scripts" / "run_smoke_verification.py").write_text(
+        "import pathlib\n"
+        "pathlib.Path('data.txt').write_text('AFTER\\n')\n"
         "raise SystemExit(0)\n", encoding="utf-8")
     p = subprocess.run([sys.executable, "-I", str(repo / "scripts" / "memory_log.py"),
                         "skill-run", "self-audit", "--verify"],

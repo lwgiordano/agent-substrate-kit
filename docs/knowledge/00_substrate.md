@@ -555,6 +555,29 @@ addition (AGENTS.md/CLAUDE.md/.substrate/config are preserve-listed and project-
 is only as good as its SURFACE — enumerate the reserved surface deliberately, and never widen it onto
 paths where legitimate project content lives.
 
+v3.8.18 is Codex's TWELFTH-round re-audit — two of the four findings, both verified real against the
+code, and both correcting an OVER-CLAIM in the v3.8.16/v3.8.17 architectural work. (P2 memory:209) the
+v3.8.16 `git write-tree` signature attests git's OBJECT model, which applies `clean` filters and (via the
+fresh temp index's `add -A`) drops gitignored paths — so a `filter.*.clean` that canonicalizes differing
+raw bytes to one blob, or a tracked-but-gitignored file, could change on disk with the tree OID unmoved
+and `verified=true` recorded. The signature now folds in a third component, `_raw_tracked_hash`: a
+length-prefixed SHA-256 over the RAW on-disk bytes of every `git ls-files` path (symlink targets via
+readlink), which is what makes it faithful to the bytes the CHECKER actually reads. This is strictly
+ADDITIVE content coverage on top of write-tree (which still canonicalizes mode/symlink/structure), not a
+return to the pre-v3.8.16 hand-rolled signature. (P1 bootstrap:136) the v3.8.13 no-follow write guard
+(`_safe_dest` + leaf `rm -f`) was wired ONLY into copy()/render(); ~15 DIRECT redirection sites
+(`.substrate/config`, the required_* locks, sandbox.json, the docs seeds, dependabot) wrote via raw
+`>`/`cat >` with no guard, so a planted symlink — in-repo-POINTING, which evades the escaping-symlink
+startup scan — was followed straight through, clobbering its target. Added `wprep` (mkdir parent +
+_safe_dest + leaf unlink) for truncating writes and `wappend` (refuse a symlinked leaf) for the two `>>`
+appends, and routed every direct-write site through them, plus `_safe_dest` on the skills `cp -R`
+targets. Cross-cutting: when you "delegate to a canonical tool" (git write-tree), verify the tool's
+canonicalization matches YOUR property — write-tree canonicalizes for STORAGE (filters, ignores), not for
+raw-byte attestation; and a per-write invariant must cover EVERY write site, not the two most obvious
+helpers. The other two round-12 findings (upgrade:593 concurrent-raise render staleness, upgrade:258
+completeness scope) are handled together in the upgrade staging-swap re-architecture, since both need the
+new kit's exact overwrite set.
+
 v3.8.10 is Codex's SIXTH-round re-audit (of v3.8.9) — 6 substantive findings (operator stopping rule:
 fix everything substantive until a clean pass). THREE in `memory_log.py`: (a) the hidden-path loop
 hashed `read_bytes()` (follows symlinks) not lstat type/mode or `readlink`, so a retargeted symlink

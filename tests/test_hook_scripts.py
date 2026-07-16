@@ -1903,6 +1903,102 @@ def test_upgrade_completeness_covers_reserved_toplevel_file(tmp_path) -> None:
     assert marker in mgr.read_text(), "manage.sh edit overwritten despite being unvouched by the baseline"
 
 
+def test_upgrade_completeness_covers_kit_overwrite_set(tmp_path) -> None:
+    """v3.8.19 (P2, finding upgrade:258): the completeness scan must cover the NEW kit's EXACT
+    overwrite set, not just scripts/+manage.sh. Codex's repro: edit .pre-commit-config.yaml
+    (a real bootstrap --force overwrite target), delete its baseline entry, run --write without
+    --force -> previously rc 0 and the edit silently clobbered. Now: drift -> rc 2, edit intact."""
+    if not (SCRIPTS / "substrate_upgrade.py").exists():
+        return
+    repo = _bootstrap_std_repo(tmp_path)
+    if repo is None:
+        return
+    victim = repo / ".pre-commit-config.yaml"
+    if not victim.is_file():
+        return
+    marker = "# LOCAL EDIT kit-overwrite-set\n"
+    victim.write_text(victim.read_text(encoding="utf-8") + marker, encoding="utf-8")
+    ij = repo / ".substrate" / "install.json"
+    if ij.is_file():
+        d = json.loads(ij.read_text())
+        m = d.get("owned_file_sha256")
+        if isinstance(m, dict):
+            m.pop(".pre-commit-config.yaml", None)   # forge: hide it from the hash-diff loop
+        ij.write_text(json.dumps(d))
+    p = subprocess.run(
+        [sys.executable, "-I", str(repo / "scripts" / "substrate_upgrade.py"),
+         "--from", str(ROOT), "--root", str(repo), "--allow-unverified", "--write"],
+        capture_output=True, text=True, timeout=180)
+    assert p.returncode == 2, (p.returncode, p.stdout[-300:], p.stderr[-300:])
+    assert marker in victim.read_text(), ".pre-commit-config.yaml edit overwritten despite being unvouched"
+
+
+def test_upgrade_overwrite_set_parity_with_bootstrap(tmp_path) -> None:
+    """v3.8.19 (upgrade:258 guard-the-guard): _kit_overwrite_set mirrors bootstrap.sh's dest
+    mapping by hand, so it can silently drift when bootstrap gains a new destination. Run the
+    REAL bootstrap into a fresh repo: every file it creates must be in _kit_overwrite_set(ROOT)
+    or the small documented exempt set (append-only / only-if-missing / regenerated files).
+    A failure here means bootstrap gained a dest the upgrade drift gate doesn't protect."""
+    if not (SCRIPTS / "substrate_upgrade.py").exists() or not (ROOT / "bootstrap.sh").exists():
+        return
+    repo = _bootstrap_std_repo(tmp_path)
+    if repo is None:
+        return
+    import importlib
+    sys.path.insert(0, str(SCRIPTS))
+    su = importlib.import_module("substrate_upgrade")
+    dest_set = su._kit_overwrite_set(ROOT)
+    exempt = {
+        ".gitignore", ".gitattributes",                    # append-only, never overwritten
+        "docs/.todo_state.json", "docs/ARCHITECTURE.md",   # only-if-missing seeds
+        "docs/INTENT.md",
+        ".substrate/install.json", "docs/manifest.json",   # regenerated provenance/index
+    }
+    created = []
+    for p in sorted(repo.rglob("*")):
+        if not p.is_file() or p.is_symlink():
+            continue
+        rel = p.relative_to(repo).as_posix()
+        if rel.startswith((".git/", ".substrate/memory/", ".substrate/venv/", ".substrate/traces/")):
+            continue
+        if "__pycache__" in rel or rel.endswith((".pyc", ".pyo")):
+            continue   # bytecode side effects of running python during bootstrap, not dests
+        created.append(rel)
+    missing = [r for r in created if r not in dest_set and r not in exempt]
+    assert not missing, (
+        "bootstrap wrote destinations _kit_overwrite_set does not cover — the upgrade drift "
+        f"gate would not protect them: {missing[:10]}")
+
+
+def test_upgrade_postrender_authority_staleness_fails(tmp_path, monkeypatch) -> None:
+    """v3.8.19 (P1, finding upgrade:593): a lock raise landing AFTER _restore but BEFORE the
+    reconciliation read leaves _cur == the raised value, so _reconciled stays False and the
+    v3.8.15 check passed — upgrade claimed success with config/hooks stale vs the lock. The
+    post-render POST-CONDITION (re-derive answers from the on-disk authority NOW, compare with
+    what was rendered) must fail the upgrade (rc 2) while never lowering the raise."""
+    if not (SCRIPTS / "substrate_upgrade.py").exists():
+        return
+    repo = _bootstrap_std_repo(tmp_path)
+    if repo is None:
+        return
+    import importlib
+    sys.path.insert(0, str(SCRIPTS))
+    su = importlib.import_module("substrate_upgrade")
+    real_restore = su._restore
+
+    def racing_restore(root, backup, saved):
+        real_restore(root, backup, saved)
+        # raise lands after restore, BEFORE the reconcile loop's read: _cur == "strict"
+        # already, so the v3.8.15 _reconciled path never fires — only the post-condition does.
+        (repo / ".substrate" / "required_profile").write_text("strict\n", encoding="utf-8")
+
+    monkeypatch.setattr(su, "_restore", racing_restore)
+    rc = su.main(["--from", str(ROOT), "--root", str(repo), "--allow-unverified", "--write", "--force"])
+    assert rc == 2, "upgrade claimed success with a render stale vs a concurrently-raised lock"
+    assert (repo / ".substrate" / "required_profile").read_text().strip() == "strict", \
+        "the concurrent raise was lowered"
+
+
 def test_upgrade_raise_only_reconciles_concurrent_raise(tmp_path, monkeypatch) -> None:
     """v3.8.14 (P1): a concurrent raise landing in the check->render window must SURVIVE — the
     upgrade reconciles required_* locks raise-only after restore, never lowering them."""

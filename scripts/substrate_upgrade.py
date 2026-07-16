@@ -205,9 +205,10 @@ def _resolve_kit(src: Path, root: Path, allow_unverified: bool, tmp: Path) -> tu
     raise SystemExit("upgrade: extracted archive has no bootstrap.sh")
 
 
-def _drifted(root: Path, baseline: dict | None) -> list[str]:
+def _drifted(root: Path, baseline: dict | None, kit: Path | None = None) -> list[str]:
     """Machinery files whose local hash differs from the baseline (user edited a substrate
-    file). Preserve-set files are excluded — they are expected to differ."""
+    file). Preserve-set files are excluded — they are expected to differ. When `kit` is given,
+    completeness is also cross-checked against the NEW kit's exact overwrite set (v3.8.19)."""
     if not baseline:
         return []
     owned = baseline.get("owned_file_sha256", {})
@@ -261,7 +262,40 @@ def _drifted(root: Path, baseline: dict | None) -> list[str]:
         p = root / rel
         if p.is_file() and not p.is_symlink() and rel not in ownkeys:
             out.append(rel)   # a reserved managed entrypoint present but unvouched by the baseline
+    # v3.8.19 (P2, finding upgrade:258): cross-check the NEW KIT's EXACT overwrite set. The
+    # scans above cover the reserved surfaces (scripts/, manage.sh), but bootstrap --force
+    # also overwrites .pre-commit-config.yaml, pytest.ini, .github/workflows/*, agent configs,
+    # skills, docs templates, ... — an attacker who edits any of those AND deletes its baseline
+    # entry evaded the hash loop AND the reserved-surface scans, and --write without --force
+    # silently clobbered the edit. Flag any render target that exists locally, is INSIDE the
+    # baseline's vouch surface (write_install_json.owned_files — what hash_owned enumerates),
+    # yet has no baseline hash: that combination means a DELETED/FORGED entry or a file added
+    # since install, never a legitimate state. Kit dests OUTSIDE the vouch surface (e.g. the
+    # dormant .substrate/ staged templates) are NOT flagged — the baseline never hashed those,
+    # so "unvouched" is their normal state and flagging them would false-drift every upgrade
+    # (a pre-existing coverage gap, documented, not a regression).
+    if kit is not None:
+        coverage = _baseline_coverage(root)
+        if coverage is not None:
+            for rel in _kit_overwrite_set(kit):
+                if rel in preserve or rel in _DRIFT_EXCLUDE or any(rel.startswith(pd + "/") for pd in PRESERVE_DIRS):
+                    continue
+                p = root / rel
+                if p.is_file() and not p.is_symlink() and rel in coverage and rel not in ownkeys:
+                    out.append(rel)   # render target the baseline should vouch for, but doesn't
     return sorted(set(out))
+
+
+def _baseline_coverage(root: Path) -> set[str] | None:
+    """The baseline's vouch surface: the exact file set hash_owned() would enumerate for this
+    root (write_install_json.owned_files). None if the module is unavailable (broken install) —
+    the kit-set completeness scan is then skipped; the hash-diff loop and reserved-surface
+    scans above still run."""
+    try:
+        from write_install_json import owned_files
+        return set(owned_files(root))
+    except Exception:
+        return None
 
 
 _COMPLETENESS_SCAN_DIRS = ("scripts",)
@@ -270,6 +304,94 @@ _COMPLETENESS_SCAN_EXTS = (".py", ".sh")
 # present-but-unvouched instance is tamper, not a legitimate project file. `manage.sh` is the
 # substrate CLI entrypoint; bootstrap --force overwrites it, so an upgrade must gate on it too.
 _COMPLETENESS_SCAN_FILES = ("manage.sh",)
+
+
+def _kit_overwrite_set(kit: Path) -> set[str]:
+    """Repo-relative destinations the NEW kit's `bootstrap.sh --force` MAY overwrite, derived
+    from the kit's own contents (v3.8.19 / upgrade:258). This is the correct completeness
+    surface: the v3.8.17 scripts/+manage.sh heuristic missed real overwrite targets
+    (.pre-commit-config.yaml, pytest.ini, .github/workflows/ci.yml, ...) — a project file the
+    render WILL clobber must be baseline-vouched or flagged as drift, REGARDLESS of who authored
+    it (the earlier "projects author files there -> never flag" reasoning conflated ownership
+    with overwrite risk). Deliberately OVER-inclusive (profile/lang/remote conditionals ignored:
+    extras, pyproject.toml, trusted-base always included) — over-inclusion only widens drift
+    protection, and preserve-set filtering in _drifted removes the operator-owned surfaces.
+    Mirrors bootstrap.sh's dest mapping; test_upgrade_overwrite_set_parity_with_bootstrap runs
+    the REAL bootstrap --force and fails if this map ever drifts from it."""
+    out: set[str] = set()
+
+    def _names(sub: str, pattern: str = "*"):
+        base = kit / sub
+        if base.is_dir():
+            for p in sorted(base.glob(pattern)):
+                if p.is_file():
+                    yield p.name
+
+    for n in _names("scripts"):
+        out.add(f"scripts/{n}")
+    for n in _names("extras", "*.py"):
+        out.add(f"scripts/{n}")
+        out.add(f".substrate/extras/{n}")
+    for n in _names("tests", "*.py"):
+        out.add(f"tests/{n}")
+    for n in _names("agents/claude"):
+        out.add(f".claude/agents/{n}")
+    for n in _names("agents/codex"):
+        out.add(f".codex/agents/{n}")
+    for n in _names("templates/blind-spot-checklists", "*.md"):
+        out.add(f"docs/blind-spot-checklists/{n}")
+    for n in _names("templates/github", "*.instructions.md"):
+        out.add(f".github/instructions/{n}")
+    skills = kit / "skills"
+    if skills.is_dir():
+        for sd in sorted(skills.iterdir()):
+            if not sd.is_dir():
+                continue
+            for p in sorted(sd.rglob("*")):
+                if p.is_file():
+                    rel = p.relative_to(skills).as_posix()
+                    out.add(f".claude/skills/{rel}")
+                    out.add(f".agents/skills/{rel}")
+    for wf in ("ci.yml", "scheduled-audit.yml", "agent-config-audit.yml", "trusted-base-audit.yml"):
+        if (kit / "workflows" / f"{wf}.template").is_file():
+            out.add(f".github/workflows/{wf}")
+    for rt in ("trusted-base-audit.yml.template", "release-ci-minisign.yml.template",
+               "release-keyless.yml.template", "auto-upgrade.yml.template"):
+        if (kit / "workflows" / rt).is_file():
+            out.add(f".substrate/{rt}")
+    # Fixed template-rendered / copied destinations (kit-source -> dest).
+    for src, dest in (
+        ("templates/AGENTS.md", "AGENTS.md"),
+        ("templates/CLAUDE.md", "CLAUDE.md"),
+        ("templates/pyproject.toml.template", "pyproject.toml"),
+        ("templates/pre-commit-config.yaml.template", ".pre-commit-config.yaml"),
+        ("templates/pre-commit-config.yaml.template", ".substrate/pre-commit-config.yaml.template"),
+        ("templates/manage.sh.template", "manage.sh"),
+        ("templates/pytest.ini.template", "pytest.ini"),
+        ("templates/codex/config.toml.template", ".codex/config.toml"),
+        ("templates/codex/hooks.json.template", ".codex/hooks.json"),
+        ("templates/claude/settings.json.template", ".claude/settings.json"),
+        ("templates/0000-adr-template.md", "docs/decisions/0000-template.md"),
+        ("templates/postmortem_template.md", "docs/postmortems/_template.md"),
+        ("templates/knowledge_doc_template.md", "docs/knowledge/_template.md"),
+        ("templates/finding_response.md", "docs/templates/finding_response.md"),
+        ("templates/diy_ultrareview_prompts.md", "docs/templates/diy_ultrareview_prompts.md"),
+        ("templates/pull_request_template.md", ".github/pull_request_template.md"),
+        ("templates/CODEOWNERS.template", ".github/CODEOWNERS.suggested"),
+        ("templates/SECURITY.md", "SECURITY.md"),
+        ("templates/CONTRIBUTING.md", "CONTRIBUTING.md"),
+        ("templates/copilot-instructions.md", ".github/copilot-instructions.md"),
+        ("templates/github/exfil-guard.hook.json", ".github/hooks/exfil-guard.json"),
+        (".substrate/trust/minisign.pub", ".substrate/trust/minisign.pub"),
+    ):
+        if (kit / src).is_file():
+            out.add(dest)
+    # Direct-write regenerated files (force-overwritten by bootstrap's redirection sites).
+    out.update((".substrate/config", ".substrate/required_profile", ".substrate/required_sandbox",
+                ".substrate/required_remote_governance", ".substrate/sandbox.json",
+                "docs/HISTORY.md", "docs/README.md", "docs/knowledge/00_substrate.md",
+                ".github/dependabot.yml"))
+    return out
 
 
 _SYMLINK_SCAN_SKIP = {".git", "venv", ".venv", "node_modules", "__pycache__",
@@ -504,7 +626,7 @@ def main(argv=None) -> int:
             print(str(e), file=sys.stderr)
             return 2
         new_ver = (kit / "VERSION").read_text(encoding="utf-8").strip() if (kit / "VERSION").is_file() else "unknown"
-        drift = _drifted(root, baseline)
+        drift = _drifted(root, baseline, kit=kit)
 
         print(f"substrate upgrade: {cur_ver} -> {new_ver}  [source: {vnote}]")
         if not baseline:
@@ -612,6 +734,35 @@ def main(argv=None) -> int:
             print("upgrade: a required_* lock was RAISED concurrently during the render — the "
                   "rendered config/hooks are stale relative to the new lock. The raise was "
                   "preserved; re-run `upgrade --write` to render consistently.", file=sys.stderr)
+            return 2
+
+        # POST-CONDITION authority check (v3.8.19 / P1, finding upgrade:593): the v3.8.15
+        # `_reconciled` failure only fires when the reconcile loop itself had to WRITE a lock
+        # back up — a raise landing after _restore but BEFORE the reconcile read leaves
+        # _cur == the raised value, _reconciled stays False, and the upgrade claimed success
+        # with config/hooks stale vs the lock. Success must be a property of the END STATE,
+        # not of how we got there: re-derive the render answers from the CURRENT on-disk
+        # authority (config + locks, floored exactly like the pre-render derivation) and
+        # compare with the answers actually rendered. Any mismatch means the render is stale
+        # relative to the authority as it exists NOW -> fail (rc 2) so a re-run renders
+        # consistently. (Residual: a raise between THIS read and process exit remains, as
+        # documented — no smaller window exists without OS-level locking.)
+        _auth_now = _authority_snapshot(root)
+        _final = _answers_from_snapshot(_auth_now)
+        _fl = _lock_from_snapshot(_auth_now, "required_profile")
+        if _fl and _rk.get(_fl, -1) > _rk.get(_final.get("profile") or "standard", 1):
+            _final["profile"] = _fl
+        if _lock_from_snapshot(_auth_now, "required_remote_governance") == "1":
+            _final["remote_governance"] = "1"
+        if _lock_from_snapshot(_auth_now, "required_sandbox") == "1":
+            _final["sandbox"] = "1"
+        _stale = [k for k in ("profile", "lang", "runner", "sandbox", "remote_governance")
+                  if str(_final.get(k)) != str(answers.get(k))]
+        if _stale:
+            print("upgrade: the .substrate authority changed during the render "
+                  f"(stale render keys: {', '.join(_stale)}) — the rendered config/hooks do not "
+                  "match the authority as it now stands. Locks were never lowered; re-run "
+                  "`upgrade --write` to render consistently.", file=sys.stderr)
             return 2
 
         # consistency + fresh provenance

@@ -578,6 +578,32 @@ helpers. The other two round-12 findings (upgrade:593 concurrent-raise render st
 completeness scope) are handled together in the upgrade staging-swap re-architecture, since both need the
 new kit's exact overwrite set.
 
+v3.8.19 closes the remaining round-12 pair, both in the upgrade engine. (P1 upgrade:593) the v3.8.15
+concurrent-raise failure was HISTORY-based: it fired only when the reconcile loop itself had to write a
+lock back up. A raise landing after `_restore` but BEFORE the reconcile read made `_cur` already equal
+the raised value — `_reconciled` stayed False and the upgrade claimed success with config/hooks stale vs
+the lock. The fix makes success a property of the END STATE: a post-render POST-CONDITION re-derives the
+render answers from the CURRENT on-disk authority snapshot (config + required_* locks, floored exactly
+like the pre-render derivation) and compares them with the answers actually rendered; any mismatch on
+profile/lang/runner/sandbox/remote_governance → rc 2 ("stale render, re-run"), locks never lowered. This
+catches a raise landing in ANY window up to the final read (the read→exit residual is documented — no
+smaller window exists without OS locking). (P2 upgrade:258) the completeness scan now cross-checks the
+NEW KIT's EXACT overwrite set: `_kit_overwrite_set(kit)` derives every destination `bootstrap --force`
+may write from the kit's own contents (scripts, extras, tests, agents, skills, workflows, the fixed
+template→dest map, the direct-write regenerated files), deliberately over-inclusive on profile/lang
+conditionals. Crucially it is INTERSECTED with `_baseline_coverage(root)` (= write_install_json
+owned_files — the exact surface hash_owned enumerates): a kit dest present locally, inside the vouch
+surface, but absent from the owned map is a deleted/forged entry or post-install addition → drift (needs
+--force). Kit dests OUTSIDE the vouch surface (the dormant `.substrate/` staged templates) are NOT
+flagged — no baseline ever hashed them, so "unvouched" is their normal state and flagging would
+false-drift every legitimate upgrade (that residual is a pre-existing coverage gap of the baseline
+schema, documented, distinct from this finding). A parity regression runs the REAL bootstrap into a
+fresh repo and asserts every file it creates is inside `_kit_overwrite_set` ∪ a small exempt set
+(append-only/only-if-missing/regenerated) — so the hand-mirrored dest map can never silently drift from
+bootstrap. Cross-cutting: claim success from the END STATE, not from the code path taken; and when a
+guard needs a surface enumeration, tie it to the enumeration the protected artifact was BUILT with
+(baseline coverage), then guard the guard with a parity test against the real producer.
+
 v3.8.10 is Codex's SIXTH-round re-audit (of v3.8.9) — 6 substantive findings (operator stopping rule:
 fix everything substantive until a clean pass). THREE in `memory_log.py`: (a) the hidden-path loop
 hashed `read_bytes()` (follows symlinks) not lstat type/mode or `readlink`, so a retargeted symlink

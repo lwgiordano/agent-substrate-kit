@@ -92,11 +92,31 @@ _safe_dest(){ local d="$1" pd ld ex; pd="$(cd "$(dirname "$d")" 2>/dev/null && p
   case "$ld" in .|"") ex="$REPO_ROOT_REAL" ;; /*) ex="$ld" ;; *) ex="$REPO_ROOT_REAL/$ld" ;; esac
   case "$ex" in "$REPO_ROOT_REAL"|"$REPO_ROOT_REAL"/*) : ;; *) echo "bootstrap: refusing write outside the repo: ${d#./} (expected parent $ex)" >&2; exit 2 ;; esac
   [ "$pd" = "$ex" ] || { echo "bootstrap: refusing — parent dir of ${d#./} is aliased/outside the repo (real: $pd, expected: $ex)" >&2; exit 2; }; }
+# Create a directory path component-by-component, refusing any EXISTING symlink ancestor BEFORE
+# creating anything (v3.8.21 / bootstrap:274). `mkdir -p` FOLLOWS a symlinked ancestor and would
+# create dirs THROUGH it (e.g. `.github -> .git` -> `.git/workflows`) before _safe_dest could
+# refuse — so the exact-parent guard was not mutation-free. This validates each ancestor first.
+_safe_mkdir_p(){ local dir rest comp cur
+  for dir in "$@"; do dir="${dir#./}"
+    case "$dir" in ""|.|/) continue ;; esac
+    cur=""; rest="$dir"
+    while [ -n "$rest" ]; do
+      comp="${rest%%/*}"; case "$rest" in */*) rest="${rest#*/}" ;; *) rest="" ;; esac
+      [ -z "$comp" ] && continue
+      cur="${cur:+$cur/}$comp"
+      if [ -L "$cur" ]; then echo "bootstrap: refusing — path ancestor $cur is a symlink (would create dirs through it)" >&2; exit 2; fi
+      if [ ! -e "$cur" ]; then mkdir "$cur" || { echo "bootstrap: cannot create $cur" >&2; exit 2; }
+      elif [ ! -d "$cur" ]; then echo "bootstrap: refusing — path ancestor $cur exists and is not a directory" >&2; exit 2; fi
+    done
+  done; }
 # rm -f the destination BEFORE writing (v3.8.13): plain `cp`/`sed >` FOLLOW a symlinked
 # destination, so a symlink planted at a render target would write through it to an external
 # file. Removing the link first makes cp/sed create a fresh regular file (no-follow write).
-copy(){ local s="$1" d="$2"; mkdir -p "$(dirname "$d")"; _safe_dest "$d"; if [ -e "$d" ] && [ "$FORCE" != "yes" ]; then echo "    SKIP ${d#./}"; else rm -f "$d"; cp "$s" "$d"; echo "    +    ${d#./}"; fi; }
-render(){ local s="$1" d="$2"; mkdir -p "$(dirname "$d")"; _safe_dest "$d"; if [ -e "$d" ] && [ "$FORCE" != "yes" ]; then echo "    SKIP ${d#./}"; else rm -f "$d"; sed -e "s/{{PROJECT_SLUG}}/$PROJECT_SLUG/g" -e "s/{{WORKFLOW}}/$WORKFLOW/g" -e "s/{{UI_ENABLED}}/$UI_ENABLED/g" -e "s/{{RUNNER}}/$RUNNER/g" -e "s/{{PROFILE}}/$PROFILE/g" -e "s/{{LANG}}/$LANG_PRIMARY/g" -e "s#{{RUN_PREFIX}}#$RUN_PREFIX#g" "$s" > "$d"; echo "    +    ${d#./}"; fi; }
+# Optional 3rd arg = a chmod mode applied ONLY on write (v3.8.21 / bootstrap:152): chmod'ing a
+# SKIPPED pre-existing leaf could flip an external hard-linked inode's bits — so mode changes
+# happen only to the fresh file we just wrote, never to a preserved/aliased one.
+copy(){ local s="$1" d="$2" m="${3:-}"; _safe_mkdir_p "$(dirname "$d")"; _safe_dest "$d"; if [ -e "$d" ] && [ "$FORCE" != "yes" ]; then echo "    SKIP ${d#./}"; else rm -f "$d"; cp "$s" "$d"; [ -n "$m" ] && chmod "$m" "$d"; echo "    +    ${d#./}"; fi; }
+render(){ local s="$1" d="$2" m="${3:-}"; _safe_mkdir_p "$(dirname "$d")"; _safe_dest "$d"; if [ -e "$d" ] && [ "$FORCE" != "yes" ]; then echo "    SKIP ${d#./}"; else rm -f "$d"; sed -e "s/{{PROJECT_SLUG}}/$PROJECT_SLUG/g" -e "s/{{WORKFLOW}}/$WORKFLOW/g" -e "s/{{UI_ENABLED}}/$UI_ENABLED/g" -e "s/{{RUNNER}}/$RUNNER/g" -e "s/{{PROFILE}}/$PROFILE/g" -e "s/{{LANG}}/$LANG_PRIMARY/g" -e "s#{{RUN_PREFIX}}#$RUN_PREFIX#g" "$s" > "$d"; [ -n "$m" ] && chmod "$m" "$d"; echo "    +    ${d#./}"; fi; }
 # wprep / wappend: the SAME per-write no-follow invariant copy()/render() inline, for the
 # DIRECT redirection sites below (render_precommit + the config/lock/sandbox/docs/metadata
 # `>`/`>>` writes). v3.8.13's _safe_dest guard was wired only into copy()/render(), so these
@@ -106,14 +126,21 @@ render(){ local s="$1" d="$2"; mkdir -p "$(dirname "$d")"; _safe_dest "$d"; if [
 #          creates a fresh regular file instead of following a planted link.
 #   wappend (`>>` to .gitattributes/.gitignore, which must KEEP existing content): validate the
 #          parent and REFUSE if the leaf is a symlink (a legit tracked dotfile is a regular file).
-wprep(){ mkdir -p "$(dirname "$1")"; _safe_dest "$1"; rm -f "$1"; }
-wappend(){ _safe_dest "$1"; if [ -L "$1" ]; then echo "bootstrap: refusing — $1 is a symlink (would append outside the repo)" >&2; exit 2; fi; }
+wprep(){ _safe_mkdir_p "$(dirname "$1")"; _safe_dest "$1"; rm -f "$1"; }
+# wappend prepares an APPEND target: validate the parent, refuse a symlink leaf, AND break any
+# HARD LINK by rewriting the file in place (v3.8.21 / bootstrap:110). `>>` on a hard-linked
+# .gitignore/.gitattributes would grow an external same-inode victim; copying the content to a
+# fresh temp and mv-ing it over replaces the directory entry (new inode), so the external file
+# keeps its content and the subsequent `>>` only touches our copy. mktemp in the same dir keeps
+# the mv atomic; _safe_dest already proved the parent is the real in-repo dir.
+wappend(){ _safe_dest "$1"; if [ -L "$1" ]; then echo "bootstrap: refusing — $1 is a symlink (would append outside the repo)" >&2; exit 2; fi
+  if [ -e "$1" ]; then local t; t="$(mktemp "$(dirname "$1")/.wa.XXXXXX")" || { echo "bootstrap: cannot stage $1" >&2; exit 2; }; cat "$1" > "$t"; mv -f "$t" "$1"; fi; }
 # render_precommit: render + strip profile/lang marker blocks.
 #   starter  -> strip standard + strict blocks
 #   standard -> strip strict blocks
 #   strict   -> keep all
 #   lang != python -> strip python-only blocks
-render_precommit(){ local s="$1" d="$2"; mkdir -p "$(dirname "$d")"; _safe_dest "$d"
+render_precommit(){ local s="$1" d="$2"; _safe_mkdir_p "$(dirname "$d")"; _safe_dest "$d"
   if [ -e "$d" ] && [ "$FORCE" != "yes" ]; then echo "    SKIP ${d#./}"; return; fi
   local tmp; tmp="$(mktemp)"
   # {{PY}} = substrate-venv python (always present after `manage.sh setup`,
@@ -148,10 +175,10 @@ if [ -d scripts ]; then
     echo "    !!   move them to tools/ or bin/ to avoid mixing project + substrate code (advisory; nothing was changed)."
   fi
 fi
-mkdir -p scripts .substrate
-for f in "$KIT_DIR"/scripts/*; do [ -f "$f" ] || continue; copy "$f" "scripts/$(basename "$f")"; chmod +x "scripts/$(basename "$f")" || true; done
+_safe_mkdir_p scripts .substrate
+for f in "$KIT_DIR"/scripts/*; do [ -f "$f" ] || continue; copy "$f" "scripts/$(basename "$f")" +x; done
 # Extras (heavier ceremony) install only at strict profile.
-if [[ "$PROFILE" == "strict" ]]; then for f in "$KIT_DIR"/extras/*.py; do [ -f "$f" ] || continue; copy "$f" "scripts/$(basename "$f")"; chmod +x "scripts/$(basename "$f")" || true; done; fi
+if [[ "$PROFILE" == "strict" ]]; then for f in "$KIT_DIR"/extras/*.py; do [ -f "$f" ] || continue; copy "$f" "scripts/$(basename "$f")" +x; done; fi
 # Substrate config: manage.sh + doctor read this. Operator may edit LINT/TYPECHECK/TEST commands.
 if [ ! -e .substrate/config ] || [ "$FORCE" == "yes" ]; then
   wprep .substrate/config
@@ -188,7 +215,7 @@ wprep .substrate/required_remote_governance; echo "$REMOTE_GOVERNANCE" > .substr
 # this repo can VERIFY the authenticity of a kit release before applying an upgrade
 # (scripts/verify_release.py / `./manage.sh verify-release`). Public key only — no secret.
 if [ -f "$KIT_DIR/.substrate/trust/minisign.pub" ]; then
-  mkdir -p .substrate/trust; copy "$KIT_DIR/.substrate/trust/minisign.pub" .substrate/trust/minisign.pub
+  _safe_mkdir_p .substrate/trust; copy "$KIT_DIR/.substrate/trust/minisign.pub" .substrate/trust/minisign.pub
 fi
 # Sandbox backend policy (DATA, validated fail-closed by scripts/sandbox_detect.py).
 # Written always so it's discoverable + editable; only ENFORCED when SUBSTRATE_SANDBOX=1.
@@ -208,15 +235,15 @@ fi
 render "$KIT_DIR/templates/AGENTS.md" AGENTS.md; render "$KIT_DIR/templates/CLAUDE.md" CLAUDE.md
 if [[ "$LANG_PRIMARY" == "python" ]]; then render "$KIT_DIR/templates/pyproject.toml.template" pyproject.toml; fi
 render_precommit "$KIT_DIR/templates/pre-commit-config.yaml.template" .pre-commit-config.yaml
-render "$KIT_DIR/templates/manage.sh.template" manage.sh; chmod +x manage.sh
+render "$KIT_DIR/templates/manage.sh.template" manage.sh +x
 render "$KIT_DIR/templates/codex/config.toml.template" .codex/config.toml; render "$KIT_DIR/templates/codex/hooks.json.template" .codex/hooks.json; render "$KIT_DIR/templates/claude/settings.json.template" .claude/settings.json
 # Skills: copy the whole skill dir (SKILL.md + any references/) to both harnesses.
-for sd in "$KIT_DIR"/skills/*; do [ -d "$sd" ] || continue; sn="$(basename "$sd")"; mkdir -p ".agents/skills" ".claude/skills"; _safe_dest ".claude/skills/$sn"; _safe_dest ".agents/skills/$sn"
+for sd in "$KIT_DIR"/skills/*; do [ -d "$sd" ] || continue; sn="$(basename "$sd")"; _safe_mkdir_p ".agents/skills" ".claude/skills"; _safe_dest ".claude/skills/$sn"; _safe_dest ".agents/skills/$sn"
   if [ -d ".claude/skills/$sn" ] && [ "$FORCE" != "yes" ]; then echo "    SKIP .claude/skills/$sn"; else rm -rf ".claude/skills/$sn"; cp -R "$sd" ".claude/skills/$sn"; echo "    +    .claude/skills/$sn"; fi
   if [ -d ".agents/skills/$sn" ] && [ "$FORCE" != "yes" ]; then echo "    SKIP .agents/skills/$sn"; else rm -rf ".agents/skills/$sn"; cp -R "$sd" ".agents/skills/$sn"; echo "    +    .agents/skills/$sn"; fi
 done
-mkdir -p .claude/agents .codex/agents; for f in "$KIT_DIR"/agents/claude/*; do [ -f "$f" ] && copy "$f" ".claude/agents/$(basename "$f")"; done; for f in "$KIT_DIR"/agents/codex/*; do [ -f "$f" ] && copy "$f" ".codex/agents/$(basename "$f")"; done
-mkdir -p docs/decisions docs/postmortems docs/knowledge docs/templates docs/blind-spot-checklists
+_safe_mkdir_p .claude/agents .codex/agents; for f in "$KIT_DIR"/agents/claude/*; do [ -f "$f" ] && copy "$f" ".claude/agents/$(basename "$f")"; done; for f in "$KIT_DIR"/agents/codex/*; do [ -f "$f" ] && copy "$f" ".codex/agents/$(basename "$f")"; done
+_safe_mkdir_p docs/decisions docs/postmortems docs/knowledge docs/templates docs/blind-spot-checklists
 copy "$KIT_DIR/templates/0000-adr-template.md" docs/decisions/0000-template.md; copy "$KIT_DIR/templates/postmortem_template.md" docs/postmortems/_template.md; copy "$KIT_DIR/templates/knowledge_doc_template.md" docs/knowledge/_template.md; copy "$KIT_DIR/templates/finding_response.md" docs/templates/finding_response.md; copy "$KIT_DIR/templates/diy_ultrareview_prompts.md" docs/templates/diy_ultrareview_prompts.md
 for f in "$KIT_DIR"/templates/blind-spot-checklists/*.md; do [ -f "$f" ] && copy "$f" "docs/blind-spot-checklists/$(basename "$f")"; done
 if [ ! -e docs/HISTORY.md ] || [ "$FORCE" == "yes" ]; then wprep docs/HISTORY.md; cat > docs/HISTORY.md <<'HISTORY'
@@ -256,7 +283,7 @@ if [ ! -e docs/knowledge/00_substrate.md ] || [ "$FORCE" == "yes" ]; then wprep 
 # repo, test_smoke.py keeps pytest off exit-5 before the project adds tests, and
 # conftest.py carries their fixtures. The kit's own tests/ dir is untouched. --dev-tests
 # vendors the full suite (dogfooding). Strip list = scripts/_substrate_surfaces.py (SSOT).
-mkdir -p tests
+_safe_mkdir_p tests
 STRIP_TESTS=""
 if [[ "$DEV_TESTS" != "yes" ]]; then
   STRIP_TESTS="$(python3 "$KIT_DIR/scripts/_substrate_surfaces.py" --consumer-strip-tests 2>/dev/null \
@@ -271,7 +298,7 @@ for f in "$KIT_DIR"/tests/*.py; do
   copy "$f" "tests/$bn"
 done
 copy "$KIT_DIR/templates/pytest.ini.template" pytest.ini   # deterministic, hermetic test runs in the installed repo too
-mkdir -p .github/workflows; render "$KIT_DIR/workflows/ci.yml.template" .github/workflows/ci.yml; render "$KIT_DIR/workflows/scheduled-audit.yml.template" .github/workflows/scheduled-audit.yml; render "$KIT_DIR/workflows/agent-config-audit.yml.template" .github/workflows/agent-config-audit.yml
+_safe_mkdir_p .github/workflows; render "$KIT_DIR/workflows/ci.yml.template" .github/workflows/ci.yml; render "$KIT_DIR/workflows/scheduled-audit.yml.template" .github/workflows/scheduled-audit.yml; render "$KIT_DIR/workflows/agent-config-audit.yml.template" .github/workflows/agent-config-audit.yml
 # Stage the trusted-base template under .substrate/ ALWAYS (like .substrate/sandbox.json)
 # so `manage.sh enable remote --write` can install the active workflow later WITHOUT a
 # re-bootstrap — the "scale on demand, one command" path. (No render placeholders in it;
@@ -302,9 +329,9 @@ copy "$KIT_DIR/templates/pull_request_template.md" .github/pull_request_template
 # GitHub Copilot reads .github/copilot-instructions.md natively; point it at AGENTS.md.
 copy "$KIT_DIR/templates/copilot-instructions.md" .github/copilot-instructions.md
 # Path-scoped Copilot instructions (the dir copilot-instructions.md references).
-mkdir -p .github/instructions; for f in "$KIT_DIR"/templates/github/*.instructions.md; do [ -f "$f" ] && copy "$f" ".github/instructions/$(basename "$f")"; done
+_safe_mkdir_p .github/instructions; for f in "$KIT_DIR"/templates/github/*.instructions.md; do [ -f "$f" ] && copy "$f" ".github/instructions/$(basename "$f")"; done
 # Copilot coding-agent hooks (preToolUse exfil guard via adapter + session handoff).
-mkdir -p .github/hooks; copy "$KIT_DIR/templates/github/exfil-guard.hook.json" .github/hooks/exfil-guard.json
+_safe_mkdir_p .github/hooks; copy "$KIT_DIR/templates/github/exfil-guard.hook.json" .github/hooks/exfil-guard.json
 # Language-aware Dependabot: the project ecosystem + github-actions.
 if [ ! -e .github/dependabot.yml ] || [ "$FORCE" == "yes" ]; then
   wprep .github/dependabot.yml
@@ -314,13 +341,18 @@ if [ ! -e .github/dependabot.yml ] || [ "$FORCE" == "yes" ]; then
     echo "  - package-ecosystem: \"github-actions\""; echo "    directory: \"/\""; echo "    schedule: {interval: \"weekly\"}"; echo "    open-pull-requests-limit: 3"; echo "    labels: [\"dependencies\", \"ci\"]";
   } > .github/dependabot.yml; echo "    +    .github/dependabot.yml"
 fi
-if [ "$UI_ENABLED" == "yes" ]; then mkdir -p design-system/pages design-system/tokens; [ -e design-system/MASTER.md ] || { wprep design-system/MASTER.md; echo '# Design System Master
+if [ "$UI_ENABLED" == "yes" ]; then _safe_mkdir_p design-system/pages design-system/tokens; [ -e design-system/MASTER.md ] || { wprep design-system/MASTER.md; echo '# Design System Master
 
 TODO.' > design-system/MASTER.md; echo "    +    design-system/MASTER.md"; }; fi
 if [ ! -e .gitattributes ] || ! grep -q 'docs/HISTORY.md' .gitattributes; then wappend .gitattributes; echo 'docs/HISTORY.md merge=union' >> .gitattributes; echo "    +    .gitattributes"; fi
 wappend .gitignore; [ -e .gitignore ] || touch .gitignore; for line in docs/CURRENT_SESSION.md docs/.todo_state.json .substrate/memory/tasks/ .substrate/traces/ .substrate/venv/ .substrate/dep_cooldown_cache.json 'ai/audits/*/audit-report.json' __pycache__/ .venv/ .pytest_cache/ .ruff_cache/ .mypy_cache/ node_modules/ dist/ build/; do grep -qxF "$line" .gitignore || echo "$line" >> .gitignore; done
 [ -e docs/.todo_state.json ] || { wprep docs/.todo_state.json; echo '{"version":1,"items":[]}' > docs/.todo_state.json; }
-python3 scripts/update_manifest.py --fix >/dev/null || python scripts/update_manifest.py --fix >/dev/null
+# Run substrate tools from the KIT, never the target's `scripts/` copy (v3.8.21 / bootstrap:323):
+# on a non-force install into a repo with a pre-existing `scripts/update_manifest.py` collision,
+# `copy` SKIPs and the target's (attacker's) file would otherwise be executed as trusted code.
+# The kit's copy resolves the target repo via cwd (git rev-parse / `--root .`), so it operates on
+# the right tree while running trusted code.
+python3 "$KIT_DIR/scripts/update_manifest.py" --fix >/dev/null || python "$KIT_DIR/scripts/update_manifest.py" --fix >/dev/null
 # Provenance + drift baseline for `./manage.sh upgrade` (v3.7.14): record the kit
 # version/commit/source, the FULL answer set, and a hash of every owned file.
 KIT_VER="$(tr -d '[:space:]' < "$KIT_DIR/VERSION" 2>/dev/null || echo 0.0.0)"
@@ -329,7 +361,7 @@ KIT_VER="$(tr -d '[:space:]' < "$KIT_DIR/VERSION" 2>/dev/null || echo 0.0.0)"
 # 'none' (v3.7.16 P2b). Env override wins; else fall back to the kit's own git metadata.
 KIT_COMMIT="${SUBSTRATE_KIT_COMMIT:-$(git -C "$KIT_DIR" rev-parse --short HEAD 2>/dev/null || echo none)}"
 KIT_SRC="${SUBSTRATE_KIT_SOURCE:-$(git -C "$KIT_DIR" remote get-url origin 2>/dev/null || echo "$KIT_DIR")}"
-python3 scripts/write_install_json.py --root . --version "$KIT_VER" --commit "$KIT_COMMIT" \
+python3 "$KIT_DIR/scripts/write_install_json.py" --root . --version "$KIT_VER" --commit "$KIT_COMMIT" \
   --source "$KIT_SRC" --installed-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   --profile "$PROFILE" --lang "$LANG_PRIMARY" --runner "$RUNNER" --ui "$UI_ENABLED" \
   --workflow "$WORKFLOW" --sandbox "$SANDBOX" --remote-governance "$REMOTE_GOVERNANCE" >/dev/null 2>&1 || true
@@ -340,6 +372,6 @@ python3 scripts/write_install_json.py --root . --version "$KIT_VER" --commit "$K
 # runs setup first, so a full doctor is safe in that path.
 if [ "$RUN_DOCTOR" == "yes" ]; then
   if [ "$INSTALL_TOOLS" == "yes" ]; then DOCTOR_MODE=""; else DOCTOR_MODE="--quick"; fi
-  python3 scripts/substrate_doctor.py $DOCTOR_MODE || python scripts/substrate_doctor.py $DOCTOR_MODE
+  python3 "$KIT_DIR/scripts/substrate_doctor.py" $DOCTOR_MODE || python "$KIT_DIR/scripts/substrate_doctor.py" $DOCTOR_MODE
 fi
 echo; echo "==> Agent Substrate Kit v3 installed (profile=$PROFILE, lang=$LANG_PRIMARY)."; echo "Next: ./manage.sh setup && ./manage.sh doctor --operational && ./manage.sh check"; echo "Then edit AGENTS.md project-specific section and make your first commit."

@@ -632,6 +632,35 @@ bind the LITERAL path; a postcondition must assert concrete artifact EXISTENCE b
 values (absence can equal defaults); and an overwrite-set is incomplete without the DELETION effects of
 wholesale directory replacement.
 
+v3.8.21 is Codex's FOURTEENTH-round re-audit (of v3.8.20) — 6 substantive findings, all verified and
+fixed combined; the theme is that bootstrap TRUSTED pre-existing leaves and MUTATED before/around its
+write guard. (P1 bootstrap:110) `wappend` refused a symlink leaf but FOLLOWED a hard link — the `>>`
+ignore block grew an external same-inode victim; it now breaks the link first (copy to a same-dir
+tempfile, `mv -f` over the target) so the external inode is untouched and the append hits our fresh copy.
+(P1 bootstrap:152) a SKIPPED (pre-existing, non-force) script was still `chmod +x`ed, flipping an
+external hard-linked inode 0644->0755; `copy`/`render` now take an optional mode applied ONLY inside the
+write branch, so a preserved/aliased leaf's bits are never touched. (P1 bootstrap:323) a non-force
+install into a repo with a pre-existing `scripts/update_manifest.py` collision SKIPPED the copy then
+EXECUTED the target's (attacker's) file as trusted code; the three bootstrap-invoked tools
+(update_manifest, write_install_json, substrate_doctor) now run from `"$KIT_DIR/scripts/..."` — trusted
+code, resolving the target repo via cwd/`--root .` (the opt-in `--install-tools` `./manage.sh setup` path
+still runs the target manage.sh; documented, not auto). (P2 bootstrap:274) the exact-parent guard was not
+mutation-free — `mkdir -p` FOLLOWED a symlinked ancestor (`.github -> .git`) and created `.git/workflows`
+BEFORE `_safe_dest` could refuse; `_safe_mkdir_p` now builds each path component, refusing an existing
+symlink ancestor before any mkdir, and replaced every body `mkdir -p` (the top-of-file
+`mkdir -p "$TARGET"` stays plain — it predates the function and handles absolute paths). (P1
+upgrade:846) the post-render authority postcondition ran only ONCE, BEFORE the finalizers, so a lock
+raise during update_manifest/write_install_json still claimed success; it is now a closure re-evaluated
+AFTER the finalizers too (the last read before exit). (P2 upgrade:296) the replaced-skill-dir drift scan
+skipped non-regular entries, but bootstrap's `rm -rf` deletes a symlink too — an unvouched in-repo
+symlink under a replaced dir was silently deleted; the scan now flags any present entry (file OR symlink)
+under a wholesale-replaced dir that the baseline does not vouch for (a clean install has every kit file
+in ownkeys, and a custom skill dir NOT in the new kit is untouched, so neither false-flags).
+Cross-cutting: a no-follow write guard must also defeat HARD links (same-inode aliasing), not just
+symlinks; NEVER execute or chmod a leaf you merely preserved rather than wrote; a check-then-mutate guard
+must validate every ancestor BEFORE the first mkdir; and a success postcondition must be re-checked after
+the LAST state-changing step, not before it.
+
 v3.8.10 is Codex's SIXTH-round re-audit (of v3.8.9) — 6 substantive findings (operator stopping rule:
 fix everything substantive until a clean pass). THREE in `memory_log.py`: (a) the hidden-path loop
 hashed `read_bytes()` (follows symlinks) not lstat type/mode or `readlink`, so a retargeted symlink

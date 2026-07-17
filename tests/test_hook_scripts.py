@@ -2052,6 +2052,61 @@ def test_upgrade_fails_when_config_deleted_after_restore(tmp_path, monkeypatch) 
     assert rc == 2, "upgrade claimed success with no .substrate/config on disk"
 
 
+def test_upgrade_rechecks_authority_after_finalizers(tmp_path, monkeypatch) -> None:
+    """v3.8.21 (P1, upgrade:846): the post-render authority check ran ONCE, before the finalizers,
+    so a lock raise landing DURING update_manifest/write_install_json still claimed success with a
+    stale render. The postcondition is now re-evaluated AFTER the finalizers — a raise injected at
+    the first finalizer fails the upgrade (rc 2) and the raise is preserved (never lowered)."""
+    if not (SCRIPTS / "substrate_upgrade.py").exists():
+        return
+    repo = _bootstrap_std_repo(tmp_path)
+    if repo is None:
+        return
+    import importlib
+    sys.path.insert(0, str(SCRIPTS))
+    su = importlib.import_module("substrate_upgrade")
+    real_run = su._run
+
+    def racing_run(cmd, cwd=None):
+        # raise the profile lock exactly when the FIRST finalizer (update_manifest) runs —
+        # after the pre-finalizer postcondition already passed
+        if any("update_manifest" in str(c) for c in cmd):
+            (repo / ".substrate" / "required_profile").write_text("strict\n", encoding="utf-8")
+        return real_run(cmd, cwd=cwd)
+
+    monkeypatch.setattr(su, "_run", racing_run)
+    rc = su.main(["--from", str(ROOT), "--root", str(repo), "--allow-unverified", "--write", "--force"])
+    assert rc == 2, "upgrade claimed success despite a lock raise during the finalizers"
+    assert (repo / ".substrate" / "required_profile").read_text().strip() == "strict", \
+        "the finalizer-window raise was lowered — raise-only violated"
+
+
+def test_upgrade_flags_unvouched_symlink_in_replaced_skill_dir(tmp_path) -> None:
+    """v3.8.21 (P2, upgrade:296): the replaced-dir drift scan skipped non-regular entries, but
+    bootstrap's `rm -rf` deletes a symlink too. An unvouched in-repo symlink under a replaced skill
+    dir was silently deleted by `upgrade --write` without --force; present symlinks under replaced
+    dirs are now drift as well, preserving the link until the operator passes --force."""
+    if not (SCRIPTS / "substrate_upgrade.py").exists():
+        return
+    repo = _bootstrap_std_repo(tmp_path)
+    if repo is None:
+        return
+    skills = sorted(d.name for d in (ROOT / "skills").iterdir() if d.is_dir()) \
+        if (ROOT / "skills").is_dir() else []
+    if not skills:
+        return
+    sdir = repo / ".claude" / "skills" / skills[0]
+    sdir.mkdir(parents=True, exist_ok=True)
+    link = sdir / "LOCAL_LINK"
+    link.symlink_to("../../../AGENTS.md")   # unvouched in-repo symlink under a replaced dir
+    p = subprocess.run(
+        [sys.executable, "-I", str(repo / "scripts" / "substrate_upgrade.py"),
+         "--from", str(ROOT), "--root", str(repo), "--allow-unverified", "--write"],
+        capture_output=True, text=True, timeout=180)
+    assert p.returncode == 2, (p.returncode, p.stdout[-300:], p.stderr[-300:])
+    assert link.is_symlink(), "the unvouched symlink under a replaced skill dir was deleted without --force"
+
+
 def test_upgrade_fails_when_lock_truncated_after_reconcile(tmp_path, monkeypatch) -> None:
     """v3.8.20 (auditor BLOCK on the upgrade:750 fix): existence-only postcondition checks
     reopened default-equivalent absence via TRUNCATION — an empty required_profile written
@@ -2175,6 +2230,87 @@ def test_bootstrap_direct_write_no_follows_planted_symlink(tmp_path) -> None:
     cfg = repo / ".substrate" / "config"
     assert cfg.is_file() and not cfg.is_symlink(), "config should be a fresh regular file, not the symlink"
     assert 'SUBSTRATE_PROFILE="standard"' in cfg.read_text(encoding="utf-8")
+
+
+def test_bootstrap_append_breaks_hardlink(tmp_path) -> None:
+    """v3.8.21 (bootstrap:110): `wappend` refused a symlink leaf but FOLLOWED a hard link — the
+    `>> .gitignore` ignore block grew an external same-inode victim. wappend now rewrites the file
+    (copy -> mv) breaking any hard link before the append, so the external victim is untouched."""
+    if not (ROOT / "bootstrap.sh").exists():
+        return
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    victim = tmp_path / "victim_ignore"
+    victim.write_text("EXTERNAL\n", encoding="utf-8")
+    os.link(victim, repo / ".gitignore")   # hard link: same inode, not a symlink
+    p = subprocess.run(["bash", str(ROOT / "bootstrap.sh"), "--target", str(repo),
+                        "--profile", "standard", "--lang", "none", "--no-doctor", "--force"],
+                       capture_output=True, text=True, timeout=120)
+    assert p.returncode == 0, (p.returncode, p.stdout[-300:], p.stderr[-300:])
+    assert victim.read_text(encoding="utf-8") == "EXTERNAL\n", \
+        "the append followed a hard link and grew the external victim"
+    assert "docs/CURRENT_SESSION.md" in (repo / ".gitignore").read_text(encoding="utf-8"), \
+        ".gitignore should have received the substrate ignore lines in-repo"
+
+
+def test_bootstrap_no_chmod_on_skipped_hardlinked_script(tmp_path) -> None:
+    """v3.8.21 (bootstrap:152): a SKIPPED (pre-existing, non-force) script was still `chmod +x`ed,
+    flipping an external hard-linked inode 0644 -> 0755. chmod now happens only to a file we
+    actually wrote, so a skipped/hard-linked leaf's mode is never touched."""
+    if not (ROOT / "bootstrap.sh").exists():
+        return
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    victim = tmp_path / "external.py"
+    victim.write_text("x = 1\n", encoding="utf-8")
+    os.chmod(victim, 0o644)
+    (repo / "scripts").mkdir()
+    os.link(victim, repo / "scripts" / "_doc_common.py")   # collision, hard-linked to external
+    p = subprocess.run(["bash", str(ROOT / "bootstrap.sh"), "--target", str(repo),
+                        "--profile", "standard", "--lang", "none", "--no-doctor"],  # NON-force -> SKIP
+                       capture_output=True, text=True, timeout=120)
+    assert (victim.stat().st_mode & 0o777) == 0o644, \
+        "chmod +x on a skipped hard-linked script flipped the external inode's mode"
+
+
+def test_bootstrap_does_not_execute_colliding_target_script(tmp_path) -> None:
+    """v3.8.21 (bootstrap:323): a non-force install into a repo with a pre-existing
+    `scripts/update_manifest.py` collision SKIPPED the copy, then EXECUTED the target's (attacker's)
+    file as trusted code. bootstrap now runs the kit's copy by absolute path, so the collision never
+    executes."""
+    if not (ROOT / "bootstrap.sh").exists():
+        return
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    (repo / "scripts").mkdir()
+    sentinel = tmp_path / "PWNED"
+    (repo / "scripts" / "update_manifest.py").write_text(
+        f"import pathlib\npathlib.Path({str(sentinel)!r}).write_text('pwned')\n", encoding="utf-8")
+    p = subprocess.run(["bash", str(ROOT / "bootstrap.sh"), "--target", str(repo),
+                        "--profile", "standard", "--lang", "none", "--no-doctor"],  # NON-force -> SKIP
+                       capture_output=True, text=True, timeout=120)
+    assert not sentinel.exists(), "bootstrap executed the pre-existing target scripts/update_manifest.py"
+
+
+def test_bootstrap_mkdir_refuses_aliased_ancestor_before_mutating(tmp_path) -> None:
+    """v3.8.21 (bootstrap:274): `mkdir -p` ran BEFORE _safe_dest, so `.github -> .git` had
+    `.git/workflows` created before the exact-parent guard refused. _safe_mkdir_p validates each
+    ancestor first, so the refusal is mutation-free — no dir is created through the alias."""
+    if not (ROOT / "bootstrap.sh").exists():
+        return
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    (repo / ".github").symlink_to(".git")   # in-repo alias -> evades the escape scan
+    p = subprocess.run(["bash", str(ROOT / "bootstrap.sh"), "--target", str(repo),
+                        "--profile", "standard", "--lang", "none", "--no-doctor", "--force"],
+                       capture_output=True, text=True, timeout=120)
+    assert p.returncode == 2, (p.returncode, p.stdout[-300:], p.stderr[-300:])
+    assert not (repo / ".git" / "workflows").exists(), \
+        "mkdir created .git/workflows through the .github alias before refusing"
 
 
 def test_upgrade_fails_when_provenance_not_written(tmp_path) -> None:

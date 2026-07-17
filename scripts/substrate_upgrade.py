@@ -283,23 +283,31 @@ def _drifted(root: Path, baseline: dict | None, kit: Path | None = None) -> list
                 p = root / rel
                 if p.is_file() and not p.is_symlink() and rel in coverage and rel not in ownkeys:
                     out.append(rel)   # render target the baseline should vouch for, but doesn't
-            # v3.8.20 (P2, finding upgrade:350): the leaf set above misses DELETION effects.
-            # bootstrap replaces skill dirs WHOLESALE (`rm -rf` + `cp -R`), so a LOCAL file
-            # under one of those dirs that is not a leaf of the new kit is silently DELETED —
-            # scan the local files under each replaced dir too: present + in the vouch surface
-            # + unvouched -> drift (needs --force), same rule as the overwrite targets.
+            # v3.8.20/v3.8.21 (P2, findings upgrade:350 + upgrade:296): the leaf set above misses
+            # DELETION effects. bootstrap replaces skill dirs WHOLESALE (`rm -rf` + `cp -R`), so
+            # ANYTHING under one of those dirs that is not vouched by the baseline is silently
+            # destroyed — a local FILE (350) or a local SYMLINK / other non-regular entry (296,
+            # which the earlier is_file-only scan skipped even though rm -rf deletes it too). The
+            # whole subtree dies, so the rule is not "in the render overwrite set" but simply
+            # "present + unvouched": any entry under a replaced dir whose path the baseline does
+            # not vouch for is drift (needs --force). After a clean install every kit skill file
+            # IS in ownkeys, so a well-behaved repo is not flagged; ephemeral build artifacts are
+            # skipped so they never force --force.
             for d in _kit_replaced_dirs(kit):
                 base = root / d
-                if not base.is_dir():
+                if not base.is_dir() or base.is_symlink():
                     continue
                 for p in sorted(base.rglob("*")):
-                    if not p.is_file() or p.is_symlink():
-                        continue
-                    rel = p.relative_to(root).as_posix()
+                    if p.is_dir() and not p.is_symlink():
+                        continue   # a real subdir carries no content of its own; its entries are walked
+                    relp = p.relative_to(root)
+                    if any(part in _SYMLINK_SCAN_SKIP for part in relp.parts):
+                        continue   # __pycache__/.pytest_cache/... — build noise, never force --force
+                    rel = relp.as_posix()
                     if rel in preserve or rel in _DRIFT_EXCLUDE or any(rel.startswith(pd + "/") for pd in PRESERVE_DIRS):
                         continue
-                    if rel in coverage and rel not in ownkeys:
-                        out.append(rel)   # would be DELETED by the dir replacement, unvouched
+                    if rel not in ownkeys:
+                        out.append(rel)   # present under a wholesale-replaced dir, unvouched -> would be DELETED
     return sorted(set(out))
 
 
@@ -790,56 +798,57 @@ def main(argv=None) -> int:
         # relative to the authority as it exists NOW -> fail (rc 2) so a re-run renders
         # consistently. (Residual: a raise between THIS read and process exit remains, as
         # documented — no smaller window exists without OS-level locking.)
-        _auth_now = _authority_snapshot(root)
         # v3.8.20 (P1, finding upgrade:750): _answers_from_snapshot treats a MISSING config as
         # b"" -> {} -> all-DEFAULT answers, so when the rendered answers equal the defaults
         # (a plain standard install), an authority file DELETED after _restore compared EQUAL
         # ("default-equivalent absence") and the upgrade returned 0 with no config on disk.
         # Success must first require the CONCRETE end state: every authority file present as a
-        # regular (non-symlink) file with readable snapshot bytes, and config carrying an
-        # explicit SUBSTRATE_PROFILE line (bootstrap always writes one — only the newer optional
-        # keys may legitimately be absent in a config restored from an ancient install, so we
-        # do not require those and no legacy upgrade is false-failed).
-        _broken = []
-        for _n in ("config", "required_profile", "required_remote_governance", "required_sandbox"):
-            _p = root / ".substrate" / _n
-            if _auth_now.get(_n) is None or not _p.is_file() or _p.is_symlink():
-                _broken.append(_n)
-        if "SUBSTRATE_PROFILE" not in _parse_config_text(
-                (_auth_now.get("config") or b"").decode("utf-8", "replace")):
-            _broken.append("config:SUBSTRATE_PROFILE")
-        # Lock CONTENT must also be a value bootstrap could have written (v3.8.20 auditor
-        # BLOCK): existence alone reopened the same hole via TRUNCATION — an empty (or
-        # garbage) required_profile after the reconcile read is falsy, so the raise-floor
-        # below silently treated it as "no lock" and the postcondition passed with the lock
-        # effectively lowered. Bootstrap always writes a profile name / "0" / "1", so a
-        # valid-value requirement can never false-fail a legitimate install of any age.
-        if _lock_from_snapshot(_auth_now, "required_profile") not in _PROF_RANK:
-            _broken.append("required_profile:value")
-        for _n in ("required_remote_governance", "required_sandbox"):
-            if _lock_from_snapshot(_auth_now, _n) not in ("0", "1"):
-                _broken.append(_n + ":value")
-        if _broken:
-            print("upgrade: authority END STATE is invalid after the render — missing/symlinked/"
-                  f"unreadable: {', '.join(sorted(set(_broken)))}. Refusing to claim success "
-                  "without a concrete on-disk authority; restore .substrate and re-run "
-                  "`upgrade --write`.", file=sys.stderr)
-            return 2
-        _final = _answers_from_snapshot(_auth_now)
-        _fl = _lock_from_snapshot(_auth_now, "required_profile")
-        if _fl and _rk.get(_fl, -1) > _rk.get(_final.get("profile") or "standard", 1):
-            _final["profile"] = _fl
-        if _lock_from_snapshot(_auth_now, "required_remote_governance") == "1":
-            _final["remote_governance"] = "1"
-        if _lock_from_snapshot(_auth_now, "required_sandbox") == "1":
-            _final["sandbox"] = "1"
-        _stale = [k for k in ("profile", "lang", "runner", "sandbox", "remote_governance")
-                  if str(_final.get(k)) != str(answers.get(k))]
-        if _stale:
-            print("upgrade: the .substrate authority changed during the render "
-                  f"(stale render keys: {', '.join(_stale)}) — the rendered config/hooks do not "
-                  "match the authority as it now stands. Locks were never lowered; re-run "
-                  "`upgrade --write` to render consistently.", file=sys.stderr)
+        # regular (non-symlink) file with readable snapshot bytes, config carrying an explicit
+        # SUBSTRATE_PROFILE line, and each lock holding a value bootstrap could have written.
+        # v3.8.21 (P1, finding upgrade:846): this ran only ONCE, BEFORE the finalizers — a lock
+        # raise landing DURING update_manifest/write_install_json still claimed success. It is
+        # now a reusable closure re-evaluated AFTER the finalizers too (the last read before exit,
+        # shrinking the window to the documented irreducible residual).
+        def _authority_postcondition():
+            _an = _authority_snapshot(root)
+            _bk = []
+            for _n in ("config", "required_profile", "required_remote_governance", "required_sandbox"):
+                _p = root / ".substrate" / _n
+                if _an.get(_n) is None or not _p.is_file() or _p.is_symlink():
+                    _bk.append(_n)
+            if "SUBSTRATE_PROFILE" not in _parse_config_text(
+                    (_an.get("config") or b"").decode("utf-8", "replace")):
+                _bk.append("config:SUBSTRATE_PROFILE")
+            if _lock_from_snapshot(_an, "required_profile") not in _PROF_RANK:
+                _bk.append("required_profile:value")
+            for _n in ("required_remote_governance", "required_sandbox"):
+                if _lock_from_snapshot(_an, _n) not in ("0", "1"):
+                    _bk.append(_n + ":value")
+            if _bk:
+                return ("upgrade: authority END STATE is invalid — missing/symlinked/unreadable/"
+                        f"invalid-value: {', '.join(sorted(set(_bk)))}. Refusing to claim success "
+                        "without a concrete on-disk authority; restore .substrate and re-run "
+                        "`upgrade --write`.")
+            _f = _answers_from_snapshot(_an)
+            _flp = _lock_from_snapshot(_an, "required_profile")
+            if _flp and _rk.get(_flp, -1) > _rk.get(_f.get("profile") or "standard", 1):
+                _f["profile"] = _flp
+            if _lock_from_snapshot(_an, "required_remote_governance") == "1":
+                _f["remote_governance"] = "1"
+            if _lock_from_snapshot(_an, "required_sandbox") == "1":
+                _f["sandbox"] = "1"
+            _st = [k for k in ("profile", "lang", "runner", "sandbox", "remote_governance")
+                   if str(_f.get(k)) != str(answers.get(k))]
+            if _st:
+                return ("upgrade: the .substrate authority changed during the render "
+                        f"(stale render keys: {', '.join(_st)}) — the rendered config/hooks do not "
+                        "match the authority as it now stands. Locks were never lowered; re-run "
+                        "`upgrade --write` to render consistently.")
+            return None
+
+        _pc = _authority_postcondition()
+        if _pc:
+            print(_pc, file=sys.stderr)
             return 2
 
         # consistency + fresh provenance
@@ -880,6 +889,13 @@ def main(argv=None) -> int:
                   f"provenance rc={wj.returncode}, provenance_written={prov_ok}) — drift protection / "
                   f"fresh provenance may be incomplete. Review and re-run.\n"
                   f"{((wj.stderr or '') + (mf.stderr or ''))[-800:]}", file=sys.stderr)
+            return 2
+        # Re-check the authority AFTER the finalizers (v3.8.21 / upgrade:846): a lock raise landing
+        # during update_manifest/write_install_json would otherwise slip past the pre-finalizer
+        # check and claim success with a stale render. This is the last read before exit.
+        _pc2 = _authority_postcondition()
+        if _pc2:
+            print(_pc2, file=sys.stderr)
             return 2
         print(f"substrate upgrade: applied {new_ver}. Review `git diff`, run `./manage.sh check`, then commit.")
         return 0

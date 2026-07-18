@@ -2107,6 +2107,81 @@ def test_upgrade_flags_unvouched_symlink_in_replaced_skill_dir(tmp_path) -> None
     assert link.is_symlink(), "the unvouched symlink under a replaced skill dir was deleted without --force"
 
 
+def test_upgrade_plan_does_not_execute_target_write_install_json(tmp_path) -> None:
+    """v3.8.22 (P1, upgrade:320): `_baseline_coverage` did `from write_install_json import`, which
+    resolves to the TARGET's (locally-modified) module and RUNS its top-level code — during
+    `upgrade --plan`, before drift is even refused. Coverage now loads owned_files from the trusted
+    KIT copy, so an import-time side effect in the target's helper never fires."""
+    if not (SCRIPTS / "substrate_upgrade.py").exists():
+        return
+    repo = _bootstrap_std_repo(tmp_path)
+    if repo is None:
+        return
+    sentinel = tmp_path / "IMPORT_RAN"
+    wij = repo / "scripts" / "write_install_json.py"
+    if not wij.is_file():
+        return
+    wij.write_text(wij.read_text(encoding="utf-8")
+                   + f"\nimport pathlib as _pl; _pl.Path({str(sentinel)!r}).write_text('ran')\n",
+                   encoding="utf-8")
+    p = subprocess.run(
+        [sys.executable, "-I", str(repo / "scripts" / "substrate_upgrade.py"),
+         "--from", str(ROOT), "--root", str(repo), "--allow-unverified", "--plan"],
+        capture_output=True, text=True, timeout=180)
+    assert not sentinel.exists(), \
+        "upgrade --plan imported and executed the target's modified write_install_json.py"
+
+
+def test_upgrade_flags_symlinked_replaced_skill_dir_root(tmp_path) -> None:
+    """v3.8.22 (P2, upgrade:298): when a wholesale-replaced skill dir ROOT is itself a symlink,
+    bootstrap's `rm -rf` deletes the link — but the v3.8.21 scan `continue`d on a symlinked base and
+    missed it. The replaced-root symlink is now flagged as drift, so `upgrade --write` without
+    --force refuses and preserves the link."""
+    if not (SCRIPTS / "substrate_upgrade.py").exists():
+        return
+    repo = _bootstrap_std_repo(tmp_path)
+    if repo is None:
+        return
+    skills = sorted(d.name for d in (ROOT / "skills").iterdir() if d.is_dir()) \
+        if (ROOT / "skills").is_dir() else []
+    if not skills:
+        return
+    target = repo / ".claude" / "skills" / skills[0]
+    import shutil
+    shutil.rmtree(target)
+    target.symlink_to("../../../AGENTS.md")   # replace the whole skill dir with an in-repo symlink
+    p = subprocess.run(
+        [sys.executable, "-I", str(repo / "scripts" / "substrate_upgrade.py"),
+         "--from", str(ROOT), "--root", str(repo), "--allow-unverified", "--write"],
+        capture_output=True, text=True, timeout=180)
+    assert p.returncode == 2, (p.returncode, p.stdout[-300:], p.stderr[-300:])
+    assert target.is_symlink(), "the symlinked replaced-dir root was deleted/replaced without --force"
+
+
+def test_upgrade_postcondition_rejects_canonically_invalid_config(tmp_path) -> None:
+    """v3.8.22 (P2, upgrade:812): the answer/lock checks did not catch a config that
+    check_substrate_config.py (what `manage.sh check` runs) rejects — e.g. an unknown key. The
+    postcondition now runs the canonical validator and fails the upgrade (rc 2) so it never claims
+    success on a config that `check` would reject."""
+    if not (SCRIPTS / "substrate_upgrade.py").exists():
+        return
+    repo = _bootstrap_std_repo(tmp_path)
+    if repo is None:
+        return
+    cfg = repo / ".substrate" / "config"
+    cfg.write_text(cfg.read_text(encoding="utf-8") + 'SUBSTRATE_UNKNOWN_KEY="1"\n', encoding="utf-8")
+    p = subprocess.run(
+        [sys.executable, "-I", str(repo / "scripts" / "substrate_upgrade.py"),
+         "--from", str(ROOT), "--root", str(repo), "--allow-unverified", "--write", "--force"],
+        capture_output=True, text=True, timeout=180)
+    # sanity: the canonical validator really does reject this config
+    cc = subprocess.run([sys.executable, "-I", str(repo / "scripts" / "check_substrate_config.py")],
+                        cwd=repo, capture_output=True, text=True)
+    if cc.returncode != 2:
+        return   # environment can't run the validator as expected; don't assert on a moot premise
+    assert p.returncode == 2, (p.returncode, p.stdout[-300:], p.stderr[-300:])
+
+
 def test_upgrade_fails_when_lock_truncated_after_reconcile(tmp_path, monkeypatch) -> None:
     """v3.8.20 (auditor BLOCK on the upgrade:750 fix): existence-only postcondition checks
     reopened default-equivalent absence via TRUNCATION — an empty required_profile written
@@ -2295,6 +2370,66 @@ def test_bootstrap_does_not_execute_colliding_target_script(tmp_path) -> None:
     assert not sentinel.exists(), "bootstrap executed the pre-existing target scripts/update_manifest.py"
 
 
+def test_bootstrap_append_preserves_mode_on_normal_dotfile(tmp_path) -> None:
+    """v3.8.22 (bootstrap:137): the v3.8.21 wappend rewrote EVERY existing append target through
+    mktemp+mv, dropping a normal 0644 .gitignore to 0600. wappend now only rewrites when the leaf
+    is actually hard-linked (nlink>1); a normal file is left untouched, so its mode is preserved."""
+    if not (ROOT / "bootstrap.sh").exists():
+        return
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    (repo / ".gitignore").write_text("node_modules/\n", encoding="utf-8")   # plain, not hard-linked
+    os.chmod(repo / ".gitignore", 0o644)
+    p = subprocess.run(["bash", str(ROOT / "bootstrap.sh"), "--target", str(repo),
+                        "--profile", "standard", "--lang", "none", "--no-doctor", "--force"],
+                       capture_output=True, text=True, timeout=120)
+    assert p.returncode == 0, (p.returncode, p.stdout[-300:], p.stderr[-300:])
+    assert (os.stat(repo / ".gitignore").st_mode & 0o777) == 0o644, \
+        "wappend rewrote a normal dotfile and changed its mode"
+    assert "docs/CURRENT_SESSION.md" in (repo / ".gitignore").read_text(encoding="utf-8")
+
+
+def test_bootstrap_fails_closed_when_provenance_cannot_be_written(tmp_path) -> None:
+    """v3.8.22 (bootstrap:367): direct bootstrap swallowed a provenance-finalizer failure (rc 0
+    with no usable .substrate/install.json). It now fails closed like upgrade does — install.json
+    as a DIRECTORY makes bootstrap exit 2 rather than report a successful install with no baseline."""
+    if not (ROOT / "bootstrap.sh").exists():
+        return
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    (repo / ".substrate" / "install.json").mkdir(parents=True)   # a directory -> write_install_json can't write it
+    p = subprocess.run(["bash", str(ROOT / "bootstrap.sh"), "--target", str(repo),
+                        "--profile", "standard", "--lang", "none", "--no-doctor", "--force"],
+                       capture_output=True, text=True, timeout=120)
+    assert p.returncode == 2, (p.returncode, p.stdout[-300:], p.stderr[-300:])
+    assert "provenance" in (p.stdout + p.stderr).lower() or "install.json" in (p.stdout + p.stderr).lower()
+
+
+def test_bootstrap_install_tools_does_not_execute_colliding_manage(tmp_path) -> None:
+    """v3.8.22 (bootstrap:368): `--install-tools` runs `./manage.sh setup`, executing the local
+    manage.sh. A pre-existing target manage.sh collision (SKIPped on non-force) would run as trusted
+    setup code. bootstrap now force-renders the kit's manage.sh before executing it, so the
+    collision is replaced by the kit copy and never runs."""
+    if not (ROOT / "bootstrap.sh").exists():
+        return
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    sentinel = tmp_path / "PWNED_MANAGE"
+    (repo / "manage.sh").write_text(
+        f"#!/usr/bin/env bash\ntouch {str(sentinel)!r}\n", encoding="utf-8")
+    os.chmod(repo / "manage.sh", 0o755)
+    # NON-force so render SKIPs the collision; --install-tools then would exec it (pre-fix)
+    subprocess.run(["bash", str(ROOT / "bootstrap.sh"), "--target", str(repo),
+                    "--profile", "standard", "--lang", "none", "--no-doctor", "--install-tools"],
+                   capture_output=True, text=True, timeout=240)
+    assert not sentinel.exists(), "bootstrap executed the pre-existing colliding manage.sh under --install-tools"
+    assert "touch" not in (repo / "manage.sh").read_text(encoding="utf-8"), \
+        "the colliding manage.sh was not replaced by the kit version"
+
+
 def test_bootstrap_mkdir_refuses_aliased_ancestor_before_mutating(tmp_path) -> None:
     """v3.8.21 (bootstrap:274): `mkdir -p` ran BEFORE _safe_dest, so `.github -> .git` had
     `.git/workflows` created before the exact-parent guard refused. _safe_mkdir_p validates each
@@ -2375,8 +2510,10 @@ def test_upgrade_authority_snapshot_detects_lock_change(tmp_path) -> None:
 
 
 def test_upgrade_fails_when_finalizer_fails(tmp_path) -> None:
-    """v3.8.10 (P2): if a finalizer (write_install_json) fails — e.g. install.json is a
-    directory — upgrade must NOT claim success: it returns nonzero and surfaces it."""
+    """v3.8.10 (P2): if provenance (write_install_json) cannot be written — e.g. install.json is a
+    directory — upgrade must NOT claim success: it returns nonzero and surfaces it. v3.8.22
+    (bootstrap:367): the internal `bootstrap --force` now ALSO fails closed on this, so the failure
+    may surface as either the upgrade's finalizer check OR the earlier bootstrap provenance guard."""
     if not (SCRIPTS / "substrate_upgrade.py").exists():
         return
     repo = tmp_path / "r"
@@ -2396,7 +2533,8 @@ def test_upgrade_fails_when_finalizer_fails(tmp_path) -> None:
          "--from", str(ROOT), "--root", str(repo), "--allow-unverified", "--write", "--force"],
         capture_output=True, text=True, timeout=180)
     assert p.returncode != 0, (p.returncode, p.stdout[-400:], p.stderr[-400:])
-    assert "finalizer" in (p.stdout + p.stderr).lower()
+    _out = (p.stdout + p.stderr).lower()
+    assert "finalizer" in _out or "provenance" in _out or "install.json" in _out
 
 
 def test_enable_profile_repairs_config_stale_below_lock(tmp_path) -> None:

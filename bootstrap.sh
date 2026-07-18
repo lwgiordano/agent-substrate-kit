@@ -127,14 +127,20 @@ render(){ local s="$1" d="$2" m="${3:-}"; _safe_mkdir_p "$(dirname "$d")"; _safe
 #   wappend (`>>` to .gitattributes/.gitignore, which must KEEP existing content): validate the
 #          parent and REFUSE if the leaf is a symlink (a legit tracked dotfile is a regular file).
 wprep(){ _safe_mkdir_p "$(dirname "$1")"; _safe_dest "$1"; rm -f "$1"; }
-# wappend prepares an APPEND target: validate the parent, refuse a symlink leaf, AND break any
-# HARD LINK by rewriting the file in place (v3.8.21 / bootstrap:110). `>>` on a hard-linked
-# .gitignore/.gitattributes would grow an external same-inode victim; copying the content to a
-# fresh temp and mv-ing it over replaces the directory entry (new inode), so the external file
-# keeps its content and the subsequent `>>` only touches our copy. mktemp in the same dir keeps
-# the mv atomic; _safe_dest already proved the parent is the real in-repo dir.
+# Portable hard-link count / permission bits (GNU `stat -c` else BSD `stat -f`; fallbacks are safe).
+_nlink(){ stat -c %h "$1" 2>/dev/null || stat -f %l "$1" 2>/dev/null || echo 1; }
+_pmode(){ stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1" 2>/dev/null || echo ""; }
+# wappend prepares an APPEND target: validate the parent, refuse a symlink leaf, and break a
+# HARD LINK ONLY when one actually exists (v3.8.21 / bootstrap:110; refined v3.8.22 / bootstrap:137).
+# `>>` on a hard-linked .gitignore/.gitattributes would grow an external same-inode victim; when
+# nlink>1 we copy the content to a fresh same-dir temp and mv it over (new inode, external file
+# untouched), PRESERVING the original mode. The v3.8.21 version rewrote EVERY existing target,
+# which dropped a normal 0644 dotfile to mktemp's 0600 — so a non-hard-linked file is now left
+# completely untouched and the subsequent `>>` appends to it directly.
 wappend(){ _safe_dest "$1"; if [ -L "$1" ]; then echo "bootstrap: refusing — $1 is a symlink (would append outside the repo)" >&2; exit 2; fi
-  if [ -e "$1" ]; then local t; t="$(mktemp "$(dirname "$1")/.wa.XXXXXX")" || { echo "bootstrap: cannot stage $1" >&2; exit 2; }; cat "$1" > "$t"; mv -f "$t" "$1"; fi; }
+  if [ -e "$1" ] && [ "$(_nlink "$1")" -gt 1 ]; then
+    local t m; m="$(_pmode "$1")"; t="$(mktemp "$(dirname "$1")/.wa.XXXXXX")" || { echo "bootstrap: cannot stage $1" >&2; exit 2; }
+    cat "$1" > "$t"; [ -n "$m" ] && chmod "$m" "$t"; mv -f "$t" "$1"; fi; }
 # render_precommit: render + strip profile/lang marker blocks.
 #   starter  -> strip standard + strict blocks
 #   standard -> strip strict blocks
@@ -365,7 +371,22 @@ python3 "$KIT_DIR/scripts/write_install_json.py" --root . --version "$KIT_VER" -
   --source "$KIT_SRC" --installed-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   --profile "$PROFILE" --lang "$LANG_PRIMARY" --runner "$RUNNER" --ui "$UI_ENABLED" \
   --workflow "$WORKFLOW" --sandbox "$SANDBOX" --remote-governance "$REMOTE_GOVERNANCE" >/dev/null 2>&1 || true
-[ "$INSTALL_TOOLS" == "yes" ] && ./manage.sh setup || true
+# Fail CLOSED if the provenance / drift baseline could not be written (v3.8.22 / bootstrap:367):
+# the `|| true` above kept a bad finalizer from aborting, so a pre-created `.substrate/install.json`
+# DIRECTORY (or symlink) left NO usable baseline yet bootstrap reported success — upgrade does this
+# check, direct install now does too.
+if [ ! -f .substrate/install.json ] || [ -L .substrate/install.json ]; then
+  echo "bootstrap: FAILED — provenance/drift baseline (.substrate/install.json) is missing or not a regular file; the drift gate would be absent. Remove the colliding path and re-run." >&2; exit 2
+fi
+if [ "$INSTALL_TOOLS" == "yes" ]; then
+  # --install-tools runs `./manage.sh setup`, which EXECUTES the local manage.sh. On a non-force
+  # install into a repo with a pre-existing `manage.sh` collision, `render` SKIPped it, so the
+  # target's (attacker's) manage.sh would run as trusted setup code (v3.8.22 / bootstrap:368).
+  # manage.sh is substrate-OWNED, so force-render the kit's version here before executing it —
+  # the trusted entrypoint runs, and a collision is replaced by the kit copy rather than trusted.
+  _saved_force="$FORCE"; FORCE="yes"; render "$KIT_DIR/templates/manage.sh.template" manage.sh +x; FORCE="$_saved_force"
+  ./manage.sh setup || true
+fi
 # Default post-bootstrap check is --quick: the substrate venv does not
 # exist until `./manage.sh setup`, so an operational/full doctor here
 # would always BLOCK (the v3.2 bootstrap-deadlock bug). --install-tools

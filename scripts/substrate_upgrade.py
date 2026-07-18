@@ -275,7 +275,7 @@ def _drifted(root: Path, baseline: dict | None, kit: Path | None = None) -> list
     # so "unvouched" is their normal state and flagging them would false-drift every upgrade
     # (a pre-existing coverage gap, documented, not a regression).
     if kit is not None:
-        coverage = _baseline_coverage(root)
+        coverage = _baseline_coverage(root, kit)
         if coverage is not None:
             for rel in _kit_overwrite_set(kit):
                 if rel in preserve or rel in _DRIFT_EXCLUDE or any(rel.startswith(pd + "/") for pd in PRESERVE_DIRS):
@@ -295,7 +295,16 @@ def _drifted(root: Path, baseline: dict | None, kit: Path | None = None) -> list
             # skipped so they never force --force.
             for d in _kit_replaced_dirs(kit):
                 base = root / d
-                if not base.is_dir() or base.is_symlink():
+                # v3.8.22 (upgrade:298): if the replaced-dir ROOT is itself a symlink, bootstrap's
+                # `rm -rf "$dest"` deletes the link and `cp -R` writes a fresh dir — so the operator's
+                # symlink is destroyed. The v3.8.21 scan `continue`d on a symlinked base and missed it;
+                # flag the root itself as drift (needs --force) unless the baseline already vouches it.
+                if base.is_symlink():
+                    if d not in preserve and d not in ownkeys \
+                       and not any(d.startswith(pd + "/") for pd in PRESERVE_DIRS):
+                        out.append(d)
+                    continue
+                if not base.is_dir():
                     continue
                 for p in sorted(base.rglob("*")):
                     if p.is_dir() and not p.is_symlink():
@@ -311,16 +320,28 @@ def _drifted(root: Path, baseline: dict | None, kit: Path | None = None) -> list
     return sorted(set(out))
 
 
-def _baseline_coverage(root: Path) -> set[str] | None:
+def _baseline_coverage(root: Path, kit: Path) -> set[str] | None:
     """The baseline's vouch surface: the exact file set hash_owned() would enumerate for this
-    root (write_install_json.owned_files). None if the module is unavailable (broken install) —
-    the kit-set completeness scan is then skipped; the hash-diff loop and reserved-surface
-    scans above still run."""
+    root (write_install_json.owned_files). Loaded from the TRUSTED KIT copy, not the target's
+    `scripts/write_install_json.py` (v3.8.22 / upgrade:320): a bare `from write_install_json
+    import` resolves to the target's (possibly locally-modified) module and RUNS its top-level
+    code — during `upgrade --plan`, before drift is even refused. Exec the kit's file in an
+    isolated module and restore sys.path so a kit-side `sys.path.insert` has no lasting effect.
+    None if unavailable (the kit-set completeness scan is then skipped; other scans still run)."""
+    src = kit / "scripts" / "write_install_json.py"
+    if not src.is_file():
+        return None
+    import importlib.util
+    _saved_path = list(sys.path)
     try:
-        from write_install_json import owned_files
-        return set(owned_files(root))
+        spec = importlib.util.spec_from_file_location("_kit_write_install_json", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)   # trusted kit code (verified .zip / kit dir), never the target's
+        return set(mod.owned_files(root))
     except Exception:
         return None
+    finally:
+        sys.path[:] = _saved_path   # undo any sys.path.insert the kit module did at import
 
 
 _COMPLETENESS_SCAN_DIRS = ("scripts",)
@@ -601,6 +622,40 @@ def _apply_profile_ratchet(root: Path, target: str) -> None:
         print(f"upgrade: WARNING could not apply the profile ratchet: {e}", file=sys.stderr)
 
 
+def _apply_capability_floor(root: Path) -> None:
+    """Raise .substrate/config's SUBSTRATE_REMOTE_GOVERNANCE / SUBSTRATE_SANDBOX to "1" when the
+    matching frozen required_* lock is "1" (v3.8.22). config is PRESERVED (restored from the
+    pre-upgrade backup), so a repo whose lock=1 but whose preserved config line said 0 ends up
+    internally INCONSISTENT — the render honored the lock (workflow/sandbox rendered) but the
+    config still claims the capability off, which check_substrate_config rejects. This mirrors
+    _apply_profile_ratchet for the two capability flags: RAISE-only (only 0->1 to match a lock the
+    render already honored), inline comments preserved, never lowers a value."""
+    cfg = root / ".substrate" / "config"
+    pairs = (("required_remote_governance", "SUBSTRATE_REMOTE_GOVERNANCE"),
+             ("required_sandbox", "SUBSTRATE_SANDBOX"))
+    try:
+        want = set()
+        for lock, key in pairs:
+            lp = root / ".substrate" / lock
+            if lp.is_file() and lp.read_text(encoding="utf-8").strip() == "1":
+                want.add(key)
+        if not want:
+            return
+        lines = cfg.read_text(encoding="utf-8").splitlines()
+        seen = set()
+        for i, line in enumerate(lines):
+            key = line.split("=", 1)[0].strip() if "=" in line else ""
+            if key in want:
+                comment = ("   " + line[line.index("#"):]) if "#" in line else ""
+                lines[i] = f'{key}="1"{comment}'
+                seen.add(key)
+        for key in want - seen:
+            lines.append(f'{key}="1"')
+        cfg.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    except Exception as e:
+        print(f"upgrade: WARNING could not floor capability config lines: {e}", file=sys.stderr)
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="In-place substrate upgrade (fail-closed).")
     ap.add_argument("--from", dest="src", required=True, help="signed release .zip (trusted) or a kit directory (needs --allow-unverified)")
@@ -760,6 +815,11 @@ def main(argv=None) -> int:
         _restore(root, backup, saved)
         if a.profile:
             _apply_profile_ratchet(root, a.profile)
+        # Floor the config's capability flags to the frozen locks (v3.8.22): the render already
+        # honored required_remote_governance/required_sandbox, but the PRESERVED config line may
+        # still say 0 — raise it so the end state is consistent (else check_substrate_config, and
+        # the v3.8.22 postcondition config-validity gate, correctly reject it).
+        _apply_capability_floor(root)
         # Raise-only lock reconciliation (v3.8.14 / P1): never leave a required_* lock LOWER than
         # the value observed just before the render — a concurrent raise that landed in the
         # check->render window must survive (bootstrap+restore would otherwise clobber it down).
@@ -844,6 +904,19 @@ def main(argv=None) -> int:
                         f"(stale render keys: {', '.join(_st)}) — the rendered config/hooks do not "
                         "match the authority as it now stands. Locks were never lowered; re-run "
                         "`upgrade --write` to render consistently.")
+            # Canonical config validity (v3.8.22 / upgrade:812): the answer/lock checks above do
+            # not catch a config that `check_substrate_config.py` (what `manage.sh check` runs)
+            # rejects — e.g. an unknown key or a dangerous command value preserved from the old
+            # config. Run the canonical validator (root/scripts/ is the freshly force-rendered kit
+            # copy in the upgrade path; ROOT=cwd, so it validates the target's config). Only block
+            # on a real validation failure (rc 2), not an execution/env error (traceback), so a
+            # missing venv can never false-fail a legitimate upgrade.
+            _cc = _run([sys.executable, "-I", str(root / "scripts" / "check_substrate_config.py")], cwd=root)
+            _ccout = ((_cc.stdout or "") + (_cc.stderr or "")).strip()
+            if _cc.returncode == 2 and "Traceback" not in _ccout:
+                return ("upgrade: the rendered .substrate/config fails canonical validation "
+                        f"(check_substrate_config rc={_cc.returncode}: {_ccout[-200:]}) — the same "
+                        "check `manage.sh check` enforces. Fix .substrate/config and re-run.")
             return None
 
         _pc = _authority_postcondition()

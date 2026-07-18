@@ -661,6 +661,41 @@ symlinks; NEVER execute or chmod a leaf you merely preserved rather than wrote; 
 must validate every ancestor BEFORE the first mkdir; and a success postcondition must be re-checked after
 the LAST state-changing step, not before it.
 
+v3.8.22 is Codex's FIFTEENTH-round re-audit (of v3.8.21) — 8 findings: 6 fixed, 1 documented as a
+known limitation, 1 cosmetic-doc fixed. (P1 bootstrap:368) `--install-tools` runs `./manage.sh setup`,
+executing the local manage.sh — a non-force install into a repo with a pre-existing manage.sh collision
+would run the target's (attacker's) copy; bootstrap now force-renders the kit's manage.sh before
+executing it (manage.sh is substrate-owned, so replacing a collision is correct). (P1 upgrade:320)
+`_baseline_coverage` did `from write_install_json import`, resolving to the TARGET's possibly-modified
+module and RUNNING its top-level code during `upgrade --plan` (before drift is even refused); it now execs
+the TRUSTED KIT copy in an isolated module with sys.path restored. (P2 bootstrap:137) my v3.8.21 hardlink-
+safe `wappend` rewrote EVERY existing append target via mktemp+mv, dropping a normal 0644 dotfile to
+0600 — it now rewrites ONLY when the leaf is actually hard-linked (nlink>1) and preserves the mode.
+(P2 bootstrap:367) direct bootstrap swallowed a provenance-finalizer failure (rc 0 with no baseline); it
+now fails closed (install.json must be a regular file), like upgrade. (P2 upgrade:298) the replaced-dir
+drift scan `continue`d on a symlinked dir ROOT, so bootstrap's `rm -rf` would delete the operator's
+symlink without a --force gate; the replaced-root symlink is now flagged as drift itself. (P2 upgrade:812)
+the postcondition accepted a config that canonical `check_substrate_config.py` rejects (e.g. an unknown
+key); it now runs the canonical validator and fails on a real (rc 2) validation error — and a companion
+`_apply_capability_floor` raises the PRESERVED config's SUBSTRATE_REMOTE_GOVERNANCE/SUBSTRATE_SANDBOX to
+match a frozen lock so the render+config end state is internally consistent. (P3 BENCHMARK.md) the
+reproduce block hard-coded "v3.8.4" — the benchmark is now REGENERATED (not sed-relabeled) so header and
+reproduce block both carry the live VERSION.
+
+KNOWN LIMITATION (Codex round-15 upgrade:220, WONTFIX-local): the upgrade drift baseline
+(`.substrate/install.json` `owned_file_sha256`) is AGENT-WRITABLE by design — it is rewritten on every
+install/upgrade. An attacker who edits an owned file AND recomputes that file's digest in install.json can
+suppress the drift WARNING, and `upgrade --write` will overwrite the edit without demanding --force. This
+is NOT a locally-closeable security boundary: there is no non-agent-writable anchor on the local disk, and
+the failure mode is benign for integrity (the tampered file is replaced by the clean kit version) — the
+loss is only the drift *warning*. The real trust anchor for machinery integrity is the SIGNED release
+(minisign-verified before an upgrade reads it) plus the REMOTE trusted-base authority (CODEOWNERS +
+branch-protected `git diff` freeze of `scripts/`/`manage.sh`/workflows). `write_install_json` already
+documents the baseline as "a safety aid, not a gate"; treat local drift as advisory and rely on the signed
+artifact + remote governance for a real boundary. (The recurring "`./manage.sh check` exits 143" Codex
+reports is a SIGTERM/timeout on its host during the ~2-min pytest run, not a substrate bug — `check` is
+consistently exit 0 here.)
+
 v3.8.10 is Codex's SIXTH-round re-audit (of v3.8.9) — 6 substantive findings (operator stopping rule:
 fix everything substantive until a clean pass). THREE in `memory_log.py`: (a) the hidden-path loop
 hashed `read_bytes()` (follows symlinks) not lstat type/mode or `readlink`, so a retargeted symlink

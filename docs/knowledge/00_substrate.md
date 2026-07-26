@@ -696,6 +696,40 @@ artifact + remote governance for a real boundary. (The recurring "`./manage.sh c
 reports is a SIGTERM/timeout on its host during the ~2-min pytest run, not a substrate bug — `check` is
 consistently exit 0 here.)
 
+v3.8.23 is Codex's SIXTEENTH-round re-audit (of v3.8.22) — 5 substantive findings, all verified and
+fixed; three of them are INCOMPLETE-FIX regressions of my own v3.8.18/v3.8.22 work, which is the lesson
+of the round. (P1 upgrade:916) the v3.8.22 canonical-config gate ran the TARGET's validator and failed
+OPEN on a crash (`rc == 2 and "Traceback" not in out`) — exactly the residual my own security-auditor
+flagged as "acceptable as designed", which Codex then weaponized: a concurrent writer replaces
+`check_substrate_config.py` with a crashing file and the upgrade claims success. Worse, the `rc == 2`
+test never covered rc 1 at all (= dangerous LINT/TEST command values). Now the gate runs the KIT's
+trusted copy (its `__file__`-relative siblings resolve in the kit; cwd=root keeps the TARGET's config as
+the subject) and fails on ANY nonzero rc — no fail-open path remains. (P1 upgrade:32) `from
+_verify_backends import verify` sat at MODULE level, so the sibling executed at interpreter start —
+before arg parsing, before verification, before the drift gate — meaning `--plan` on a repo with a
+modified helper RAN the modification even when the source was then rejected; the import is now lazy
+(`_load_verify()`, sys.path saved/restored) so every rejection path avoids it. Note the honest scope:
+running the TARGET's `substrate_upgrade.py` is already trusted-by-execution, so this narrows a window
+rather than creating a boundary the entry point lacks. (P2 bootstrap:370) my v3.8.22 fail-closed
+provenance guard proved only that install.json was a REGULAR FILE — a pre-created STALE one (read-only,
+kit_version=OLD) let the silently-failed writer pass, leaving a baseline vouching for the WRONG tree; the
+guard now verifies the CONTENT records this install (kit_version == the rendered kit), the same
+trust-the-result-not-the-rc rule the upgrade engine already used. (P2 bootstrap:388) `./manage.sh setup
+|| true` reported a successful install while setup had failed (e.g. `.substrate/venv` pre-created as a
+regular FILE); `--install-tools` now fails closed — a documented behavior change from "best-effort",
+recorded in the README/usage text. (P2 memory:244) `_raw_tracked_hash` joined ROOT with each tracked path
+and lstat'd it: lstat does not follow the FINAL component but DOES follow every PARENT, so replacing
+`tracked/` with a symlink to an outside directory hashed the OUTSIDE bytes while still recording
+verified=true — regressing the documented fail-closed realpath-escape behavior. Each tracked path's real
+parent must now stay inside `_ROOT_REAL` (realpath'd once, so a repo legitimately reached through a
+symlink does not false-fail), else the signature is None and verify fails closed. Cross-cutting: an
+"acceptable residual" in a security gate is a FINDING waiting to be filed — close fail-open paths rather
+than documenting them; an existence check is not a completion check (verify the CONTENT the writer should
+have produced); and when you add a containment invariant, re-derive it for EVERY path-joining site, since
+lstat/realpath differ precisely on ancestors. Also resolved this round: Codex's recurring
+`./manage.sh check` exit 143 did NOT recur (its own run completed green) — it was a SIGTERM/timeout on
+its host, never a substrate bug, as diagnosed in v3.8.22.
+
 v3.8.10 is Codex's SIXTH-round re-audit (of v3.8.9) — 6 substantive findings (operator stopping rule:
 fix everything substantive until a clean pass). THREE in `memory_log.py`: (a) the hidden-path loop
 hashed `read_bytes()` (follows symlinks) not lstat type/mode or `readlink`, so a retargeted symlink

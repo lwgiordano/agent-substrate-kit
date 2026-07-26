@@ -27,7 +27,8 @@ bash /path/to/agent_substrate_kit_v3/bootstrap.sh --profile standard --lang auto
 --profile starter|standard|strict
 --lang auto|python|node|go|none
 --force                    Overwrite existing substrate-owned files
---install-tools            Best-effort install of dev tooling
+--install-tools            Install dev tooling (runs `manage.sh setup`; bootstrap
+                           FAILS if that setup does not complete — v3.8.23)
 --no-doctor                Skip final doctor check
 ```
 
@@ -41,7 +42,7 @@ bash /path/to/agent_substrate_kit_v3/bootstrap.sh --profile standard --lang auto
 | 4-field bug-fix commit protocol + postmortem-per-bugfix hooks | — | — | yes |
 | Extras (calibration, stale-phrases, license headers) | — | — | yes |
 
-## Current status (v3.8.22)
+## Current status (v3.8.23)
 
 **Local-first, remote-expandable.** The base is offline-complete (memory,
 hooks, validators, evals, sandbox, release bundle) — no GitHub/CI/token/remote

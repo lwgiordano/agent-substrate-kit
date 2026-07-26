@@ -62,6 +62,9 @@ try:
     ROOT = _sr()
 except Exception:
     ROOT = Path.cwd()
+# Realpath of the repo root, for the symlinked-ancestor containment check in _raw_tracked_hash
+# (v3.8.23 / memory:244). Computed once; ROOT itself may legitimately be reached via a symlink.
+_ROOT_REAL = os.path.realpath(ROOT)
 try:
     from _substrate_root import git_output as _git_output
 except Exception:
@@ -242,6 +245,14 @@ def _raw_tracked_hash():
             h.update(f"{len(path)}:".encode())
             h.update(path)
             fp = os.path.join(ROOT, os.fsdecode(path))
+            # FAIL CLOSED if the tracked path escapes the repo through a symlinked ANCESTOR
+            # (v3.8.23 / memory:244): os.lstat does not follow the FINAL component, but it does
+            # follow every parent — so replacing `tracked/` with a symlink to an outside directory
+            # made this hash the OUTSIDE file's bytes while still recording verified=true. Resolve
+            # the parent and require it to stay inside the repo; anything else is unverifiable.
+            _par = os.path.realpath(os.path.dirname(fp))
+            if _par != _ROOT_REAL and not _par.startswith(_ROOT_REAL + os.sep):
+                return None
             try:
                 lst = os.lstat(fp)
             except FileNotFoundError:

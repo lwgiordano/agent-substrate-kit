@@ -32,8 +32,24 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _verify_backends import verify  # noqa: E402  (shared multi-backend verifier — same policy everywhere)
+
+def _load_verify():
+    """Import the multi-backend verifier LAZILY, only when a source is actually being verified
+    (v3.8.23 / upgrade:32). A module-level `from _verify_backends import verify` executed that
+    sibling at interpreter start — before argument parsing, before source verification, and before
+    the drift gate could refuse — so `upgrade --plan` on a repo with a locally-modified
+    `_verify_backends.py` ran the modification even when the source was then REJECTED. Deferring it
+    means the rejection paths (unverified directory source, bad args, drift refusal in --plan) never
+    execute it. NOTE: the engine's own directory is inherently trusted-by-execution — running the
+    TARGET's `scripts/substrate_upgrade.py` already runs target code; this narrows the window, it
+    does not create a boundary that the entry point itself lacks."""
+    _saved = list(sys.path)
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from _verify_backends import verify
+        return verify
+    finally:
+        sys.path[:] = _saved
 
 # User-content / operator-owned surfaces: NEVER overwritten by an upgrade (backed up
 # then restored around the bootstrap --force). Includes the required_* LOCKS so an
@@ -52,8 +68,8 @@ PRESERVE_DIRS = ["design-system", "docs/decisions", "docs/postmortems"]
 _DRIFT_EXCLUDE = {".substrate/install.json"}
 
 
-def _run(cmd, cwd=None):
-    return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+def _run(cmd, cwd=None, env=None):
+    return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, env=env)
 
 
 def _load_install_json(root: Path) -> dict | None:
@@ -190,7 +206,7 @@ def _resolve_kit(src: Path, root: Path, allow_unverified: bool, tmp: Path) -> tu
         # so the upgrade engine verifies FOR ITSELF (the auto-upgrade workflow no longer needs
         # --allow-unverified). minisign yields a commit from the trusted comment; keyless doesn't.
         pub = root / ".substrate" / "trust" / "minisign.pub"
-        r = verify(src, minisign_pub=pub, root=root, require=True)
+        r = _load_verify()(src, minisign_pub=pub, root=root, require=True)
         if r.rc != 0:
             raise SystemExit(f"upgrade: signature verification FAILED (fail-closed): {r.detail}")
         commit = r.commit
@@ -911,11 +927,28 @@ def main(argv=None) -> int:
             # copy in the upgrade path; ROOT=cwd, so it validates the target's config). Only block
             # on a real validation failure (rc 2), not an execution/env error (traceback), so a
             # missing venv can never false-fail a legitimate upgrade.
-            _cc = _run([sys.executable, "-I", str(root / "scripts" / "check_substrate_config.py")], cwd=root)
+            # v3.8.23 (P1, upgrade:916): the v3.8.22 gate ran the TARGET's validator and failed
+            # OPEN on a crash (`rc == 2 and "Traceback" not in out`), so a concurrent writer that
+            # replaced `scripts/check_substrate_config.py` with a crashing file made the check
+            # silently pass — and rc 1 (dangerous command values) was never covered at all. Now:
+            # run the KIT's trusted copy (its `__file__`-relative siblings — harness_patterns.json,
+            # sandbox_detect.py — resolve inside the kit, and cwd=root keeps the TARGET's config as
+            # the subject), and treat ANY nonzero rc as a failure. Trusted stdlib-only code that
+            # cannot run is itself a real problem, so there is no fail-open path left.
+            _ckit = kit / "scripts" / "check_substrate_config.py"
+            _cpath = _ckit if _ckit.is_file() else (root / "scripts" / "check_substrate_config.py")
+            # Pin the validator's notion of the repo to THIS root (v3.8.23 auditor): the validator
+            # resolves its root via _substrate_root, which honors SUBSTRATE_PROJECT_DIR /
+            # CLAUDE_PROJECT_DIR BEFORE cwd — in an agent session whose env points at a different
+            # tree, cwd=root alone would validate the WRONG repo's config.
+            _cenv = dict(os.environ)
+            _cenv["SUBSTRATE_PROJECT_DIR"] = str(root)
+            _cenv.pop("CLAUDE_PROJECT_DIR", None)
+            _cc = _run([sys.executable, "-I", str(_cpath)], cwd=root, env=_cenv)
             _ccout = ((_cc.stdout or "") + (_cc.stderr or "")).strip()
-            if _cc.returncode == 2 and "Traceback" not in _ccout:
+            if _cc.returncode != 0:
                 return ("upgrade: the rendered .substrate/config fails canonical validation "
-                        f"(check_substrate_config rc={_cc.returncode}: {_ccout[-200:]}) — the same "
+                        f"(check_substrate_config rc={_cc.returncode}: {_ccout[-300:]}) — the same "
                         "check `manage.sh check` enforces. Fix .substrate/config and re-run.")
             return None
 

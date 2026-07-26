@@ -12,7 +12,7 @@ Options:
   --profile starter|standard|strict[+sandbox][+remote]   (+sandbox = egress containment; +remote = remote governance)
   --lang auto|python|node|go|none
   --force
-  --install-tools
+  --install-tools   (runs `manage.sh setup`; bootstrap FAILS if setup does not complete)
   --no-doctor
   --dev-tests   (vendor the kit's FULL self-test suite for dogfooding; default
                 omits the heavy behavioral self-tests from the install)
@@ -374,9 +374,22 @@ python3 "$KIT_DIR/scripts/write_install_json.py" --root . --version "$KIT_VER" -
 # Fail CLOSED if the provenance / drift baseline could not be written (v3.8.22 / bootstrap:367):
 # the `|| true` above kept a bad finalizer from aborting, so a pre-created `.substrate/install.json`
 # DIRECTORY (or symlink) left NO usable baseline yet bootstrap reported success — upgrade does this
-# check, direct install now does too.
-if [ ! -f .substrate/install.json ] || [ -L .substrate/install.json ]; then
-  echo "bootstrap: FAILED — provenance/drift baseline (.substrate/install.json) is missing or not a regular file; the drift gate would be absent. Remove the colliding path and re-run." >&2; exit 2
+# check, direct install now does too. v3.8.23 (bootstrap:370): existence alone is NOT proof the
+# finalizer ran — a pre-created STALE but regular install.json (e.g. 0444, kit_version=OLD) passed
+# the -f/-L test while the writer silently failed, leaving a baseline that vouches for the WRONG
+# tree. Verify the RESULT reflects THIS install (kit_version == the kit we just rendered), the same
+# content-not-rc rule the upgrade engine uses.
+_prov_records_this_install(){ "$1" -c 'import json,sys
+try:
+    d = json.load(open(".substrate/install.json"))
+except Exception:
+    sys.exit(1)
+sys.exit(0 if isinstance(d, dict) and d.get("kit_version") == sys.argv[1] else 1)' "$KIT_VER" 2>/dev/null; }
+# python3 first, then `python` — same interpreter fallback the other bootstrap tool calls use, so a
+# host that only has `python` is not hard-failed here after succeeding everywhere else (v3.8.23 auditor).
+if [ ! -f .substrate/install.json ] || [ -L .substrate/install.json ] || \
+   ! { _prov_records_this_install python3 || _prov_records_this_install python; }; then
+  echo "bootstrap: FAILED — provenance/drift baseline (.substrate/install.json) is missing, not a regular file, or does not record this install (kit_version=$KIT_VER); the drift gate would be absent or vouch for the wrong tree. Remove the colliding path and re-run." >&2; exit 2
 fi
 if [ "$INSTALL_TOOLS" == "yes" ]; then
   # --install-tools runs `./manage.sh setup`, which EXECUTES the local manage.sh. On a non-force
@@ -385,7 +398,13 @@ if [ "$INSTALL_TOOLS" == "yes" ]; then
   # manage.sh is substrate-OWNED, so force-render the kit's version here before executing it —
   # the trusted entrypoint runs, and a collision is replaced by the kit copy rather than trusted.
   _saved_force="$FORCE"; FORCE="yes"; render "$KIT_DIR/templates/manage.sh.template" manage.sh +x; FORCE="$_saved_force"
-  ./manage.sh setup || true
+  # Do NOT swallow setup failure (v3.8.23 / bootstrap:388): `|| true` let bootstrap print the
+  # normal "installed" message with rc=0 while setup had failed (e.g. `.substrate/venv` pre-created
+  # as a regular FILE, so the venv could never be created) — the operator explicitly asked for the
+  # tooling, and every gate that needs the venv would then fail later with no signal here.
+  if ! ./manage.sh setup; then
+    echo "bootstrap: FAILED — \`./manage.sh setup\` did not complete (requested via --install-tools); the substrate venv/tooling is incomplete. Fix the reported cause (e.g. a colliding .substrate/venv path) and re-run \`./manage.sh setup\`." >&2; exit 2
+  fi
 fi
 # Default post-bootstrap check is --quick: the substrate venv does not
 # exist until `./manage.sh setup`, so an operational/full doctor here

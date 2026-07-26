@@ -2067,12 +2067,12 @@ def test_upgrade_rechecks_authority_after_finalizers(tmp_path, monkeypatch) -> N
     su = importlib.import_module("substrate_upgrade")
     real_run = su._run
 
-    def racing_run(cmd, cwd=None):
+    def racing_run(cmd, cwd=None, env=None):
         # raise the profile lock exactly when the FIRST finalizer (update_manifest) runs —
         # after the pre-finalizer postcondition already passed
         if any("update_manifest" in str(c) for c in cmd):
             (repo / ".substrate" / "required_profile").write_text("strict\n", encoding="utf-8")
-        return real_run(cmd, cwd=cwd)
+        return real_run(cmd, cwd=cwd, env=env)
 
     monkeypatch.setattr(su, "_run", racing_run)
     rc = su.main(["--from", str(ROOT), "--root", str(repo), "--allow-unverified", "--write", "--force"])
@@ -2130,6 +2130,55 @@ def test_upgrade_plan_does_not_execute_target_write_install_json(tmp_path) -> No
         capture_output=True, text=True, timeout=180)
     assert not sentinel.exists(), \
         "upgrade --plan imported and executed the target's modified write_install_json.py"
+
+
+def test_upgrade_rejected_source_does_not_import_target_helper(tmp_path) -> None:
+    """v3.8.23 (P1, upgrade:32): `from _verify_backends import verify` ran at MODULE level, so a
+    locally-modified sibling executed at interpreter start — before arg parsing, verification, or the
+    drift gate. A directory source without --allow-unverified is REJECTED, yet the modified helper
+    had already run. The import is now lazy (only when a source is actually verified)."""
+    if not (SCRIPTS / "substrate_upgrade.py").exists():
+        return
+    repo = _bootstrap_std_repo(tmp_path)
+    if repo is None:
+        return
+    vb = repo / "scripts" / "_verify_backends.py"
+    if not vb.is_file():
+        return
+    sentinel = tmp_path / "VB_IMPORT_RAN"
+    vb.write_text(vb.read_text(encoding="utf-8")
+                  + f"\nimport pathlib as _pl; _pl.Path({str(sentinel)!r}).write_text('ran')\n",
+                  encoding="utf-8")
+    p = subprocess.run(   # directory source, NO --allow-unverified -> rejected
+        [sys.executable, "-I", str(repo / "scripts" / "substrate_upgrade.py"),
+         "--from", str(ROOT), "--root", str(repo), "--plan"],
+        capture_output=True, text=True, timeout=180)
+    assert p.returncode == 2, (p.returncode, p.stdout[-200:], p.stderr[-200:])
+    assert not sentinel.exists(), \
+        "a rejected source still executed the target's modified _verify_backends.py at import"
+
+
+def test_upgrade_postcondition_fails_closed_on_crashing_validator(tmp_path) -> None:
+    """v3.8.23 (P1, upgrade:916): the v3.8.22 config gate ran the TARGET's validator and failed OPEN
+    on a crash (`rc == 2 and "Traceback" not in out`), so replacing check_substrate_config.py with a
+    crashing file made the check silently pass (and rc 1 — dangerous command values — was never
+    covered). The gate now runs the KIT's trusted copy and fails on ANY nonzero rc."""
+    if not (SCRIPTS / "substrate_upgrade.py").exists():
+        return
+    repo = _bootstrap_std_repo(tmp_path)
+    if repo is None:
+        return
+    # config that the canonical validator rejects, plus a crashing TARGET validator: pre-fix the
+    # crash made the gate pass; now the trusted kit copy still catches the bad config.
+    cfg = repo / ".substrate" / "config"
+    cfg.write_text(cfg.read_text(encoding="utf-8") + 'SUBSTRATE_UNKNOWN_KEY="1"\n', encoding="utf-8")
+    (repo / "scripts" / "check_substrate_config.py").write_text(
+        "raise RuntimeError('validator sabotaged')\n", encoding="utf-8")
+    p = subprocess.run(
+        [sys.executable, "-I", str(repo / "scripts" / "substrate_upgrade.py"),
+         "--from", str(ROOT), "--root", str(repo), "--allow-unverified", "--write", "--force"],
+        capture_output=True, text=True, timeout=180)
+    assert p.returncode == 2, (p.returncode, p.stdout[-300:], p.stderr[-300:])
 
 
 def test_upgrade_flags_symlinked_replaced_skill_dir_root(tmp_path) -> None:
@@ -2405,6 +2454,58 @@ def test_bootstrap_fails_closed_when_provenance_cannot_be_written(tmp_path) -> N
                        capture_output=True, text=True, timeout=120)
     assert p.returncode == 2, (p.returncode, p.stdout[-300:], p.stderr[-300:])
     assert "provenance" in (p.stdout + p.stderr).lower() or "install.json" in (p.stdout + p.stderr).lower()
+
+
+def test_bootstrap_fails_on_stale_provenance_baseline(tmp_path) -> None:
+    """v3.8.23 (bootstrap:370): the v3.8.22 guard only proved install.json was a REGULAR FILE, so a
+    pre-created STALE one (read-only, kit_version=STALE) let the silently-failed writer pass and
+    bootstrap reported success with a baseline vouching for the wrong tree. The guard now verifies
+    the RESULT records THIS install (kit_version == the rendered kit)."""
+    if not (ROOT / "bootstrap.sh").exists():
+        return
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    ij = repo / ".substrate" / "install.json"
+    ij.parent.mkdir(parents=True, exist_ok=True)
+    ij.write_text(json.dumps({"kit_version": "STALE", "owned_file_sha256": {}}), encoding="utf-8")
+    os.chmod(ij, 0o444)   # block the writer — NOTE: root ignores file permissions (see below)
+    p = subprocess.run(["bash", str(ROOT / "bootstrap.sh"), "--target", str(repo),
+                        "--profile", "standard", "--lang", "none", "--no-doctor", "--force"],
+                       capture_output=True, text=True, timeout=120)
+    kit_ver = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
+    try:
+        recorded = json.loads(ij.read_text(encoding="utf-8")).get("kit_version")
+    except Exception:
+        recorded = None
+    if recorded == kit_ver:
+        # Premise could not be established (running as root, where 0o444 does not stop the write):
+        # the writer succeeded, so assert the complementary property — the content check must NOT
+        # false-fail a legitimate install. The negative path below runs on non-root hosts (CI).
+        assert p.returncode == 0, (p.returncode, p.stdout[-300:], p.stderr[-300:])
+        return
+    assert recorded == "STALE", "test premise: the stale file should have survived the failed write"
+    assert p.returncode == 2, (p.returncode, p.stdout[-300:], p.stderr[-300:])
+
+
+def test_bootstrap_install_tools_surfaces_setup_failure(tmp_path) -> None:
+    """v3.8.23 (bootstrap:388): `./manage.sh setup || true` reported a successful install while
+    setup had failed (e.g. .substrate/venv pre-created as a regular FILE, so the venv can never be
+    created). bootstrap now fails closed when a requested --install-tools setup does not complete."""
+    if not (ROOT / "bootstrap.sh").exists():
+        return
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    venv = repo / ".substrate" / "venv"
+    venv.parent.mkdir(parents=True, exist_ok=True)
+    venv.write_text("not a directory\n", encoding="utf-8")   # setup cannot create the venv here
+    p = subprocess.run(["bash", str(ROOT / "bootstrap.sh"), "--target", str(repo),
+                        "--profile", "standard", "--lang", "none", "--no-doctor", "--install-tools"],
+                       capture_output=True, text=True, timeout=300)
+    assert p.returncode == 2, (p.returncode, p.stdout[-300:], p.stderr[-400:])
+    assert "setup" in (p.stdout + p.stderr).lower()
+    assert venv.is_file(), "test premise: the colliding venv path stayed a file"
 
 
 def test_bootstrap_install_tools_does_not_execute_colliding_manage(tmp_path) -> None:
@@ -2886,6 +2987,41 @@ def test_memory_log_verify_detects_tracked_ignored_mode_flip(tmp_path) -> None:
     sk = [json.loads(ln) for ln in ev.read_text().splitlines()
           if '"skill-run"' in ln][-1]
     assert sk["data"].get("verify_stale") is True and sk["data"]["verified"] is False
+
+
+def test_memory_log_verify_fails_closed_on_symlinked_ancestor_escape(tmp_path) -> None:
+    """v3.8.23 (memory:244): _raw_tracked_hash joined ROOT with a tracked path and lstat'd it —
+    lstat does not follow the FINAL component but DOES follow every PARENT, so replacing `tracked/`
+    with a symlink to an OUTSIDE directory hashed the outside file's bytes while still recording
+    verified=true. The tracked path's real parent must stay inside the repo, else fail closed."""
+    if not (SCRIPTS / "memory_log.py").exists():
+        return
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "file.txt").write_text("EXTERNAL\n", encoding="utf-8")
+    repo = tmp_path / "r"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "x@x"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "x"], cwd=repo, check=True)
+    (repo / ".gitignore").write_text("__pycache__/\nscripts/\n", encoding="utf-8")
+    (repo / "tracked").mkdir()
+    (repo / "tracked" / "file.txt").write_text("INSIDE\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "base"], cwd=repo, check=True)
+    import shutil
+    shutil.rmtree(repo / "tracked")
+    (repo / "tracked").symlink_to(outside)   # ancestor now escapes the repo
+    _stage(repo, "memory_log.py", "_substrate_root.py")
+    (repo / "scripts" / "run_smoke_verification.py").write_text("raise SystemExit(0)\n", encoding="utf-8")
+    p = subprocess.run([sys.executable, "-I", str(repo / "scripts" / "memory_log.py"),
+                        "skill-run", "self-audit", "--verify"],
+                       cwd=str(repo), capture_output=True, text=True, timeout=60)
+    assert p.returncode != 0, (p.returncode, p.stdout, p.stderr)
+    ev = repo / ".substrate" / "memory" / "events.jsonl"
+    sk = [json.loads(ln) for ln in ev.read_text().splitlines() if '"skill-run"' in ln][-1]
+    assert sk["data"]["verified"] is False, \
+        "verified=true recorded although a tracked path escaped the repo via a symlinked ancestor"
 
 
 def test_memory_log_verify_record_boundary_no_collision(tmp_path) -> None:

@@ -262,6 +262,14 @@ def _raw_tracked_hash():
             # outer handler so the signature is None (fail closed), never a stable hash that
             # could match across a content change we couldn't actually read (v3.8.18 auditor).
             if stat.S_ISLNK(lst.st_mode):
+                # FAIL CLOSED on a tracked symlink LEAF whose target escapes the repo (v3.8.24 /
+                # memory:264): recording just the link TEXT let the outside file change (or be
+                # executed — e.g. a tracked `scripts/run_smoke_verification.py` symlinked to an
+                # outside script) while the signature stayed identical and verified=true was
+                # recorded. The v3.8.23 check covered escaping ANCESTORS; the leaf needs it too.
+                _rl = os.path.realpath(fp)
+                if _rl != _ROOT_REAL and not _rl.startswith(_ROOT_REAL + os.sep):
+                    return None
                 target = os.readlink(fp).encode("utf-8", "surrogateescape")
                 h.update(f"|link:{len(target)}:".encode())
                 h.update(target)
@@ -318,6 +326,13 @@ def _run_deterministic_check() -> tuple[int, str]:
     tool = ROOT / "scripts" / "run_smoke_verification.py"
     if not tool.is_file():
         return 2, "run_smoke_verification.py not found"
+    # Refuse to EXECUTE a check tool that resolves outside the repo (v3.8.24 / memory:264): a
+    # tracked path replaced by a symlink to an outside script would otherwise be run as the
+    # "deterministic check" whose result --verify records. The signature guard fails closed on the
+    # same condition; this refuses the execution itself rather than relying on that alone.
+    _tr = os.path.realpath(tool)
+    if _tr != _ROOT_REAL and not _tr.startswith(_ROOT_REAL + os.sep):
+        return 2, "run_smoke_verification.py resolves outside the repo — refusing to execute it"
     try:
         p = subprocess.run([sys.executable, "-I", str(tool)], cwd=ROOT,
                            capture_output=True, text=True, timeout=120, env=_clean_env())

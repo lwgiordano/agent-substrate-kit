@@ -367,10 +367,12 @@ KIT_VER="$(tr -d '[:space:]' < "$KIT_DIR/VERSION" 2>/dev/null || echo 0.0.0)"
 # 'none' (v3.7.16 P2b). Env override wins; else fall back to the kit's own git metadata.
 KIT_COMMIT="${SUBSTRATE_KIT_COMMIT:-$(git -C "$KIT_DIR" rev-parse --short HEAD 2>/dev/null || echo none)}"
 KIT_SRC="${SUBSTRATE_KIT_SOURCE:-$(git -C "$KIT_DIR" remote get-url origin 2>/dev/null || echo "$KIT_DIR")}"
+_WJ_RC=0
 python3 "$KIT_DIR/scripts/write_install_json.py" --root . --version "$KIT_VER" --commit "$KIT_COMMIT" \
   --source "$KIT_SRC" --installed-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   --profile "$PROFILE" --lang "$LANG_PRIMARY" --runner "$RUNNER" --ui "$UI_ENABLED" \
-  --workflow "$WORKFLOW" --sandbox "$SANDBOX" --remote-governance "$REMOTE_GOVERNANCE" >/dev/null 2>&1 || true
+  --workflow "$WORKFLOW" --sandbox "$SANDBOX" --remote-governance "$REMOTE_GOVERNANCE" >/dev/null 2>&1 \
+  || _WJ_RC=$?   # capture, don't let `set -e` abort before the fail-closed guard below reports why
 # Fail CLOSED if the provenance / drift baseline could not be written (v3.8.22 / bootstrap:367):
 # the `|| true` above kept a bad finalizer from aborting, so a pre-created `.substrate/install.json`
 # DIRECTORY (or symlink) left NO usable baseline yet bootstrap reported success — upgrade does this
@@ -379,17 +381,31 @@ python3 "$KIT_DIR/scripts/write_install_json.py" --root . --version "$KIT_VER" -
 # the -f/-L test while the writer silently failed, leaving a baseline that vouches for the WRONG
 # tree. Verify the RESULT reflects THIS install (kit_version == the kit we just rendered), the same
 # content-not-rc rule the upgrade engine uses.
-_prov_records_this_install(){ "$1" -c 'import json,sys
+# v3.8.24 (bootstrap:391): comparing kit_version alone was not enough — a pre-created STALE but
+# SAME-VERSION install.json (empty owned_file_sha256, stale answers) still masked a failed writer and
+# left a useless drift baseline. The baseline must also VOUCH FOR THE TREE WE JUST RENDERED, so we
+# require the recorded hash of `manage.sh` to equal the real hash of the installed manage.sh. Paired
+# with the writer's real exit status (no longer swallowed), a pre-placed baseline cannot pass.
+_prov_records_this_install(){ "$1" -c 'import hashlib, json, sys
 try:
     d = json.load(open(".substrate/install.json"))
 except Exception:
     sys.exit(1)
-sys.exit(0 if isinstance(d, dict) and d.get("kit_version") == sys.argv[1] else 1)' "$KIT_VER" 2>/dev/null; }
+if not isinstance(d, dict) or d.get("kit_version") != sys.argv[1]:
+    sys.exit(1)
+owned = d.get("owned_file_sha256")
+if not isinstance(owned, dict) or not owned:
+    sys.exit(1)
+try:
+    live = hashlib.sha256(open("manage.sh", "rb").read()).hexdigest()
+except Exception:
+    sys.exit(1)
+sys.exit(0 if owned.get("manage.sh") == live else 1)' "$KIT_VER" 2>/dev/null; }
 # python3 first, then `python` — same interpreter fallback the other bootstrap tool calls use, so a
 # host that only has `python` is not hard-failed here after succeeding everywhere else (v3.8.23 auditor).
-if [ ! -f .substrate/install.json ] || [ -L .substrate/install.json ] || \
+if [ "${_WJ_RC:-1}" -ne 0 ] || [ ! -f .substrate/install.json ] || [ -L .substrate/install.json ] || \
    ! { _prov_records_this_install python3 || _prov_records_this_install python; }; then
-  echo "bootstrap: FAILED — provenance/drift baseline (.substrate/install.json) is missing, not a regular file, or does not record this install (kit_version=$KIT_VER); the drift gate would be absent or vouch for the wrong tree. Remove the colliding path and re-run." >&2; exit 2
+  echo "bootstrap: FAILED — provenance/drift baseline (.substrate/install.json) could not be written (writer rc=${_WJ_RC:-?}), is missing/not a regular file, or does not vouch for THIS install (kit_version=$KIT_VER + a matching manage.sh hash); the drift gate would be absent or vouch for the wrong tree. Remove the colliding path and re-run." >&2; exit 2
 fi
 if [ "$INSTALL_TOOLS" == "yes" ]; then
   # --install-tools runs `./manage.sh setup`, which EXECUTES the local manage.sh. On a non-force

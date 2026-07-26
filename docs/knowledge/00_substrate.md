@@ -730,6 +730,34 @@ lstat/realpath differ precisely on ancestors. Also resolved this round: Codex's 
 `./manage.sh check` exit 143 did NOT recur (its own run completed green) — it was a SIGTERM/timeout on
 its host, never a substrate bug, as diagnosed in v3.8.22.
 
+v3.8.24 is Codex's SEVENTEENTH-round re-audit (of v3.8.23) — 4 substantive findings, all verified and
+fixed. The round's theme is TRUSTED-TOOL PROVENANCE: every place the engine still ran, imported, or
+believed code/state from the tree it was auditing. (P1 upgrade:209) v3.8.23's lazy verifier import still
+loaded the TARGET's `_verify_backends.py`, so a `verify()` stubbed to return rc=0 made an UNSIGNED zip
+print "source: verified" — verification is the trust anchor for the source, so trusting a target-modifiable
+verifier defeats it. `_load_verify(root)` now hash-checks the helper against the drift baseline BEFORE
+importing it, whenever the engine runs from the target tree and the baseline vouches for the file, and
+aborts on mismatch. Honest limits stated in code: the baseline is itself agent-writable (see the
+upgrade:220 limitation) and running the target's engine is already trusted-by-execution, so an attacker
+editing BOTH is outside any in-process check — the anchors remain the signed release and the remote
+trusted-base freeze. (P1 upgrade:961) the finalizers still executed the TARGET's
+`update_manifest.py`/`write_install_json.py` AFTER the drift gate, so a replacement landing in that window
+ran target code and still produced a successful upgrade; both now run the KIT's copies (`_tool()`), with a
+pinned env (SUBSTRATE_PROJECT_DIR=root) and cwd=root so the TARGET stays the subject. (P2 bootstrap:391)
+v3.8.23's content check compared only `kit_version`, so a pre-created STALE but SAME-VERSION install.json
+(empty owned map) still masked a failed writer; the guard now captures the writer's REAL exit status
+(`_WJ_RC=0` + `|| _WJ_RC=$?`, so `set -e` cannot abort before the guard explains why) and requires the
+baseline to VOUCH FOR THE RENDERED TREE — non-empty owned map whose recorded `manage.sh` hash equals the
+live one. (P2 memory:264) v3.8.23's containment guard covered escaping ANCESTORS but not an escaping
+tracked SYMLINK LEAF: the signature recorded only the link TEXT while `--verify` EXECUTED the outside
+target (tracked `run_smoke_verification.py` symlinked out), recording verified=true. The leaf's realpath
+must now stay inside the root, AND `_run_deterministic_check` refuses to execute a check tool that
+resolves outside the repo (defense in depth, independent of the signature). Cross-cutting: when you fix
+"don't trust code from the audited tree", fix EVERY loader (imports, subprocess finalizers, executed check
+tools) — one narrowed window is not the class; and a freshness check on state an attacker can pre-place
+must be anchored to something they cannot forge (here, the writer's rc plus a hash of the file just
+rendered), never to a version label alone.
+
 v3.8.10 is Codex's SIXTH-round re-audit (of v3.8.9) — 6 substantive findings (operator stopping rule:
 fix everything substantive until a clean pass). THREE in `memory_log.py`: (a) the hidden-path loop
 hashed `read_bytes()` (follows symlinks) not lstat type/mode or `readlink`, so a retargeted symlink

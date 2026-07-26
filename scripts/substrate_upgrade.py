@@ -33,19 +33,49 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
-def _load_verify():
+def _load_verify(root: Path | None = None):
     """Import the multi-backend verifier LAZILY, only when a source is actually being verified
     (v3.8.23 / upgrade:32). A module-level `from _verify_backends import verify` executed that
     sibling at interpreter start — before argument parsing, before source verification, and before
     the drift gate could refuse — so `upgrade --plan` on a repo with a locally-modified
     `_verify_backends.py` ran the modification even when the source was then REJECTED. Deferring it
     means the rejection paths (unverified directory source, bad args, drift refusal in --plan) never
-    execute it. NOTE: the engine's own directory is inherently trusted-by-execution — running the
-    TARGET's `scripts/substrate_upgrade.py` already runs target code; this narrows the window, it
-    does not create a boundary that the entry point itself lacks."""
+    execute it.
+
+    v3.8.24 (upgrade:209): deferral alone still let a MODIFIED verifier approve an unsigned zip —
+    a `verify()` stubbed to return rc=0 made an unsigned source print "verified". Verification is
+    the trust anchor for the source, so before importing it we require the helper to match the drift
+    baseline whenever the engine is running FROM the target tree (the only case where the baseline
+    describes this file) and the baseline vouches for it. A mismatch aborts instead of trusting a
+    tampered verifier. Honest limits: the baseline is itself agent-writable (see the documented
+    limitation for upgrade:220), and running the TARGET's `scripts/substrate_upgrade.py` is already
+    trusted-by-execution — an attacker who edits BOTH the helper and the baseline (or the engine
+    itself) is outside what any in-process check can catch; the real anchors are the signed release
+    and the remote trusted-base freeze."""
+    helper = Path(__file__).resolve().parent / "_verify_backends.py"
+    if root is not None:
+        try:
+            same_tree = helper.parent == (root / "scripts").resolve()
+        except Exception:
+            same_tree = False
+        if same_tree:
+            _b = _load_install_json(root)
+            _want = (_b.get("owned_file_sha256") or {}).get("scripts/_verify_backends.py") if _b else None
+            if isinstance(_want, str):
+                try:
+                    _got = _sha256(helper)
+                except Exception as e:
+                    raise SystemExit(f"upgrade: refusing — cannot hash the signature verifier "
+                                     f"({helper.name}) to check it against the drift baseline: {e}")
+                if _got != _want:
+                    raise SystemExit(
+                        "upgrade: refusing — the signature verifier (scripts/_verify_backends.py) "
+                        "does not match the drift baseline, so source verification cannot be "
+                        "trusted. Restore it (re-install the kit) or, if you intend to skip "
+                        "verification entirely, re-run with --allow-unverified.")
     _saved = list(sys.path)
     try:
-        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        sys.path.insert(0, str(helper.parent))
         from _verify_backends import verify
         return verify
     finally:
@@ -206,7 +236,7 @@ def _resolve_kit(src: Path, root: Path, allow_unverified: bool, tmp: Path) -> tu
         # so the upgrade engine verifies FOR ITSELF (the auto-upgrade workflow no longer needs
         # --allow-unverified). minisign yields a commit from the trusted comment; keyless doesn't.
         pub = root / ".substrate" / "trust" / "minisign.pub"
-        r = _load_verify()(src, minisign_pub=pub, root=root, require=True)
+        r = _load_verify(root)(src, minisign_pub=pub, root=root, require=True)
         if r.rc != 0:
             raise SystemExit(f"upgrade: signature verification FAILED (fail-closed): {r.detail}")
         commit = r.commit
@@ -957,8 +987,19 @@ def main(argv=None) -> int:
             print(_pc, file=sys.stderr)
             return 2
 
-        # consistency + fresh provenance
-        mf = _run([sys.executable, "-I", str(root / "scripts" / "update_manifest.py"), "--fix"], cwd=root)
+        # consistency + fresh provenance — run the KIT's copies (v3.8.24 / upgrade:961): these ran
+        # the TARGET's `root/scripts/*.py` AFTER the drift gate, so a concurrent replacement landing
+        # in that window executed target code and still produced a "successful" upgrade. The kit is
+        # verified/resolved by now, so its copies are the trusted ones; cwd=root (+ the pinned
+        # SUBSTRATE_PROJECT_DIR below, and write_install_json's explicit --root) keeps the TARGET as
+        # the subject. Falls back to root's copy only if the kit lacks the file.
+        def _tool(name: str) -> str:
+            kp = kit / "scripts" / name
+            return str(kp if kp.is_file() else (root / "scripts" / name))
+        _tenv = dict(os.environ)
+        _tenv["SUBSTRATE_PROJECT_DIR"] = str(root)
+        _tenv.pop("CLAUDE_PROJECT_DIR", None)
+        mf = _run([sys.executable, "-I", _tool("update_manifest.py"), "--fix"], cwd=root, env=_tenv)
         # Prefer the commit parsed from the VERIFIED trusted comment (a .zip extract has no
         # .git, so git rev-parse would record 'none' — v3.7.16 P2b). Fall back to git for a
         # directory source that IS a checkout.
@@ -967,14 +1008,14 @@ def main(argv=None) -> int:
             gc = _run(["git", "rev-parse", "--short", "HEAD"], cwd=kit)
             if gc.returncode == 0:
                 commit = gc.stdout.strip()
-        wj = _run([sys.executable, "-I", str(root / "scripts" / "write_install_json.py"),
+        wj = _run([sys.executable, "-I", _tool("write_install_json.py"),
               "--root", str(root), "--version", new_ver, "--commit", commit,
               "--source", str(src), "--installed-at", datetime.now(timezone.utc).isoformat(),
               "--profile", answers.get("profile", "standard"), "--lang", answers.get("lang", "auto"),
               "--runner", answers.get("runner", "auto"), "--ui", answers.get("ui", "no"),
               "--workflow", answers.get("workflow", "superpowers"),
               "--sandbox", str(answers.get("sandbox", "0")),
-              "--remote-governance", str(answers.get("remote_governance", "0"))], cwd=root)
+              "--remote-governance", str(answers.get("remote_governance", "0"))], cwd=root, env=_tenv)
         # Do NOT claim success if a finalizer failed (v3.8.10 / P2): a failed
         # write_install_json (e.g. install.json is a directory) leaves drift protection /
         # fresh provenance absent, yet the kit files were already applied — surface it.

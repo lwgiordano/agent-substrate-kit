@@ -2158,6 +2158,68 @@ def test_upgrade_rejected_source_does_not_import_target_helper(tmp_path) -> None
         "a rejected source still executed the target's modified _verify_backends.py at import"
 
 
+def test_upgrade_refuses_drifted_signature_verifier(tmp_path) -> None:
+    """v3.8.24 (P1, upgrade:209): the lazy import still loaded the TARGET's _verify_backends.py, so a
+    `verify()` stubbed to return rc=0 approved an UNSIGNED zip ("source: verified") with the drift
+    warning only appearing afterwards. The verifier is now hash-checked against the drift baseline
+    before it is imported, and a mismatch aborts rather than trusting a tampered verifier."""
+    if not (SCRIPTS / "substrate_upgrade.py").exists():
+        return
+    repo = _bootstrap_std_repo(tmp_path)
+    if repo is None:
+        return
+    vb = repo / "scripts" / "_verify_backends.py"
+    ij = repo / ".substrate" / "install.json"
+    if not (vb.is_file() and ij.is_file()):
+        return
+    if "scripts/_verify_backends.py" not in (json.loads(ij.read_text()).get("owned_file_sha256") or {}):
+        return   # baseline does not vouch for the helper on this install; nothing to compare against
+    # a verifier that rubber-stamps ANY source
+    vb.write_text(
+        "class _R:\n"
+        "    rc = 0\n"
+        "    backend = 'round17-fake'\n"
+        "    commit = None\n"
+        "    detail = 'fake'\n"
+        "def verify(*a, **k):\n"
+        "    return _R()\n", encoding="utf-8")
+    fake_zip = tmp_path / "unsigned.zip"
+    import zipfile
+    with zipfile.ZipFile(fake_zip, "w") as z:
+        z.writestr("kit/bootstrap.sh", "#!/usr/bin/env bash\necho fake\n")
+        z.writestr("kit/VERSION", "9.9.9\n")
+    p = subprocess.run(   # NO --allow-unverified: verification must be the gate
+        [sys.executable, "-I", str(repo / "scripts" / "substrate_upgrade.py"),
+         "--from", str(fake_zip), "--root", str(repo), "--plan"],
+        capture_output=True, text=True, timeout=180)
+    assert p.returncode == 2, (p.returncode, p.stdout[-300:], p.stderr[-300:])
+    assert "round17-fake" not in (p.stdout + p.stderr), \
+        "the tampered verifier ran and approved an unsigned source"
+
+
+def test_upgrade_finalizers_run_kit_copies_not_target(tmp_path) -> None:
+    """v3.8.24 (P1, upgrade:961): the finalizers executed the TARGET's root/scripts/*.py AFTER the
+    drift gate, so a replacement landing in that window ran target code and still yielded a
+    successful upgrade. They now run the KIT's copies, so a sabotaged target helper never executes."""
+    if not (SCRIPTS / "substrate_upgrade.py").exists():
+        return
+    repo = _bootstrap_std_repo(tmp_path)
+    if repo is None:
+        return
+    sentinel = tmp_path / "FINALIZER_PWNED"
+    tgt = repo / "scripts" / "update_manifest.py"
+    if not tgt.is_file():
+        return
+    tgt.write_text(f"import pathlib\npathlib.Path({str(sentinel)!r}).write_text('pwned')\n",
+                   encoding="utf-8")
+    subprocess.run(
+        [sys.executable, "-I", str(repo / "scripts" / "substrate_upgrade.py"),
+         "--from", str(ROOT), "--root", str(repo), "--allow-unverified", "--write", "--force"],
+        capture_output=True, text=True, timeout=180)
+    assert not sentinel.exists(), \
+        "the upgrade finalizer executed the target's replaced update_manifest.py"
+
+
 def test_upgrade_postcondition_fails_closed_on_crashing_validator(tmp_path) -> None:
     """v3.8.23 (P1, upgrade:916): the v3.8.22 config gate ran the TARGET's validator and failed OPEN
     on a crash (`rc == 2 and "Traceback" not in out`), so replacing check_substrate_config.py with a
@@ -2486,6 +2548,37 @@ def test_bootstrap_fails_on_stale_provenance_baseline(tmp_path) -> None:
         return
     assert recorded == "STALE", "test premise: the stale file should have survived the failed write"
     assert p.returncode == 2, (p.returncode, p.stdout[-300:], p.stderr[-300:])
+
+
+def test_bootstrap_fails_on_stale_same_version_baseline(tmp_path) -> None:
+    """v3.8.24 (bootstrap:391): the v3.8.23 content check compared only kit_version, so a pre-created
+    STALE but SAME-VERSION install.json (empty owned map, stale answers) still masked a failed writer
+    and left a useless drift baseline. The guard now also requires the baseline to vouch for the tree
+    just rendered (recorded manage.sh hash == the real one) AND the writer's rc to be 0."""
+    if not (ROOT / "bootstrap.sh").exists():
+        return
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    kit_ver = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
+    ij = repo / ".substrate" / "install.json"
+    ij.parent.mkdir(parents=True, exist_ok=True)
+    ij.write_text(json.dumps({"kit_version": kit_ver, "owned_file_sha256": {},
+                              "answers": {"profile": "starter"}}), encoding="utf-8")
+    os.chmod(ij, 0o444)   # block the writer (root ignores this — premise-checked below)
+    p = subprocess.run(["bash", str(ROOT / "bootstrap.sh"), "--target", str(repo),
+                        "--profile", "standard", "--lang", "none", "--no-doctor", "--force"],
+                       capture_output=True, text=True, timeout=120)
+    try:
+        owned = json.loads(ij.read_text(encoding="utf-8")).get("owned_file_sha256") or {}
+    except Exception:
+        owned = {}
+    if owned:
+        # premise not established (running as root, where 0o444 does not stop the write): the writer
+        # succeeded, so assert the complementary property — a real baseline must NOT be false-failed.
+        assert p.returncode == 0, (p.returncode, p.stdout[-300:], p.stderr[-300:])
+        return
+    assert p.returncode == 2, (p.returncode, p.stdout[-300:], p.stderr[-400:])
 
 
 def test_bootstrap_install_tools_surfaces_setup_failure(tmp_path) -> None:
@@ -3022,6 +3115,44 @@ def test_memory_log_verify_fails_closed_on_symlinked_ancestor_escape(tmp_path) -
     sk = [json.loads(ln) for ln in ev.read_text().splitlines() if '"skill-run"' in ln][-1]
     assert sk["data"]["verified"] is False, \
         "verified=true recorded although a tracked path escaped the repo via a symlinked ancestor"
+
+
+def test_memory_log_verify_fails_closed_on_escaping_symlink_leaf(tmp_path) -> None:
+    """v3.8.24 (memory:264): the v3.8.23 guard covered escaping ANCESTORS but not an escaping tracked
+    SYMLINK LEAF — the signature recorded only the link TEXT while --verify EXECUTED the outside
+    target (a tracked run_smoke_verification.py symlinked to an outside script), recording
+    verified=true. The leaf's realpath must now stay inside the repo, and the check tool is refused
+    outright if it resolves outside."""
+    if not (SCRIPTS / "memory_log.py").exists():
+        return
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sentinel = tmp_path / "OUTSIDE_RAN"
+    (outside / "evil.py").write_text(
+        f"import pathlib\npathlib.Path({str(sentinel)!r}).write_text('ran')\nraise SystemExit(0)\n",
+        encoding="utf-8")
+    repo = tmp_path / "r"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "x@x"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "x"], cwd=repo, check=True)
+    _stage(repo, "memory_log.py", "_substrate_root.py")
+    (repo / "scripts" / "run_smoke_verification.py").write_text("raise SystemExit(0)\n", encoding="utf-8")
+    (repo / ".gitignore").write_text("__pycache__/\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "base"], cwd=repo, check=True)
+    # tracked leaf -> symlink to an OUTSIDE script
+    (repo / "scripts" / "run_smoke_verification.py").unlink()
+    (repo / "scripts" / "run_smoke_verification.py").symlink_to(outside / "evil.py")
+    p = subprocess.run([sys.executable, "-I", str(repo / "scripts" / "memory_log.py"),
+                        "skill-run", "self-audit", "--verify"],
+                       cwd=str(repo), capture_output=True, text=True, timeout=60)
+    assert p.returncode != 0, (p.returncode, p.stdout, p.stderr)
+    ev = repo / ".substrate" / "memory" / "events.jsonl"
+    sk = [json.loads(ln) for ln in ev.read_text().splitlines() if '"skill-run"' in ln][-1]
+    assert sk["data"]["verified"] is False, \
+        "verified=true recorded although a tracked symlink leaf escaped the repo"
+    assert not sentinel.exists(), "the outside script was executed as the deterministic check"
 
 
 def test_memory_log_verify_record_boundary_no_collision(tmp_path) -> None:

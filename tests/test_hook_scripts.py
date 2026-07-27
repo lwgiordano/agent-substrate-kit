@@ -2197,6 +2197,151 @@ def test_upgrade_refuses_drifted_signature_verifier(tmp_path) -> None:
         "the tampered verifier ran and approved an unsigned source"
 
 
+def _plant_unchecked_pyc(py_path, source: str) -> None:
+    """Write a PEP 552 UNCHECKED hash-based .pyc for `py_path` containing `source`. Unchecked
+    pycs are used WITHOUT validating them against the .py, and __pycache__ is gitignored — the
+    v3.8.25 bypass Codex found."""
+    import importlib.util as _iu
+    pyc = Path(_iu.cache_from_source(str(py_path)))
+    pyc.parent.mkdir(parents=True, exist_ok=True)
+    code = compile(source, str(py_path), "exec")
+    header = _iu.MAGIC_NUMBER + (0b11).to_bytes(4, "little") + b"\x00" * 8  # hash-based, UNCHECKED
+    import marshal
+    pyc.write_bytes(header + marshal.dumps(code))
+
+
+def test_upgrade_verifier_ignores_planted_pyc(tmp_path) -> None:
+    """v3.8.25 (P1, upgrade:79): the v3.8.24 hash-pin hashed _verify_backends.py and then imported
+    it normally — so a planted UNCHECKED hash-based .pyc (gitignored, never hashed) executed instead
+    and could approve an unsigned zip while the source stayed baseline-clean. The verifier is now
+    compiled from the hashed SOURCE BYTES, so the .pyc is never consulted."""
+    if not (SCRIPTS / "substrate_upgrade.py").exists():
+        return
+    repo = _bootstrap_std_repo(tmp_path)
+    if repo is None:
+        return
+    vb = repo / "scripts" / "_verify_backends.py"
+    if not vb.is_file():
+        return
+    _plant_unchecked_pyc(vb, (
+        "class _R:\n"
+        "    rc = 0\n"
+        "    backend = 'round18-pyc'\n"
+        "    commit = None\n"
+        "    detail = 'pyc'\n"
+        "def verify(*a, **k):\n"
+        "    return _R()\n"))
+    fake_zip = tmp_path / "unsigned.zip"
+    import zipfile
+    with zipfile.ZipFile(fake_zip, "w") as z:
+        z.writestr("kit/bootstrap.sh", "#!/usr/bin/env bash\necho fake\n")
+        z.writestr("kit/VERSION", "9.9.9\n")
+    p = subprocess.run(   # NO --allow-unverified: verification must gate this
+        [sys.executable, "-I", str(repo / "scripts" / "substrate_upgrade.py"),
+         "--from", str(fake_zip), "--root", str(repo), "--plan"],
+        capture_output=True, text=True, timeout=180)
+    assert p.returncode == 2, (p.returncode, p.stdout[-300:], p.stderr[-300:])
+    assert "round18-pyc" not in (p.stdout + p.stderr), \
+        "a planted unchecked .pyc stood in for the hash-pinned verifier source"
+
+
+def test_upgrade_verifier_pin_covers_minisign_dependency(tmp_path) -> None:
+    """v3.8.25 (P1, _verify_backends:29): pinning only the wrapper still trusted its target-owned
+    dependency — a poisoned scripts/_minisign.py could approve a forged .minisig while
+    _verify_backends.py stayed baseline-clean. The pin now covers the whole verifier closure."""
+    if not (SCRIPTS / "substrate_upgrade.py").exists():
+        return
+    repo = _bootstrap_std_repo(tmp_path)
+    if repo is None:
+        return
+    ms = repo / "scripts" / "_minisign.py"
+    ij = repo / ".substrate" / "install.json"
+    if not (ms.is_file() and ij.is_file()):
+        return
+    if "scripts/_minisign.py" not in (json.loads(ij.read_text()).get("owned_file_sha256") or {}):
+        return
+    ms.write_text(
+        "class VerifyError(Exception):\n    pass\n"
+        "def verify_file(*a, **k):\n    return 'trusted comment round18-ms'\n"
+        "def commit_from_trusted_comment(*a, **k):\n    return 'deadbeef'\n", encoding="utf-8")
+    fake_zip = tmp_path / "forged.zip"
+    import zipfile
+    with zipfile.ZipFile(fake_zip, "w") as z:
+        z.writestr("kit/bootstrap.sh", "#!/usr/bin/env bash\necho fake\n")
+        z.writestr("kit/VERSION", "9.9.9\n")
+    (tmp_path / "forged.zip.minisig").write_bytes(b"untrusted comment: forged\nAAAA\n")
+    p = subprocess.run(
+        [sys.executable, "-I", str(repo / "scripts" / "substrate_upgrade.py"),
+         "--from", str(fake_zip), "--root", str(repo), "--plan"],
+        capture_output=True, text=True, timeout=180)
+    assert p.returncode == 2, (p.returncode, p.stdout[-300:], p.stderr[-300:])
+    assert "_minisign.py" in (p.stdout + p.stderr), \
+        "the poisoned verifier dependency was not named in the refusal"
+
+
+def test_upgrade_verifier_pin_fails_closed_on_missing_baseline_entry(tmp_path) -> None:
+    """v3.8.25 (P1, upgrade:63): the v3.8.24 pin ran only `if isinstance(_want, str)`, so DELETING
+    the verifier's owned-map entry made the check skip entirely and a tampered verifier was trusted.
+    A trust anchor may not fail open: a missing/non-string entry now refuses."""
+    if not (SCRIPTS / "substrate_upgrade.py").exists():
+        return
+    repo = _bootstrap_std_repo(tmp_path)
+    if repo is None:
+        return
+    vb = repo / "scripts" / "_verify_backends.py"
+    ij = repo / ".substrate" / "install.json"
+    if not (vb.is_file() and ij.is_file()):
+        return
+    d = json.loads(ij.read_text())
+    owned = d.get("owned_file_sha256")
+    if not isinstance(owned, dict) or "scripts/_verify_backends.py" not in owned:
+        return
+    owned.pop("scripts/_verify_backends.py")      # delete ONLY the verifier's entry
+    ij.write_text(json.dumps(d), encoding="utf-8")
+    vb.write_text(
+        "class _R:\n"
+        "    rc = 0\n"
+        "    backend = 'round18-fake'\n"
+        "    commit = None\n"
+        "    detail = 'fake'\n"
+        "def verify(*a, **k):\n"
+        "    return _R()\n", encoding="utf-8")
+    fake_zip = tmp_path / "unsigned.zip"
+    import zipfile
+    with zipfile.ZipFile(fake_zip, "w") as z:
+        z.writestr("kit/bootstrap.sh", "#!/usr/bin/env bash\necho fake\n")
+        z.writestr("kit/VERSION", "9.9.9\n")
+    p = subprocess.run(
+        [sys.executable, "-I", str(repo / "scripts" / "substrate_upgrade.py"),
+         "--from", str(fake_zip), "--root", str(repo), "--plan"],
+        capture_output=True, text=True, timeout=180)
+    assert p.returncode == 2, (p.returncode, p.stdout[-300:], p.stderr[-300:])
+    assert "round18-fake" not in (p.stdout + p.stderr), \
+        "a missing owned-map entry let the tampered verifier approve an unsigned source"
+
+
+def test_write_install_json_breaks_hardlink(tmp_path) -> None:
+    """v3.8.25 (P1, write_install_json:105): a plain write_text() writes THROUGH the inode, so a
+    HARD-LINKED .substrate/install.json (nlink>1, invisible to symlink checks) had its outside
+    same-inode twin overwritten with provenance. The writer now uses temp + os.replace, which
+    replaces the directory entry and breaks the link."""
+    if not (SCRIPTS / "write_install_json.py").exists():
+        return
+    repo = tmp_path / "repo"
+    (repo / ".substrate").mkdir(parents=True)
+    victim = tmp_path / "victim.txt"
+    victim.write_text("PRECIOUS\n", encoding="utf-8")
+    os.link(victim, repo / ".substrate" / "install.json")
+    p = subprocess.run(
+        [sys.executable, "-I", str(SCRIPTS / "write_install_json.py"), "--root", str(repo),
+         "--version", "9.9.9", "--installed-at", "2026-01-01T00:00:00Z"],
+        capture_output=True, text=True, timeout=60)
+    assert p.returncode == 0, (p.returncode, p.stdout[-200:], p.stderr[-200:])
+    assert victim.read_text(encoding="utf-8") == "PRECIOUS\n", \
+        "the provenance write followed a hard link and clobbered the outside victim"
+    assert json.loads((repo / ".substrate" / "install.json").read_text())["kit_version"] == "9.9.9"
+
+
 def test_upgrade_finalizers_run_kit_copies_not_target(tmp_path) -> None:
     """v3.8.24 (P1, upgrade:961): the finalizers executed the TARGET's root/scripts/*.py AFTER the
     drift gate, so a replacement landing in that window ran target code and still yielded a
@@ -3153,6 +3298,73 @@ def test_memory_log_verify_fails_closed_on_escaping_symlink_leaf(tmp_path) -> No
     assert sk["data"]["verified"] is False, \
         "verified=true recorded although a tracked symlink leaf escaped the repo"
     assert not sentinel.exists(), "the outside script was executed as the deterministic check"
+
+
+def test_memory_log_verify_refuses_symlinked_check_tool(tmp_path) -> None:
+    """v3.8.25 (memory:264): a tracked symlink leaf pointing at an IN-REPO but untracked/ignored
+    script passed the v3.8.24 escape test (it resolves inside the repo) while its bytes were in no
+    part of the signature — --verify executed it and recorded verified=true with a clean tree. The
+    check tool is now refused if it is a symlink, and a tracked symlink whose target is not itself
+    tracked fails the signature closed."""
+    if not (SCRIPTS / "memory_log.py").exists():
+        return
+    repo = tmp_path / "r"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "x@x"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "x"], cwd=repo, check=True)
+    _stage(repo, "memory_log.py", "_substrate_root.py")
+    (repo / "scripts" / "run_smoke_verification.py").write_text("raise SystemExit(0)\n", encoding="utf-8")
+    (repo / ".gitignore").write_text("__pycache__/\nscripts/ignored/\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "base"], cwd=repo, check=True)
+    sentinel = tmp_path / "IGNORED_RAN"
+    ignored = repo / "scripts" / "ignored"
+    ignored.mkdir()
+    (ignored / "evil.py").write_text(
+        f"import pathlib\npathlib.Path({str(sentinel)!r}).write_text('ran')\nraise SystemExit(0)\n",
+        encoding="utf-8")
+    tool = repo / "scripts" / "run_smoke_verification.py"
+    tool.unlink()
+    tool.symlink_to("ignored/evil.py")   # in-repo target, but UNTRACKED/ignored
+    p = subprocess.run([sys.executable, "-I", str(repo / "scripts" / "memory_log.py"),
+                        "skill-run", "self-audit", "--verify"],
+                       cwd=str(repo), capture_output=True, text=True, timeout=60)
+    assert p.returncode != 0, (p.returncode, p.stdout, p.stderr)
+    assert not sentinel.exists(), "the untracked in-repo script was executed as the deterministic check"
+    ev = repo / ".substrate" / "memory" / "events.jsonl"
+    sk = [json.loads(ln) for ln in ev.read_text().splitlines() if '"skill-run"' in ln][-1]
+    assert sk["data"]["verified"] is False
+
+
+def test_smoke_verification_ignores_planted_validator_pyc(tmp_path) -> None:
+    """v3.8.25 (run_smoke_verification:52): the smoke runner imported validators with normal
+    importlib semantics, so a planted UNCHECKED hash-based .pyc (gitignored, so covered by neither
+    the drift gate nor the memory signature) executed while sources stayed clean. The runner now
+    redirects sys.pycache_prefix to a fresh dir, forcing compilation from real source."""
+    if not (SCRIPTS / "run_smoke_verification.py").exists():
+        return
+    import shutil as _sh
+    repo = tmp_path / "r"
+    (repo / "scripts").mkdir(parents=True)
+    for f in sorted(SCRIPTS.glob("*.py")):
+        _sh.copy(f, repo / "scripts" / f.name)
+    for extra in ("harness_patterns.json",):
+        if (SCRIPTS / extra).is_file():
+            _sh.copy(SCRIPTS / extra, repo / "scripts" / extra)
+    sentinel = tmp_path / "PYC_RAN"
+    victim = repo / "scripts" / "check_import_shadowing.py"
+    if not victim.is_file():
+        return
+    _plant_unchecked_pyc(victim, (
+        "import pathlib\n"
+        f"def main(argv=None):\n"
+        f"    pathlib.Path({str(sentinel)!r}).write_text('ran')\n"
+        f"    return 0\n"))
+    subprocess.run([sys.executable, "-I", str(repo / "scripts" / "run_smoke_verification.py")],
+                   cwd=str(repo), capture_output=True, text=True, timeout=180)
+    assert not sentinel.exists(), \
+        "a planted unchecked .pyc executed instead of the validator's real source"
 
 
 def test_memory_log_verify_record_boundary_no_collision(tmp_path) -> None:

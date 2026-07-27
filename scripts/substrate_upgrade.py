@@ -29,6 +29,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import types
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -52,34 +53,81 @@ def _load_verify(root: Path | None = None):
     trusted-by-execution — an attacker who edits BOTH the helper and the baseline (or the engine
     itself) is outside what any in-process check can catch; the real anchors are the signed release
     and the remote trusted-base freeze."""
-    helper = Path(__file__).resolve().parent / "_verify_backends.py"
+    eng = Path(__file__).resolve().parent
     if root is not None:
         try:
-            same_tree = helper.parent == (root / "scripts").resolve()
+            same_tree = eng == (root / "scripts").resolve()
         except Exception:
             same_tree = False
         if same_tree:
+            # v3.8.25 (upgrade:63 + _verify_backends:29): pin the verifier's whole DEPENDENCY
+            # CLOSURE, and FAIL CLOSED when the baseline cannot vouch for it. v3.8.24 pinned only
+            # the wrapper and skipped the check whenever the owned-map entry was missing/non-string
+            # — so deleting one entry (or poisoning `_minisign.py`, which the wrapper imports)
+            # restored a fully-trusted forged verification. A trust anchor may not fail open.
             _b = _load_install_json(root)
-            _want = (_b.get("owned_file_sha256") or {}).get("scripts/_verify_backends.py") if _b else None
-            if isinstance(_want, str):
+            _owned = (_b.get("owned_file_sha256") or {}) if _b else {}
+            for _name in _VERIFIER_CLOSURE:
+                _rel = f"scripts/{_name}"
+                _want = _owned.get(_rel)
+                if not isinstance(_want, str):
+                    raise SystemExit(
+                        f"upgrade: refusing — the drift baseline does not vouch for {_rel}, so "
+                        "source verification cannot be trusted (a missing/!str owned-map entry is "
+                        "NOT a pass). Re-install the kit to rebuild the baseline, or re-run with "
+                        "--allow-unverified to skip verification explicitly.")
                 try:
-                    _got = _sha256(helper)
+                    _got = _sha256(eng / _name)
                 except Exception as e:
-                    raise SystemExit(f"upgrade: refusing — cannot hash the signature verifier "
-                                     f"({helper.name}) to check it against the drift baseline: {e}")
+                    raise SystemExit(f"upgrade: refusing — cannot hash {_rel} to check it against "
+                                     f"the drift baseline: {e}")
                 if _got != _want:
                     raise SystemExit(
-                        "upgrade: refusing — the signature verifier (scripts/_verify_backends.py) "
-                        "does not match the drift baseline, so source verification cannot be "
-                        "trusted. Restore it (re-install the kit) or, if you intend to skip "
-                        "verification entirely, re-run with --allow-unverified.")
+                        f"upgrade: refusing — {_rel} does not match the drift baseline, so source "
+                        "verification cannot be trusted. Restore it (re-install the kit) or, if "
+                        "you intend to skip verification entirely, re-run with --allow-unverified.")
+    # Execute the EXACT BYTES we just hashed (v3.8.25 / upgrade:79). A normal `import` consults
+    # `__pycache__`, and a PEP 552 UNCHECKED hash-based .pyc is used WITHOUT validating it against
+    # the source — so hash-pinning the .py while importing normally verified bytes Python never
+    # ran. `__pycache__` is gitignored, so neither the drift gate nor the memory signature covered
+    # it. Compiling the source ourselves closes the gap: hash-then-execute the same bytes.
+    # `_minisign` is pre-loaded the same way so the wrapper's `from _minisign import ...` binds our
+    # trusted module instead of re-entering the import machinery (and its pyc).
     _saved = list(sys.path)
+    _saved_mods = {n: sys.modules.get(n) for n in ("_minisign", "_verify_backends")}
     try:
-        sys.path.insert(0, str(helper.parent))
-        from _verify_backends import verify
-        return verify
+        sys.path.insert(0, str(eng))
+        mod = None
+        for _name in _VERIFIER_CLOSURE:
+            mod = _exec_module_from_source(eng / _name)
+        return mod.verify
     finally:
         sys.path[:] = _saved
+        # Restore sys.modules so these trusted-but-privately-loaded modules do not linger under
+        # common names for a later in-process importer (v3.8.25 auditor). The returned `verify`
+        # keeps working: its globals reference the still-live module dict.
+        for _n, _prev in _saved_mods.items():
+            if _prev is None:
+                sys.modules.pop(_n, None)
+            else:
+                sys.modules[_n] = _prev
+
+
+# The verifier's dependency closure, in import order: `_minisign` first so it is already in
+# sys.modules when `_verify_backends` does `from _minisign import ...`.
+_VERIFIER_CLOSURE = ("_minisign.py", "_verify_backends.py")
+
+
+def _exec_module_from_source(path: Path):
+    """Compile and execute a module from its SOURCE BYTES, bypassing the bytecode cache entirely,
+    and register it in sys.modules under its stem so sibling imports bind to it (v3.8.25)."""
+    name = path.stem
+    code = compile(path.read_bytes(), str(path), "exec")
+    mod = types.ModuleType(name)
+    mod.__file__ = str(path)
+    sys.modules[name] = mod
+    exec(code, mod.__dict__)
+    return mod
 
 # User-content / operator-owned surfaces: NEVER overwritten by an upgrade (backed up
 # then restored around the bootstrap --force). Includes the required_* LOCKS so an
@@ -377,12 +425,12 @@ def _baseline_coverage(root: Path, kit: Path) -> set[str] | None:
     src = kit / "scripts" / "write_install_json.py"
     if not src.is_file():
         return None
-    import importlib.util
     _saved_path = list(sys.path)
     try:
-        spec = importlib.util.spec_from_file_location("_kit_write_install_json", src)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)   # trusted kit code (verified .zip / kit dir), never the target's
+        sys.path.insert(0, str(src.parent))
+        # Compile from source rather than importlib (v3.8.25): same bytecode-cache bypass as the
+        # verifier loader, so a planted `__pycache__` .pyc can never stand in for the kit's source.
+        mod = _exec_module_from_source(src)   # trusted kit code, never the target's
         return set(mod.owned_files(root))
     except Exception:
         return None

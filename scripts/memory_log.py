@@ -241,7 +241,16 @@ def _raw_tracked_hash():
         if ls.returncode != 0:
             return None
         h = hashlib.sha256()
-        for path in sorted(p for p in ls.stdout.split(b"\0") if p):
+        _paths = sorted(p for p in ls.stdout.split(b"\0") if p)
+        # Realpaths of every TRACKED file, so a tracked SYMLINK leaf can be required to resolve to
+        # another TRACKED path (v3.8.25 / memory:264). A link to an in-repo but UNTRACKED/ignored
+        # file resolves inside the repo — passing the v3.8.24 escape test — yet its bytes are in no
+        # part of the signature, so they can change (or be executed) with the signature unmoved.
+        _tracked_real = set()
+        for _p in _paths:
+            with suppress(Exception):
+                _tracked_real.add(os.path.realpath(os.path.join(ROOT, os.fsdecode(_p))))
+        for path in _paths:
             h.update(f"{len(path)}:".encode())
             h.update(path)
             fp = os.path.join(ROOT, os.fsdecode(path))
@@ -269,6 +278,13 @@ def _raw_tracked_hash():
                 # recorded. The v3.8.23 check covered escaping ANCESTORS; the leaf needs it too.
                 _rl = os.path.realpath(fp)
                 if _rl != _ROOT_REAL and not _rl.startswith(_ROOT_REAL + os.sep):
+                    return None
+                # ...and, inside the repo, the target must itself be TRACKED — otherwise its
+                # content is outside the signature entirely (v3.8.25 / memory:264). `_tracked_real`
+                # holds tracked BLOB paths only, so a link to a tracked DIRECTORY also fails closed
+                # (unverifiable here); a DANGLING link is allowed — there is no content to cover,
+                # and the link text itself is already hashed above.
+                if os.path.exists(_rl) and _rl not in _tracked_real:
                     return None
                 target = os.readlink(fp).encode("utf-8", "surrogateescape")
                 h.update(f"|link:{len(target)}:".encode())
@@ -330,6 +346,13 @@ def _run_deterministic_check() -> tuple[int, str]:
     # tracked path replaced by a symlink to an outside script would otherwise be run as the
     # "deterministic check" whose result --verify records. The signature guard fails closed on the
     # same condition; this refuses the execution itself rather than relying on that alone.
+    # v3.8.25 (memory:264): refuse a SYMLINKED check tool outright, not just an escaping one. A
+    # link to an in-repo but UNTRACKED/gitignored script (e.g. scripts/ignored/evil.py) resolves
+    # inside the repo, so the escape test passed, yet the executed bytes are covered by NO part of
+    # the signature — `git status` stays clean and verified=true was recorded after running it.
+    # The kit always installs this tool as a regular file, so refusing links costs nothing.
+    if tool.is_symlink():
+        return 2, "run_smoke_verification.py is a symlink — refusing to execute it"
     _tr = os.path.realpath(tool)
     if _tr != _ROOT_REAL and not _tr.startswith(_ROOT_REAL + os.sep):
         return 2, "run_smoke_verification.py resolves outside the repo — refusing to execute it"

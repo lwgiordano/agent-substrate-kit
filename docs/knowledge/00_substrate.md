@@ -758,6 +758,37 @@ tools) — one narrowed window is not the class; and a freshness check on state 
 must be anchored to something they cannot forge (here, the writer's rc plus a hash of the file just
 rendered), never to a version label alone.
 
+v3.8.25 is Codex's EIGHTEENTH-round re-audit (of v3.8.24) — 6 substantive findings (4 P1), and the
+round exposed a whole class the substrate had never modeled: VERIFYING BYTES THAT ARE NEVER EXECUTED.
+(P1 upgrade:79) v3.8.24's source hash-pin hashed `scripts/_verify_backends.py` and then `import`ed it
+normally — but a PEP 552 UNCHECKED hash-based `.pyc` is used WITHOUT being validated against its source,
+and `__pycache__` is GITIGNORED, so it is covered by neither the drift gate nor the memory signature. A
+planted .pyc therefore executed while the pinned .py stayed clean, approving an unsigned zip. The fix is
+the general rule: HASH-THEN-EXECUTE THE SAME BYTES — `_exec_module_from_source()` does
+`compile(path.read_bytes())` + exec into a fresh module, never consulting the cache (also applied to
+`_baseline_coverage`). (P1 _verify_backends:29) pinning only the wrapper still trusted its
+target-controlled dependency: `_verify_backends` imports `_minisign`, so a poisoned `_minisign.py`
+approved a forged `.minisig` while the wrapper matched the baseline. The pin now covers the whole
+DEPENDENCY CLOSURE (`_VERIFIER_CLOSURE`), loaded in order so `_minisign` is already in sys.modules and
+the wrapper's `from _minisign import ...` binds the trusted module. (P1 upgrade:63) the pin ran only
+`if isinstance(_want, str)`, so DELETING the verifier's owned-map entry made the check skip entirely —
+a trust anchor that fails open is not an anchor; a missing/non-string entry now REFUSES (with
+--allow-unverified as the explicit opt-out). (P1 write_install_json:105) `dest.write_text()` writes
+THROUGH the inode, so a HARD-LINKED `.substrate/install.json` (nlink>1 — invisible to every symlink
+check) had its outside same-inode twin overwritten with provenance; the writer now uses same-dir
+mkstemp + `os.replace`, which replaces the directory entry, breaks the link, follows no symlink, and is
+atomic. (P2 memory:264) the v3.8.24 leaf guard allowed a tracked symlink resolving INSIDE the repo — but
+to an untracked/ignored file, whose bytes are in no part of the signature; `_raw_tracked_hash` now
+requires a tracked symlink's target to itself be TRACKED, and `_run_deterministic_check` refuses a
+SYMLINKED check tool outright. (P2 run_smoke_verification:52) the same pyc bypass applied to the
+validators the smoke runner imports, letting planted bytecode run outside all signed state; the runner
+now redirects `sys.pycache_prefix` to a fresh temp dir (and sets dont_write_bytecode +
+invalidate_caches) BEFORE any validator import, forcing compilation from real source — done in-process
+because `-I` strips the equivalent env vars. Cross-cutting: a hash/signature over a FILE proves nothing
+unless the runtime is forced to execute that file's bytes — enumerate every cache, alternate loader, and
+dependency in the closure; and gitignored paths (`__pycache__`) are exactly where covered-by-nothing
+code hides.
+
 v3.8.10 is Codex's SIXTH-round re-audit (of v3.8.9) — 6 substantive findings (operator stopping rule:
 fix everything substantive until a clean pass). THREE in `memory_log.py`: (a) the hidden-path loop
 hashed `read_bytes()` (follows symlinks) not lstat type/mode or `readlink`, so a retargeted symlink

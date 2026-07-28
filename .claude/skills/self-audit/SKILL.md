@@ -44,3 +44,10 @@ review, use the `ultrareview` skill instead.
 - No unresolved BLOCK findings.
 - Docs updated or explicitly not needed (doc-drift gate enforces).
 - HISTORY entry appended for meaningful changes (see workflows.md).
+- Record the audit in the tamper-evident memory log (final step —
+  the logger captures the audited HEAD itself; the opt-in Stop-hook
+  completion gate looks for this event):
+
+```bash
+./manage.sh memory skill-run self-audit --result pass   # or issues-found
+```

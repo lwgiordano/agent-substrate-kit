@@ -159,6 +159,23 @@ PLAN
     *) echo "usage: ./manage.sh enable security [--plan|--write|--check]" >&2; exit 2 ;;
   esac
 }
+enable_profile(){  # $1=target $2=mode [$3=--force] — in-place RAISE-only profile ratchet
+  local target="${1:-}"; shift || true
+  local mode="${1:---plan}"; shift || true
+  case "$target" in standard|strict) ;; *)
+    echo "usage: ./manage.sh enable profile <standard|strict> [--plan|--write|--check] [--force]" >&2; exit 2 ;;
+  esac
+  case "$mode" in
+    --plan)  run_py_system scripts/substrate_profile.py --plan "$target" ;;
+    --check) run_py_system scripts/substrate_profile.py --check "$target" ;;
+    --write)
+      run_py scripts/substrate_profile.py --write "$target" "$@"
+      subtool pre-commit install
+      if [ "$target" = "strict" ]; then subtool pre-commit install --hook-type commit-msg; fi
+      run_py_system scripts/substrate_doctor.py --operational ;;
+    *) echo "usage: ./manage.sh enable profile <standard|strict> [--plan|--write|--check] [--force]" >&2; exit 2 ;;
+  esac
+}
 _set_cfg_flag(){  # $1=key $2=value — set-or-append in .substrate/config
   local cfg=".substrate/config"; [ -f "$cfg" ] || { echo "no $cfg — run bootstrap first" >&2; exit 2; }
   if grep -q "^$1=" "$cfg"; then local tmp; tmp="$(mktemp)"
@@ -221,7 +238,8 @@ case "$cmd" in
       security) enable_security "${1:---plan}" ;;
       release) enable_release "${1:---plan}" ;;
       auto-upgrade) enable_auto_upgrade "${1:---plan}" ;;
-      *) echo "usage: ./manage.sh enable remote|security|release|auto-upgrade [...]" >&2; exit 2 ;;
+      profile) enable_profile "$@" ;;
+      *) echo "usage: ./manage.sh enable remote|security|release|auto-upgrade|profile [...]" >&2; exit 2 ;;
     esac ;;
   security)
     what="${1:-scan}"; shift || true
@@ -268,9 +286,10 @@ case "$cmd" in
   agent-system-audit) bash scripts/agent_system_audit.sh ;;
   handoff) run_py scripts/session_handoff.py capture ;;
   memory) run_py scripts/memory_log.py "$@" ;;
+  new-validator) run_py scripts/new_validator.py "$@" ;;
   design-init) mkdir -p design-system/pages design-system/tokens; echo "design-system/ scaffolded" ;;
   *) cat <<'HELP'
-Usage: ./manage.sh setup|doctor|go-live|context-report|code-shape|verify-release|upgrade|enable|security|check|evals|audit|full-audit|release|manifest|agent-system-audit|handoff|memory|design-init
+Usage: ./manage.sh setup|doctor|go-live|context-report|code-shape|verify-release|upgrade|enable|security|check|evals|audit|full-audit|release|manifest|agent-system-audit|handoff|memory|design-init|new-validator
   evals                                       adversarial behavior evals (block-rate / FP-rate, writes a trace)
   doctor [--quick|--security|--operational]   readiness levels
   go-live [--json]                            local/remote/deep readiness map (offline, side-effect-light)

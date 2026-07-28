@@ -21,15 +21,31 @@ Stdlib only.
 """
 from __future__ import annotations
 
+import atexit
 import contextlib
 import importlib
 import inspect
 import io
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 _SCRIPTS_DIR = str(Path(__file__).resolve().parent)
 sys.path.insert(0, _SCRIPTS_DIR)
+
+# Never execute CACHED bytecode for the validators (v3.8.25 / run_smoke_verification:52). A PEP 552
+# UNCHECKED hash-based `.pyc` is used WITHOUT being validated against its source, and `__pycache__`
+# is gitignored — so a planted .pyc executed code covered by NO tracked/signed state: the sources
+# stayed clean, `git status` stayed empty, and `memory_log --verify` still recorded verified=true.
+# Redirecting the cache to a fresh empty dir makes every validator compile from its real source
+# (the bytes the drift gate and the memory signature actually cover). Set BEFORE any validator
+# import below. `-I` strips PYTHON* env vars, so this must be done in-process, not via the env.
+_PYC_CACHE = tempfile.mkdtemp(prefix="substrate-pyc-")
+atexit.register(shutil.rmtree, _PYC_CACHE, True)
+sys.pycache_prefix = _PYC_CACHE
+sys.dont_write_bytecode = True
+importlib.invalidate_caches()
 
 # (module, argv) — argparse-based mains read sys.argv; node main()s ignore it.
 _STATIC = [

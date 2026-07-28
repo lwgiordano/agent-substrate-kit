@@ -72,8 +72,11 @@ These all follow the SAME PATTERN:
 3. A pre-commit hook entry in `.pre-commit-config.yaml`
 4. (Optional) An opt-out marker (`# coverage-opt-out: <reason>`)
 
-When you find a class of bug specific to YOUR project, write a new
-validator following this pattern. The four meta-validators (doc-drift,
+When you find a class of bug specific to YOUR project, scaffold a new
+validator following this pattern with
+`./manage.sh new-validator <name> [--files-regex REGEX] [--desc TEXT]`
+— it generates the check + adversarial test pair and prints the
+pre-commit block to paste. The four meta-validators (doc-drift,
 history-sha, validator-input-coverage, postmortem-gates-resolved) will
 keep your new validators in line.
 

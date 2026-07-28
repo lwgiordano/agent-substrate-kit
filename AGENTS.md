@@ -7,7 +7,8 @@ hooks at context tail — never add it here.
 
 ## Startup protocol (keep it light)
 
-1. Read the last 5 entries in `docs/HISTORY.md`.
+1. Session start injects the last 5 `docs/HISTORY.md` summaries; verify
+   them there (read the file directly only if none were injected).
 2. If a session-handoff block was injected at session start, verify it
    against `git log -5 --oneline` before trusting it.
 3. Read `docs/knowledge/*.md` and `docs/decisions/*.md` ONLY for the
@@ -28,8 +29,12 @@ hooks at context tail — never add it here.
 - Every TodoWrite is mirrored to `docs/.todo_state.json`.
 - Compaction and session end capture STRUCTURED state to
   `.substrate/memory/tasks/current.json`; session start restores from that
-  JSON. `docs/CURRENT_SESSION.md` is a derived human view only — never
-  re-injected, never trusted as input.
+  JSON plus sanitized HISTORY summaries, and records the git baseline to
+  `.substrate/memory/session_start.json`. `docs/CURRENT_SESSION.md` is a
+  derived human view only — never re-injected, never trusted as input.
+- Opt-in (SUBSTRATE_COMPLETION_GATE=1): a Stop-hook gate nudges when
+  project files changed with no self-audit recorded after the last
+  change (`./manage.sh memory skill-run self-audit`). Warning-only.
 
 ## Docs/code parity contract
 

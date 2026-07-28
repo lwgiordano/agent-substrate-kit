@@ -79,14 +79,17 @@ def lint(path: Path) -> tuple[int, str]:
         # SUBSTRATE_LINT_DIRECT=1 forces direct ruff (no `uv run`, which
         # would create/sync a venv). Used by hermetic tests to stay fast
         # and offline; also honored when a substrate venv ruff exists.
+        # --force-exclude honors [tool.ruff] extend-exclude for explicitly
+        # passed paths (same rationale as run_python_gate.sh) — substrate-owned
+        # dirs are governed by their own chain, not this hook.
         direct = os.environ.get("SUBSTRATE_LINT_DIRECT", "") in ("1", "true", "yes")
         subruff = ROOT / ".substrate" / "venv" / "bin" / "ruff"
         if not direct and shutil.which("uv") and (ROOT / "pyproject.toml").exists():
-            return _run(["uv", "run", "ruff", "check", "--quiet", rel])
+            return _run(["uv", "run", "ruff", "check", "--quiet", "--force-exclude", rel])
         if subruff.exists():
-            return _run([str(subruff), "check", "--quiet", rel])
+            return _run([str(subruff), "check", "--quiet", "--force-exclude", rel])
         if shutil.which("ruff"):
-            return _run(["ruff", "check", "--quiet", rel])
+            return _run(["ruff", "check", "--quiet", "--force-exclude", rel])
         return 0, ""
     if suffix in (".js", ".jsx", ".ts", ".tsx"):
         if shutil.which("npx") and _eslint_config_exists():

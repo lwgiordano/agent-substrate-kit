@@ -239,7 +239,18 @@ if [ ! -e .substrate/sandbox.json ] || [ "$FORCE" == "yes" ]; then
   } > .substrate/sandbox.json; echo "    +    .substrate/sandbox.json"
 fi
 render "$KIT_DIR/templates/AGENTS.md" AGENTS.md; render "$KIT_DIR/templates/CLAUDE.md" CLAUDE.md
-if [[ "$LANG_PRIMARY" == "python" ]]; then render "$KIT_DIR/templates/pyproject.toml.template" pyproject.toml; fi
+if [[ "$LANG_PRIMARY" == "python" ]]; then render "$KIT_DIR/templates/pyproject.toml.template" pyproject.toml
+  # An EXISTING pyproject.toml is operator-owned and never clobbered — but then it lacks the
+  # kit's `[tool.ruff] extend-exclude`, so a direct `ruff check .` (or an editor integration)
+  # will lint the vendored substrate in scripts/. The pre-commit gate is already safe without it
+  # (run_python_gate.sh excludes the reserved dirs itself, v3.8.26), so this is ADVISORY only —
+  # we tell the operator instead of editing their file.
+  if [ -f pyproject.toml ] && ! grep -q '^\[tool\.ruff' pyproject.toml; then
+    echo "    note: pyproject.toml is yours (kept as-is) and has no [tool.ruff] section."
+    echo "          The substrate's own gates already skip substrate-owned dirs, but for direct"
+    echo "          \`ruff\`/editor runs add:  [tool.ruff]  extend-exclude = [\"scripts\", \"extras\"]"
+  fi
+fi
 render_precommit "$KIT_DIR/templates/pre-commit-config.yaml.template" .pre-commit-config.yaml
 render "$KIT_DIR/templates/manage.sh.template" manage.sh +x
 render "$KIT_DIR/templates/codex/config.toml.template" .codex/config.toml; render "$KIT_DIR/templates/codex/hooks.json.template" .codex/hooks.json; render "$KIT_DIR/templates/claude/settings.json.template" .claude/settings.json
@@ -351,7 +362,7 @@ if [ "$UI_ENABLED" == "yes" ]; then _safe_mkdir_p design-system/pages design-sys
 
 TODO.' > design-system/MASTER.md; echo "    +    design-system/MASTER.md"; }; fi
 if [ ! -e .gitattributes ] || ! grep -q 'docs/HISTORY.md' .gitattributes; then wappend .gitattributes; echo 'docs/HISTORY.md merge=union' >> .gitattributes; echo "    +    .gitattributes"; fi
-wappend .gitignore; [ -e .gitignore ] || touch .gitignore; for line in docs/CURRENT_SESSION.md docs/.todo_state.json .substrate/memory/tasks/ .substrate/traces/ .substrate/venv/ .substrate/dep_cooldown_cache.json 'ai/audits/*/audit-report.json' __pycache__/ .venv/ .pytest_cache/ .ruff_cache/ .mypy_cache/ node_modules/ dist/ build/; do grep -qxF "$line" .gitignore || echo "$line" >> .gitignore; done
+wappend .gitignore; [ -e .gitignore ] || touch .gitignore; for line in docs/CURRENT_SESSION.md docs/.todo_state.json .substrate/memory/ .substrate/traces/ .substrate/venv/ .substrate/dep_cooldown_cache.json 'ai/audits/*/audit-report.json' __pycache__/ .venv/ .pytest_cache/ .ruff_cache/ .mypy_cache/ node_modules/ dist/ build/; do grep -qxF "$line" .gitignore || echo "$line" >> .gitignore; done
 [ -e docs/.todo_state.json ] || { wprep docs/.todo_state.json; echo '{"version":1,"items":[]}' > docs/.todo_state.json; }
 # Run substrate tools from the KIT, never the target's `scripts/` copy (v3.8.21 / bootstrap:323):
 # on a non-force install into a repo with a pre-existing `scripts/update_manifest.py` collision,

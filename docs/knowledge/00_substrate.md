@@ -789,6 +789,33 @@ unless the runtime is forced to execute that file's bytes — enumerate every ca
 dependency in the closure; and gitignored paths (`__pycache__`) are exactly where covered-by-nothing
 code hides.
 
+v3.8.26 is the first ADOPTION-path release, and it exists because a question no audit round had
+asked — "can a developer actually install this into a real product?" — found two hard blockers in
+minutes that 18 rounds of adversarial security auditing never touched. Both fire on the most common
+real-world case: a Python repo that ALREADY has a pyproject.toml. (1) bootstrap correctly refuses to
+clobber an operator-owned pyproject.toml, but that file is where the kit's
+`[tool.ruff] extend-exclude = ["scripts", "extras", ...]` lives — so an existing-pyproject repo never
+received it, ruff fell back to its DEFAULTS (E4 includes E402), linted the VENDORED substrate in
+scripts/, and blocked EVERY commit on the substrate's own code. Fixed in `run_python_gate.sh`: the
+adapter now FILTERS substrate-reserved paths (scripts/, extras/) out of the ruff file arguments, so
+the invariant lives where an operator cannot lose it. Filtering ARGUMENTS beats `--config`/`--exclude`
+because it is purely additive — it never overrides the repo's own excludes (the kit's own config
+excludes tests/ and installer/, which a `--config` override would have silently dropped) and it works
+for `ruff check` and `ruff format`, which do not accept the same exclude flags. `tests/` is
+deliberately NOT filtered: it is consumer-owned and the vendored consumer tests are ruff-clean.
+(2) bootstrap gitignored only `.substrate/memory/tasks/` while the kit's own .gitignore covers
+`.substrate/memory/` WHOLESALE — so in a consumer repo `events.jsonl` and `session_start.json` were
+TRACKED, the hooks rewrote them on every pre-commit run, and pre-commit's "files were modified by this
+hook" meant the commit could NEVER converge (re-staging just reproduced it). One-line fix to match the
+kit. Verified end to end: fresh product repo + existing pyproject -> bootstrap -> setup -> adopt commit
+converges -> a normal day-to-day product commit passes first try with ZERO failed gates. Regression:
+test_adoption_into_repo_with_existing_pyproject. Cross-cutting, and the real lesson of this release:
+an adversarial auditor testing disposable repos measures whether the gates can be BROKEN, never whether
+a user can SUCCEED — those are different bug classes, and the second one had no coverage at all.
+Remaining known adoption cost (by design, not a bug): the docs/code parity gate is unconditional at
+every profile, so each pre-existing source module needs a knowledge-doc `covers:` entry before the
+first commit passes.
+
 v3.8.10 is Codex's SIXTH-round re-audit (of v3.8.9) — 6 substantive findings (operator stopping rule:
 fix everything substantive until a clean pass). THREE in `memory_log.py`: (a) the hidden-path loop
 hashed `read_bytes()` (follows symlinks) not lstat type/mode or `readlink`, so a retargeted symlink

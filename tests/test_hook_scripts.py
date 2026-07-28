@@ -2695,6 +2695,53 @@ def test_bootstrap_fails_on_stale_provenance_baseline(tmp_path) -> None:
     assert p.returncode == 2, (p.returncode, p.stdout[-300:], p.stderr[-300:])
 
 
+def test_adoption_into_repo_with_existing_pyproject(tmp_path) -> None:
+    """v3.8.26 (adoption): installing into a repo that ALREADY has a pyproject.toml — i.e. nearly
+    every real Python product — was a hard adoption blocker, and 18 rounds of security auditing
+    never caught it because they test disposable repos, not "can a developer actually adopt this".
+    TWO bugs compounded:
+      1. bootstrap correctly refuses to clobber the operator's pyproject.toml, so the kit's
+         `[tool.ruff] extend-exclude` never landed; ruff fell back to defaults, linted the VENDORED
+         substrate in scripts/, and E402 blocked every commit.
+      2. bootstrap gitignored only `.substrate/memory/tasks/` while the kit ignores
+         `.substrate/memory/` wholesale — so events.jsonl / session_start.json were TRACKED in the
+         consumer repo and the hooks rewrote them on every run ("files were modified by this
+         hook"), so the commit could NEVER converge.
+    This asserts the substrate is adoptable: the reserved dirs stay out of the consumer's lint
+    regardless of their config, and runtime memory state is ignored."""
+    if not (ROOT / "bootstrap.sh").exists():
+        return
+    repo = tmp_path / "myapp"
+    (repo / "src").mkdir(parents=True)
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    (repo / "src" / "app.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    # the operator's OWN pyproject.toml, with no [tool.ruff] section
+    (repo / "pyproject.toml").write_text('[project]\nname = "myapp"\nversion = "0.1.0"\n',
+                                         encoding="utf-8")
+    p = subprocess.run(["bash", str(ROOT / "bootstrap.sh"), "--target", str(repo),
+                        "--profile", "standard", "--lang", "python", "--no-doctor"],
+                       capture_output=True, text=True, timeout=300)
+    assert p.returncode == 0, (p.returncode, p.stdout[-300:], p.stderr[-300:])
+    # (1) the operator's file is untouched...
+    assert 'name = "myapp"' in (repo / "pyproject.toml").read_text(encoding="utf-8")
+    assert "[tool.ruff]" not in (repo / "pyproject.toml").read_text(encoding="utf-8")
+    # ...and the lint adapter STILL keeps substrate-reserved dirs out of the consumer's lint,
+    # so the vendored scripts (which are not ruff-clean under default rules) cannot block a commit.
+    gate = repo / "scripts" / "run_python_gate.sh"
+    if gate.is_file():
+        g = subprocess.run(["bash", str(gate), "lint", "scripts/substrate_doctor.py"],
+                           cwd=repo, capture_output=True, text=True, timeout=180)
+        assert g.returncode == 0, \
+            f"substrate-reserved scripts/ still reaches ruff in a repo without [tool.ruff]: {g.stdout[-300:]}{g.stderr[-300:]}"
+    # (2) runtime memory state must be gitignored, or hooks that touch it make every commit fail
+    gi = (repo / ".gitignore").read_text(encoding="utf-8")
+    assert ".substrate/memory/" in gi, \
+        "consumer .gitignore does not cover .substrate/memory/ — hooks rewrite tracked state and no commit can converge"
+    chk = subprocess.run(["git", "check-ignore", "-q", ".substrate/memory/events.jsonl"],
+                         cwd=repo, capture_output=True)
+    assert chk.returncode == 0, "memory events.jsonl is not ignored in a consumer install"
+
+
 def test_bootstrap_fails_on_stale_same_version_baseline(tmp_path) -> None:
     """v3.8.24 (bootstrap:391): the v3.8.23 content check compared only kit_version, so a pre-created
     STALE but SAME-VERSION install.json (empty owned map, stale answers) still masked a failed writer

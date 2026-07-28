@@ -816,6 +816,25 @@ Remaining known adoption cost (by design, not a bug): the docs/code parity gate 
 every profile, so each pre-existing source module needs a knowledge-doc `covers:` entry before the
 first commit passes.
 
+v3.8.27 is the second adoption-path finding, surfaced by testing a REAL upgrade (a v3.7.14 tool
+cloned and upgraded to v3.8.26) rather than by any audit round — and it is the same class as v3.8.26:
+a defect visible only when the substrate runs in a CONSUMER repo, never in the kit's own tree.
+`t_profile_ratchet_raise_succeeds` staged its fixtures from `templates/pre-commit-config.yaml.template`
+and `extras/*.py`, which are kit-SOURCE dirs a consumer install never receives — bootstrap stages that
+content under `.substrate/pre-commit-config.yaml.template` and `.substrate/extras/` instead. Both
+lookups are guarded by `is_file()`/`glob`, so in an installed repo they silently staged NOTHING,
+`substrate_profile --write strict` then failed with "template is missing", and a BENIGN task was scored
+as a FALSE POSITIVE — every consumer install reported `benign FP 1/11 (rate 0.09)` while the kit's own
+tree reported 0/11. The eval suite is the kit's central honesty claim ("re-run it on your host"), so a
+suite that cannot report clean ON a host was undermining exactly the property it exists to prove. Both
+lookups now fall back to the installed layout; verified 0/11 in the kit AND in two consumer repos (one
+fresh v3.8.26 install, one upgraded from v3.7.14). Regression:
+test_evals_resolve_staged_assets_in_consumer_layout, which asserts both fallbacks statically and runs
+the task behaviorally. Cross-cutting: when a tool ships INTO another repo, every path it resolves has
+two layouts — source and installed — and a silent `if is_file()` guard turns the missing-layout case
+into a wrong ANSWER rather than an error. Prefer resolving both, and test the tool where it will
+actually run.
+
 v3.8.10 is Codex's SIXTH-round re-audit (of v3.8.9) — 6 substantive findings (operator stopping rule:
 fix everything substantive until a clean pass). THREE in `memory_log.py`: (a) the hidden-path loop
 hashed `read_bytes()` (follows symlinks) not lstat type/mode or `readlink`, so a retargeted symlink

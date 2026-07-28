@@ -517,14 +517,26 @@ def t_profile_ratchet_raise_succeeds():
         sub = td / ".substrate"; sub.mkdir(exist_ok=True)
         (sub / "config").write_text('SUBSTRATE_PROFILE="standard"\nSUBSTRATE_LANG="none"\n'
                                     'SUBSTRATE_RUNNER="auto"\n', encoding="utf-8")
-        # Stage the raw pre-commit template + strict extras the ratchet needs
-        # (as bootstrap does) — no install.json baseline, so it skips re-record.
+        # Stage the raw pre-commit template + strict extras the ratchet needs (as bootstrap
+        # does) — no install.json baseline, so it skips re-record. Source them from the KIT
+        # layout when running in the kit repo, else from the INSTALLED layout (v3.8.26 /
+        # evals:522). `templates/` and `extras/` are kit-SOURCE dirs that a consumer install
+        # never receives — bootstrap stages their content under `.substrate/` instead — so the
+        # kit-only lookup silently staged nothing in a consumer repo, substrate_profile then
+        # failed with "template is missing", and this BENIGN task was scored as a FALSE
+        # POSITIVE (1/11) in every installed repo. The suite advertises "re-run it on your
+        # host", so it has to resolve paths the way an installed repo actually looks.
         tpl = SCRIPTS.parent / "templates" / "pre-commit-config.yaml.template"
+        if not tpl.is_file():
+            tpl = SCRIPTS.parent / ".substrate" / "pre-commit-config.yaml.template"
         if tpl.is_file():
             (sub / "pre-commit-config.yaml.template").write_text(
                 tpl.read_text(encoding="utf-8"), encoding="utf-8")
         exdir = sub / "extras"; exdir.mkdir(exist_ok=True)
-        for xf in (SCRIPTS.parent / "extras").glob("*.py"):
+        _ex_src = SCRIPTS.parent / "extras"
+        if not _ex_src.is_dir():
+            _ex_src = SCRIPTS.parent / ".substrate" / "extras"
+        for xf in _ex_src.glob("*.py"):
             (exdir / xf.name).write_text(xf.read_text(encoding="utf-8"), encoding="utf-8")
         p = _run([PY, "-I", "scripts/substrate_profile.py", "--write", "strict"], cwd=td)
         raised = (p.returncode == 0

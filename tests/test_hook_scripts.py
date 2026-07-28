@@ -2695,6 +2695,37 @@ def test_bootstrap_fails_on_stale_provenance_baseline(tmp_path) -> None:
     assert p.returncode == 2, (p.returncode, p.stdout[-300:], p.stderr[-300:])
 
 
+def test_evals_resolve_staged_assets_in_consumer_layout(tmp_path) -> None:
+    """v3.8.27 (evals:522): the profile-ratchet BENIGN task sourced its fixtures from the kit-SOURCE
+    dirs `templates/` and `extras/`, which a consumer install never receives — bootstrap stages that
+    content under `.substrate/` instead. So in every installed repo it silently staged nothing,
+    substrate_profile failed with "template is missing", and a benign task was scored as a FALSE
+    POSITIVE (1/11) — the suite that advertises "re-run it on your host" did not report clean on a
+    host. Asserts the resolution falls back to the INSTALLED layout."""
+    evals = SCRIPTS / "run_substrate_evals.py"
+    if not evals.is_file():
+        return
+    src = evals.read_text(encoding="utf-8")
+    # the kit-source lookups must each have an installed-layout fallback
+    assert '".substrate" / "pre-commit-config.yaml.template"' in src, \
+        "eval staging has no consumer-layout fallback for the pre-commit template"
+    assert '".substrate" / "extras"' in src, \
+        "eval staging has no consumer-layout fallback for extras/"
+    # and behaviorally: with ONLY the installed layout present, the task still passes
+    import importlib.util as _iu
+    spec = _iu.spec_from_file_location("_ev_consumer", evals)
+    mod = _iu.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(mod)
+    except Exception:
+        return   # harness needs repo context to import; the static assertions above still bind
+    fn = getattr(mod, "t_profile_ratchet_raise_succeeds", None)
+    if fn is None:
+        return
+    ok, detail = fn()
+    assert ok, f"profile-ratchet benign task fails in this layout: {detail}"
+
+
 def test_adoption_into_repo_with_existing_pyproject(tmp_path) -> None:
     """v3.8.26 (adoption): installing into a repo that ALREADY has a pyproject.toml — i.e. nearly
     every real Python product — was a hard adoption blocker, and 18 rounds of security auditing

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Docs/code drift detector with staged-edit awareness."""
 from __future__ import annotations
-import argparse, json, subprocess, sys
+import argparse, json, os, subprocess, sys
 from datetime import date
 from pathlib import Path
 # Explicit local import path so this works under `python -I` (isolated mode
@@ -105,6 +105,24 @@ def _assert_failures(doc, root:Path) -> list:
     return out
 
 
+_DOC_TOKEN_BUDGET = int(os.environ.get('SUBSTRATE_KNOWLEDGE_DOC_TOKENS') or 3000)
+
+
+def _oversize_docs(docs, root:Path) -> list:
+    """Knowledge docs over the per-doc token budget (~bytes/4, the same estimate
+    context_report uses). ADVISORY: reported by report() but deliberately EXCLUDED
+    from its failure boolean — see the comment there."""
+    out=[]
+    for d in docs:
+        p=root/d['path']
+        try: nbytes=p.stat().st_size
+        except OSError: continue
+        tok=round(nbytes/4)
+        if tok > _DOC_TOKEN_BUDGET:
+            out.append((d['path'], f'~{tok} tok', f'budget {_DOC_TOKEN_BUDGET}'))
+    return out
+
+
 def detect(root:Path):
     docs=_load_docs(root); cov_to_docs={}
     for doc in docs:
@@ -125,6 +143,7 @@ def detect(root:Path):
       'stale_doc':[r for d in docs for c in d['covers'] if (r:=_doc_stale(d,c,root)) is not None],
       'orphan_doc':sorted(on_disk-(manifest or set())),
       'assert_failed':[f for d in docs for f in _assert_failures(d, root)],
+      'oversize_doc':_oversize_docs(docs, root),
       'missing_manifest':manifest is None,
     }
 def report(d,file=sys.stdout):
@@ -144,6 +163,21 @@ def report(d,file=sys.stdout):
     section('STALE DOC — committed file newer than review date', d['stale_doc'], 'review and bump last_human_reviewed.')
     section('ORPHAN DOC — docs not registered in manifest', d['orphan_doc'], 'run update_manifest --fix.')
     section('BROKEN CLAIM — doc asserts something the code no longer contains', d.get('assert_failed') or [], 'update the doc to match the code (or fix the asserts: entry), then bump last_human_reviewed.')
+    # ADVISORY, NOT A GATE (v3.8.30). Every category above is OR'd into `found`,
+    # which becomes the process exit code. Size is deliberately NOT: a doc growing
+    # past its budget is a shape problem to fix deliberately, not a reason to block
+    # a commit, and the kit's own 00_substrate.md is already ~6x over. This follows
+    # the precedent the completion gate set (shipped warning-only; blocking deferred
+    # until after dogfooding). Opt in to hard enforcement with
+    # SUBSTRATE_ENFORCE_DOC_BUDGET=1. The numeric view is `context-report --budget`.
+    over = d.get('oversize_doc') or []
+    if over:
+        print('\nOVERSIZE DOC (advisory — does not fail the gate):', file=file)
+        for item in over: print('  - '+' -> '.join(map(str,item)), file=file)
+        print('  Fix: knowledge docs describe ONE subsystem (contract/organization/scope); '
+              'per-release narrative belongs in docs/HISTORY.md. Split or trim.', file=file)
+        if os.environ.get('SUBSTRATE_ENFORCE_DOC_BUDGET') == '1':
+            found=True
     if not found: print('doc-drift: no drift detected.', file=file)
     return found
 def main():

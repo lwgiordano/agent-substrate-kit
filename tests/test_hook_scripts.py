@@ -7101,6 +7101,55 @@ def test_doc_drift_asserts_scalar_not_split_into_chars(tmp_path) -> None:
     assert d["assert_failed"] == [], d["assert_failed"]
 
 
+def test_doc_drift_oversize_is_advisory_not_a_gate(tmp_path) -> None:
+    """v3.8.30: an over-budget knowledge doc is REPORTED but must NOT fail the
+    gate — every other drift category ORs into the exit code, and size is the one
+    deliberate exception (a shape problem to fix, not a reason to block a commit).
+    SUBSTRATE_ENFORCE_DOC_BUDGET=1 opts in to hard enforcement."""
+    if not (SCRIPTS / "check_doc_drift.py").exists():
+        return
+    repo = _drift_repo(tmp_path, "")
+    # register the doc so size is the ONLY finding — otherwise the rc would prove
+    # nothing about whether size gates.
+    (repo / "docs" / "manifest.json").write_text(
+        json.dumps({"knowledge_docs": [{"path": "docs/knowledge/01_mod.md"}]}), encoding="utf-8")
+    # pad the doc well past a deliberately tiny budget
+    doc = repo / "docs" / "knowledge" / "01_mod.md"
+    doc.write_text(doc.read_text(encoding="utf-8") + ("filler words here. " * 400), encoding="utf-8")
+    env = dict(os.environ, SUBSTRATE_KNOWLEDGE_DOC_TOKENS="10")
+    advisory = subprocess.run([sys.executable, "-I", str(SCRIPTS / "check_doc_drift.py")],
+                              cwd=repo, capture_output=True, text=True, timeout=120, env=env)
+    assert advisory.returncode == 0, (advisory.returncode, advisory.stdout[-400:])
+    assert "OVERSIZE DOC" in advisory.stdout
+    assert "does not fail the gate" in advisory.stdout
+    enforced = subprocess.run([sys.executable, "-I", str(SCRIPTS / "check_doc_drift.py")],
+                              cwd=repo, capture_output=True, text=True, timeout=120,
+                              env=dict(env, SUBSTRATE_ENFORCE_DOC_BUDGET="1"))
+    assert enforced.returncode == 1, (enforced.returncode, enforced.stdout[-300:])
+
+
+def test_context_report_budget_names_oversize_knowledge_doc() -> None:
+    """v3.8.30: --budget adds a warn row PER over-budget knowledge doc, named, so
+    the warning is actionable. Must stay purely additive to the JSON shape."""
+    if not (SCRIPTS / "context_report.py").exists():
+        return
+    p = subprocess.run([sys.executable, "-I", str(SCRIPTS / "context_report.py"),
+                        "--budget", "--json"],
+                       capture_output=True, text=True, timeout=120,
+                       env=dict(os.environ, SUBSTRATE_KNOWLEDGE_DOC_TOKENS="10"))
+    assert p.returncode == 0, p.stderr[-300:]
+    d = json.loads(p.stdout)
+    rows = d["budget"]
+    # the pre-existing rows must still be present (additive-only contract)
+    items = {r["item"] for r in rows}
+    for legacy in ("always_loaded_prompt", "AGENTS.md", "skill_index", "session_current_json"):
+        assert legacy in items, f"budget row {legacy} disappeared"
+    kdocs = [r for r in rows if r["item"].startswith("knowledge_doc:")]
+    assert kdocs, "no per-doc knowledge budget row emitted"
+    assert all(r["status"] == "warn" for r in kdocs)
+    assert all("docs/knowledge/" in r["item"] for r in kdocs)
+
+
 def test_doc_drift_doc_committed_with_code_is_not_stale(monkeypatch) -> None:
     """v3.4.1: a covered file committed in the SAME commit as its knowledge doc
     must NOT be flagged stale — a frozen review date otherwise drifts stale on

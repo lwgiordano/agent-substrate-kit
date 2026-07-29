@@ -899,6 +899,25 @@ trip update-manifest-check. Dogfooded: 00_substrate.md now asserts 10 claims abo
 session_handoff, substrate_upgrade, bootstrap, run_python_gate and command_policy. Note the drift
 gate's seven categories previously had no category-level tests at all; this ships four.
 
+v3.8.30 adds a PER-DOC KNOWLEDGE SIZE BUDGET, warn-only — the third knowledge-layer addition. The
+gap was measurement without feedback: `context-report` reported on-demand context at ~23.7k tok of
+which THIS FILE was 75% (17.8k tok, 15x the next contributor), because a paragraph accreted per
+release while nothing named the growth. Two surfaces, one estimator (`_tok()`, bytes/4): a
+`knowledge_doc` entry in `context_report._BUDGETS` that emits one warn row PER over-budget doc, NAMED
+`knowledge_doc:<path>` so the warning is actionable rather than a bare total; and an `oversize_doc`
+list in `check_doc_drift.detect()` printed by report(). Default 3000 tok (~12 KB), overridable via
+`SUBSTRATE_KNOWLEDGE_DOC_TOKENS` — generous enough that a normal consumer doc (the template is 1.9 KB)
+never trips it. The DELIBERATE ASYMMETRY: every other drift category ORs into report()'s failure
+boolean, and size does NOT. Breaking that uniformity is the point and is commented as such at the
+site — an over-budget doc is a shape problem to fix deliberately, not a reason to block a commit, and
+the kit's own 00_substrate.md is already ~6x over, so a blocking version would have shipped the gate
+red. `SUBSTRATE_ENFORCE_DOC_BUDGET=1` opts in to hard enforcement, following the precedent the
+completion gate set (shipped warning-only, blocking deferred until after dogfooding). Additions to
+`--json` are purely additive because the existing budget-row shape is pinned by tests; a regression
+asserts all four legacy rows survive alongside the new ones. NOT done here: splitting this file. That
+is a ~71 KB content migration deserving its own review — the warning now names it, which is the
+mechanism that was missing.
+
 v3.8.10 is Codex's SIXTH-round re-audit (of v3.8.9) — 6 substantive findings (operator stopping rule:
 fix everything substantive until a clean pass). THREE in `memory_log.py`: (a) the hidden-path loop
 hashed `read_bytes()` (follows symlinks) not lstat type/mode or `readlink`, so a retargeted symlink

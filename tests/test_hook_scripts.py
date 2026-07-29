@@ -7023,6 +7023,84 @@ def test_config_key_allowlists_agree() -> None:
         assert key in shell, f"{key} accepted by check_substrate_config.py but missing from _substrate_config.sh"
 
 
+def _drift_repo(tmp_path: Path, asserts_block: str) -> Path:
+    """A minimal repo with one covered module and a knowledge doc carrying
+    `asserts_block` in its front matter."""
+    (tmp_path / "docs" / "knowledge").mkdir(parents=True)
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "mod.py").write_text("def real_symbol():\n    return 1\n", encoding="utf-8")
+    (tmp_path / "docs" / "knowledge" / "01_mod.md").write_text(
+        "---\npurpose: mod\nlast_human_reviewed: 2026-07-29\ncovers:\n  - src/mod.py\n"
+        + asserts_block + "---\n\n# Mod\n", encoding="utf-8")
+    return tmp_path
+
+
+def _drift_json(repo: Path) -> dict:
+    p = subprocess.run([sys.executable, "-I", str(SCRIPTS / "check_doc_drift.py"), "--json"],
+                       cwd=repo, capture_output=True, text=True, timeout=120)
+    return json.loads(p.stdout)
+
+
+def test_doc_drift_asserts_catch_renamed_and_missing(tmp_path) -> None:
+    """v3.8.29: `asserts: path::substring` turns a doc's CLAIM into a checked fact.
+    A renamed symbol, a deleted file, and a malformed entry must each be reported;
+    a claim that still holds must not."""
+    if not (SCRIPTS / "check_doc_drift.py").exists():
+        return
+    repo = _drift_repo(tmp_path, (
+        "asserts:\n"
+        "  - src/mod.py::real_symbol\n"        # holds
+        "  - src/mod.py::renamed_away\n"       # substring gone
+        "  - src/deleted.py::anything\n"       # file gone
+        "  - this_entry_is_malformed\n"        # no `::`
+    ))
+    fails = _drift_json(repo)["assert_failed"]
+    reasons = " ".join(str(f) for f in fails)
+    assert len(fails) == 3, fails
+    assert "renamed_away" in reasons
+    assert "does not exist" in reasons
+    assert "malformed" in reasons
+    assert "real_symbol" not in reasons          # the holding claim is silent
+
+
+def test_doc_drift_asserts_absent_is_noop(tmp_path) -> None:
+    """A doc with NO asserts: key behaves exactly as before — the feature is
+    opt-in, so existing installs are unaffected until they use it."""
+    if not (SCRIPTS / "check_doc_drift.py").exists():
+        return
+    repo = _drift_repo(tmp_path, "")
+    d = _drift_json(repo)
+    assert d["assert_failed"] == []
+
+
+def test_doc_drift_asserts_never_execute_content(tmp_path) -> None:
+    """DECLARATIVE ONLY: an assertion whose text looks like a command must be
+    treated as a substring to search for, never run. Guards the boundary that
+    made this design acceptable at all (see docs/REJECTED.md)."""
+    if not (SCRIPTS / "check_doc_drift.py").exists():
+        return
+    sentinel = tmp_path / "EXECUTED"
+    repo = _drift_repo(tmp_path, (
+        "asserts:\n"
+        f"  - src/mod.py::touch {sentinel}\n"
+    ))
+    d = _drift_json(repo)
+    assert not sentinel.exists(), "assertion content was EXECUTED"
+    # and it is reported as a missing substring, i.e. treated as data
+    assert len(d["assert_failed"]) == 1
+    assert "no longer contains" in str(d["assert_failed"][0])
+
+
+def test_doc_drift_asserts_scalar_not_split_into_chars(tmp_path) -> None:
+    """`asserts: a::b` (a bare scalar, not a list) must be ONE entry — a naive
+    list() over a str would iterate characters and emit nonsense failures."""
+    if not (SCRIPTS / "check_doc_drift.py").exists():
+        return
+    repo = _drift_repo(tmp_path, "asserts: src/mod.py::real_symbol\n")
+    d = _drift_json(repo)
+    assert d["assert_failed"] == [], d["assert_failed"]
+
+
 def test_doc_drift_doc_committed_with_code_is_not_stale(monkeypatch) -> None:
     """v3.4.1: a covered file committed in the SAME commit as its knowledge doc
     must NOT be flagged stale — a frozen review date otherwise drifts stale on

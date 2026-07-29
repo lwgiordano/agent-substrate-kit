@@ -1,5 +1,16 @@
 ---
 purpose: Universal Agent Substrate Kit v3 files installed in this repo.
+asserts:
+  - scripts/memory_log.py::_raw_tracked_hash
+  - scripts/memory_log.py::_write_tree_oid
+  - scripts/session_handoff.py::_safe_history_line
+  - scripts/session_handoff.py::_rejected_block
+  - scripts/substrate_upgrade.py::_exec_module_from_source
+  - scripts/substrate_upgrade.py::_apply_capability_floor
+  - bootstrap.sh::_safe_mkdir_p
+  - bootstrap.sh::wappend
+  - scripts/run_python_gate.sh::_ruff_args
+  - scripts/command_policy.py::looks_dangerous_command
 last_human_reviewed: 2026-07-10
 covers:
   - extras/calibrate_diy_ultrareview.py
@@ -864,6 +875,29 @@ talked out of a decision by repo prose. Eval pair `rejected_injection_stripped` 
 `test_evals_pass_on_shipped_kit` hardcoded `benign FP 0/11` while its own comment claimed to be
 count-agnostic, so it false-failed on arithmetic every time a task was added — now a `\d+` regex on
 the property that actually matters (rate 1.00, zero FPs).
+
+v3.8.29 adds DECLARATIVE DOC ASSERTIONS — the second knowledge-layer addition, and the safe
+adaptation of ClariLayer's declared-vs-observed reconciliation. The gap: `check_doc_drift.py` verified
+docs were REVIEWED recently (coverage, dates, manifest registration) but never whether their CLAIMS
+were still true. Knowledge docs name functions (`_raw_tracked_hash`, `_load_verify`, `wappend`); a
+rename made the doc silently lie while every gate stayed green. New OPTIONAL front-matter key:
+`asserts:` holding flat `path::substring` entries, checked by a new `assert_failed` category in
+detect(). A missing substring, a missing file, and a MALFORMED entry are each reported — malformed is
+deliberately NOT silently skipped, because an assertion that quietly does not run is false assurance,
+the v3.8.25 lesson restated. NOTHING IS EXECUTED: running commands declared in an agent-writable
+markdown file would make repo prose executable, which this threat model refuses (that option is
+logged in docs/REJECTED.md, and a test asserts command-shaped assertion text is treated as a
+substring to search for, never run). The flat `path::substring` shape is load-bearing:
+`parse_front_matter` supports only top-level scalars and flat lists, so a nested block would have
+required touching the hand-rolled YAML subset and its blind-spot ritual; this needs ZERO parser
+changes. A bare scalar (`asserts: a::b`) is normalized to one entry rather than iterated as
+characters. Bounded at 50 assertions/doc, 300-char substrings, 4 MB reads. OPT-IN by construction —
+unknown front-matter keys were already ignored, so a doc without `asserts:` behaves exactly as before
+and no existing consumer install changes behavior until it adopts the key. `asserts` is deliberately
+NOT added to update_manifest.knowledge(), which would rewrite docs/manifest.json for every doc and
+trip update-manifest-check. Dogfooded: 00_substrate.md now asserts 10 claims about memory_log,
+session_handoff, substrate_upgrade, bootstrap, run_python_gate and command_policy. Note the drift
+gate's seven categories previously had no category-level tests at all; this ships four.
 
 v3.8.10 is Codex's SIXTH-round re-audit (of v3.8.9) — 6 substantive findings (operator stopping rule:
 fix everything substantive until a clean pass). THREE in `memory_log.py`: (a) the hidden-path loop

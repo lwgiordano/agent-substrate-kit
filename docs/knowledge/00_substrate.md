@@ -14,6 +14,7 @@ covers:
   - scripts/_verify_backends.py
   - scripts/agent_system_audit.sh
   - scripts/append_history.py
+  - scripts/append_rejected.py
   - scripts/build_review_bundle.py
   - scripts/check_agent_harness.py
   - scripts/check_bandit_skip_baseline.py
@@ -834,6 +835,35 @@ the task behaviorally. Cross-cutting: when a tool ships INTO another repo, every
 two layouts — source and installed — and a silent `if is_file()` guard turns the missing-layout case
 into a wrong ANSWER rather than an error. Prefer resolving both, and test the tool where it will
 actually run.
+
+v3.8.28 adds a REJECTED-APPROACH log, the first of three knowledge-layer additions prompted by
+comparing the substrate against MemoryCustodian / Prelint / ClariLayer. The gap it closes: nothing
+stopped a session re-proposing an approach already ruled out. The ADR template already marks
+"Alternatives Considered / Rejected because" REQUIRED with exactly that rationale ("Without it,
+future sessions re-derive the same alternatives") — but after 27 releases `docs/decisions/` held only
+the template, and ADRs are never injected. Capture existed, was heavyweight, and was empirically
+unused; cost of capture determines whether capture happens. So: `docs/REJECTED.md` (append-only,
+one line per entry, `merge=union`), `scripts/append_rejected.py` (mirrors append_history.py:
+argparse-validated ≥10-char fields, atomic mkstemp+os.replace so a hard-linked or symlinked target is
+never written through), and `./manage.sh reject --what X --why Y`. ADRs remain the home for full
+decisions; this is for one-liners. The newest entries are injected at SessionStart by
+`_rejected_block()`, which REUSES `_safe_history_line()` unchanged rather than copying it — so the
+two injected blocks' injection defenses can never drift apart. Budget: `REJECTED_BUDGET = 500`, and
+`ABSOLUTE_MAX_CONTEXT_CHARS` is deliberately NOT raised (4000+1500+500 = 6000 exactly) because a
+global ceiling raise was explicitly rejected in operator review of PR #4 — a decision that was only
+discoverable by reading a merged PR body, which is precisely the problem this feature solves, and is
+now the log's first entry. The block is appended LAST so absolute-ceiling truncation eats it before
+the trusted git facts or HISTORY. One design fix found while building: blind `block[:BUDGET]`
+truncation (the HISTORY block's approach) would cut the TAIL of a chronological list — dropping the
+NEWEST rejections, the most relevant ones — so `_rejected_block()` instead fits entries newest-first
+and renders them newest-last, degrading by forgetting the OLDEST. Timestamps are kept in the file
+(audit trail) but stripped from the injected view (~22 chars each of a 500-char budget). ADVISORY
+ONLY: no gate reads this file — the substrate's security claim is that deterministic gates cannot be
+talked out of a decision by repo prose. Eval pair `rejected_injection_stripped` /
+`rejected_restore_benign` (now 23/23 malicious, 0/12 benign FP) plus five pytest cases. Also fixed:
+`test_evals_pass_on_shipped_kit` hardcoded `benign FP 0/11` while its own comment claimed to be
+count-agnostic, so it false-failed on arithmetic every time a task was added — now a `\d+` regex on
+the property that actually matters (rate 1.00, zero FPs).
 
 v3.8.10 is Codex's SIXTH-round re-audit (of v3.8.9) — 6 substantive findings (operator stopping rule:
 fix everything substantive until a clean pass). THREE in `memory_log.py`: (a) the hidden-path loop

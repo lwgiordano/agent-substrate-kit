@@ -137,7 +137,8 @@ PRESERVE_FILES = [
     ".substrate/config", ".substrate/required_profile", ".substrate/required_sandbox",
     ".substrate/required_remote_governance", ".substrate/sandbox.json",
     ".github/dependabot.yml",
-    "docs/ARCHITECTURE.md", "docs/INTENT.md", "docs/HISTORY.md", "docs/README.md",
+    "docs/ARCHITECTURE.md", "docs/INTENT.md", "docs/HISTORY.md", "docs/REJECTED.md",
+    "docs/README.md",
 ]
 PRESERVE_DIRS = ["design-system", "docs/decisions", "docs/postmortems"]
 
@@ -529,7 +530,8 @@ def _kit_overwrite_set(kit: Path) -> set[str]:
     # Direct-write regenerated files (force-overwritten by bootstrap's redirection sites).
     out.update((".substrate/config", ".substrate/required_profile", ".substrate/required_sandbox",
                 ".substrate/required_remote_governance", ".substrate/sandbox.json",
-                "docs/HISTORY.md", "docs/README.md", "docs/knowledge/00_substrate.md",
+                "docs/HISTORY.md", "docs/REJECTED.md", "docs/README.md",
+                "docs/knowledge/00_substrate.md",
                 ".github/dependabot.yml"))
     return out
 

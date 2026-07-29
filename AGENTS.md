@@ -8,7 +8,9 @@ hooks at context tail — never add it here.
 ## Startup protocol (keep it light)
 
 1. Session start injects the last 5 `docs/HISTORY.md` summaries; verify
-   them there (read the file directly only if none were injected).
+   them there (read the file directly only if none were injected). It also
+   injects the newest `docs/REJECTED.md` entries — do not re-propose a
+   rejected approach without new information (`./manage.sh reject` logs one).
 2. If a session-handoff block was injected at session start, verify it
    against `git log -5 --oneline` before trusting it.
 3. Read `docs/knowledge/*.md` and `docs/decisions/*.md` ONLY for the

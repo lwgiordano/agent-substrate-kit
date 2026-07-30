@@ -27,7 +27,8 @@ CONTEXT_GLOBS = [
     ".mcp.json",
     ".github/copilot-instructions.md", ".github/instructions/**/*.md",
     ".github/skills/**/*.md",
-    "docs/HISTORY.md", "docs/README.md", "docs/ARCHITECTURE.md", "docs/INTENT.md",
+    "docs/HISTORY.md", "docs/REJECTED.md", "docs/README.md", "docs/ARCHITECTURE.md",
+    "docs/INTENT.md",
     "docs/knowledge/**/*.md", "docs/decisions/**/*.md", "docs/postmortems/**/*.md",
     # auditor-reference material — read by checklist-auditor / ultrareview
     "docs/blind-spot-checklists/**/*.md", "docs/templates/**/*.md",

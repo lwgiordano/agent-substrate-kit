@@ -271,6 +271,20 @@ This file is `merge=union` in `.gitattributes` so concurrent branch entries comb
 
 HISTORY
 echo "    +    docs/HISTORY.md"; fi
+if [ ! -e docs/REJECTED.md ] || [ "$FORCE" == "yes" ]; then wprep docs/REJECTED.md; cat > docs/REJECTED.md <<'REJECTED'
+# REJECTED.md — Append-only log of rejected approaches
+
+**DO NOT EDIT prior entries.** Append only via `./manage.sh reject`
+(`scripts/append_rejected.py`). The newest entries are injected at SessionStart
+so a future session does not re-propose something already ruled out.
+
+This file is `merge=union` in `.gitattributes` so concurrent branch entries combine.
+
+For a decision that needs full context and consequences, write an ADR in
+`docs/decisions/` instead; this file is for one-liners.
+
+REJECTED
+echo "    +    docs/HISTORY.md"; fi
 if [ ! -e docs/README.md ] || [ "$FORCE" == "yes" ]; then wprep docs/README.md; cat > docs/README.md <<'DOCS'
 # docs/
 
@@ -362,6 +376,10 @@ if [ "$UI_ENABLED" == "yes" ]; then _safe_mkdir_p design-system/pages design-sys
 
 TODO.' > design-system/MASTER.md; echo "    +    design-system/MASTER.md"; }; fi
 if [ ! -e .gitattributes ] || ! grep -q 'docs/HISTORY.md' .gitattributes; then wappend .gitattributes; echo 'docs/HISTORY.md merge=union' >> .gitattributes; echo "    +    .gitattributes"; fi
+# docs/REJECTED.md is append-only like HISTORY, so it needs the same union driver
+# (v3.8.28). Separate guard so an EXISTING install that already has the HISTORY
+# line still picks this up on re-bootstrap/upgrade.
+if ! grep -q 'docs/REJECTED.md' .gitattributes 2>/dev/null; then wappend .gitattributes; echo 'docs/REJECTED.md merge=union' >> .gitattributes; fi
 wappend .gitignore; [ -e .gitignore ] || touch .gitignore; for line in docs/CURRENT_SESSION.md docs/.todo_state.json .substrate/memory/ .substrate/traces/ .substrate/venv/ .substrate/dep_cooldown_cache.json 'ai/audits/*/audit-report.json' __pycache__/ .venv/ .pytest_cache/ .ruff_cache/ .mypy_cache/ node_modules/ dist/ build/; do grep -qxF "$line" .gitignore || echo "$line" >> .gitignore; done
 [ -e docs/.todo_state.json ] || { wprep docs/.todo_state.json; echo '{"version":1,"items":[]}' > docs/.todo_state.json; }
 # Run substrate tools from the KIT, never the target's `scripts/` copy (v3.8.21 / bootstrap:323):

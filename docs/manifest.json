@@ -15,6 +15,7 @@
         "scripts/_verify_backends.py",
         "scripts/agent_system_audit.sh",
         "scripts/append_history.py",
+        "scripts/append_rejected.py",
         "scripts/build_review_bundle.py",
         "scripts/check_agent_harness.py",
         "scripts/check_bandit_skip_baseline.py",

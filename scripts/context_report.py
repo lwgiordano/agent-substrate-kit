@@ -35,7 +35,7 @@ Usage: context_report.py [--root PATH] [--json]
 Exit: 0 always (informational).
 """
 from __future__ import annotations
-import argparse, hashlib, json, sys
+import argparse, hashlib, json, os, sys
 # READ-ONLY contract: importing a sibling (_substrate_root) would otherwise write
 # scripts/__pycache__/*.pyc. Disable bytecode BEFORE the local import. (v3.6.3)
 sys.dont_write_bytecode = True
@@ -265,8 +265,15 @@ def _print(d: dict) -> None:
 
 
 # Warn-only token budgets (v3.7.8) — defaults; surfaced by `--budget`, never a gate.
+# knowledge_doc (v3.8.30) is PER-DOC, not an aggregate: the kit's own
+# 00_substrate.md reached ~17.8k tok — 75% of all on-demand context and the #1
+# contributor by 15x — because context-report MEASURED but nothing flagged it.
+# The knowledge-doc template prescribes "one doc per coherent subsystem"
+# (contract/organization/scope); a doc many times this budget has usually become
+# a changelog, which is what docs/HISTORY.md is for. Env-overridable.
 _BUDGETS = {"always_loaded_prompt": 2500, "AGENTS.md": 1500,
-            "skill_index": 1500, "session_current_json": 2000}
+            "skill_index": 1500, "session_current_json": 2000,
+            "knowledge_doc": int(os.environ.get("SUBSTRATE_KNOWLEDGE_DOC_TOKENS") or 3000)}
 
 
 def _budget(d: dict) -> list:
@@ -277,8 +284,20 @@ def _budget(d: dict) -> list:
     rows = [("always_loaded_prompt", d["always_loaded"]["est_tokens"]),
             ("AGENTS.md", _tok(agents)), ("skill_index", _tok(skill)),
             ("session_current_json", _tok(cur))]
-    return [{"item": item, "est_tokens": tok, "budget": _BUDGETS[item],
-             "status": "warn" if tok > _BUDGETS[item] else "pass"} for item, tok in rows]
+    out = [{"item": item, "est_tokens": tok, "budget": _BUDGETS[item],
+            "status": "warn" if tok > _BUDGETS[item] else "pass"} for item, tok in rows]
+    # One row per OVER-budget knowledge doc, named, so the warning is actionable
+    # rather than an aggregate nobody can act on.
+    kb = _BUDGETS["knowledge_doc"]
+    for c in d["largest_contributors"]:
+        rel = c["path"]
+        if not (rel.startswith("docs/knowledge/") and rel.endswith(".md")):
+            continue
+        tok = _tok(c["bytes"])
+        if tok > kb:
+            out.append({"item": f"knowledge_doc:{rel}", "est_tokens": tok,
+                        "budget": kb, "status": "warn"})
+    return out
 
 
 def main() -> int:

@@ -1,0 +1,15 @@
+# REJECTED.md — Append-only log of rejected approaches
+
+**DO NOT EDIT prior entries.** Append only via `./manage.sh reject`
+(`scripts/append_rejected.py`). The newest entries are injected at SessionStart
+so a future session does not re-propose something already ruled out.
+
+This file is `merge=union` in `.gitattributes` — concurrent branches' entries
+combine without conflicts.
+
+For a decision that needs full context and consequences, write an ADR in
+`docs/decisions/` instead; this file is for one-liners.
+
+- [2026-07-29T19:41:23Z] Raising ABSOLUTE_MAX_CONTEXT_CHARS to fit a new injected block — rejected because operator review of PR #4 chose separate per-block budgets instead; a new block must take existing headroom
+- [2026-07-29T19:41:24Z] Executing commands declared in knowledge-doc front-matter — rejected because it makes agent-writable repo prose executable, which this threat model refuses; use declarative assertions
+- [2026-07-29T19:41:24Z] LLM-judged checks anywhere in the gate chain — rejected because gates must be deterministic and re-runnable; a model verdict is not reproducible evidence

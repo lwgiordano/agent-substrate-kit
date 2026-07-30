@@ -1,5 +1,16 @@
 ---
 purpose: Universal Agent Substrate Kit v3 files installed in this repo.
+asserts:
+  - scripts/memory_log.py::_raw_tracked_hash
+  - scripts/memory_log.py::_write_tree_oid
+  - scripts/session_handoff.py::_safe_history_line
+  - scripts/session_handoff.py::_rejected_block
+  - scripts/substrate_upgrade.py::_exec_module_from_source
+  - scripts/substrate_upgrade.py::_apply_capability_floor
+  - bootstrap.sh::_safe_mkdir_p
+  - bootstrap.sh::wappend
+  - scripts/run_python_gate.sh::_ruff_args
+  - scripts/command_policy.py::looks_dangerous_command
 last_human_reviewed: 2026-07-10
 covers:
   - extras/calibrate_diy_ultrareview.py
@@ -14,6 +25,7 @@ covers:
   - scripts/_verify_backends.py
   - scripts/agent_system_audit.sh
   - scripts/append_history.py
+  - scripts/append_rejected.py
   - scripts/build_review_bundle.py
   - scripts/check_agent_harness.py
   - scripts/check_bandit_skip_baseline.py
@@ -834,6 +846,77 @@ the task behaviorally. Cross-cutting: when a tool ships INTO another repo, every
 two layouts — source and installed — and a silent `if is_file()` guard turns the missing-layout case
 into a wrong ANSWER rather than an error. Prefer resolving both, and test the tool where it will
 actually run.
+
+v3.8.28 adds a REJECTED-APPROACH log, the first of three knowledge-layer additions prompted by
+comparing the substrate against MemoryCustodian / Prelint / ClariLayer. The gap it closes: nothing
+stopped a session re-proposing an approach already ruled out. The ADR template already marks
+"Alternatives Considered / Rejected because" REQUIRED with exactly that rationale ("Without it,
+future sessions re-derive the same alternatives") — but after 27 releases `docs/decisions/` held only
+the template, and ADRs are never injected. Capture existed, was heavyweight, and was empirically
+unused; cost of capture determines whether capture happens. So: `docs/REJECTED.md` (append-only,
+one line per entry, `merge=union`), `scripts/append_rejected.py` (mirrors append_history.py:
+argparse-validated ≥10-char fields, atomic mkstemp+os.replace so a hard-linked or symlinked target is
+never written through), and `./manage.sh reject --what X --why Y`. ADRs remain the home for full
+decisions; this is for one-liners. The newest entries are injected at SessionStart by
+`_rejected_block()`, which REUSES `_safe_history_line()` unchanged rather than copying it — so the
+two injected blocks' injection defenses can never drift apart. Budget: `REJECTED_BUDGET = 500`, and
+`ABSOLUTE_MAX_CONTEXT_CHARS` is deliberately NOT raised (4000+1500+500 = 6000 exactly) because a
+global ceiling raise was explicitly rejected in operator review of PR #4 — a decision that was only
+discoverable by reading a merged PR body, which is precisely the problem this feature solves, and is
+now the log's first entry. The block is appended LAST so absolute-ceiling truncation eats it before
+the trusted git facts or HISTORY. One design fix found while building: blind `block[:BUDGET]`
+truncation (the HISTORY block's approach) would cut the TAIL of a chronological list — dropping the
+NEWEST rejections, the most relevant ones — so `_rejected_block()` instead fits entries newest-first
+and renders them newest-last, degrading by forgetting the OLDEST. Timestamps are kept in the file
+(audit trail) but stripped from the injected view (~22 chars each of a 500-char budget). ADVISORY
+ONLY: no gate reads this file — the substrate's security claim is that deterministic gates cannot be
+talked out of a decision by repo prose. Eval pair `rejected_injection_stripped` /
+`rejected_restore_benign` (now 23/23 malicious, 0/12 benign FP) plus five pytest cases. Also fixed:
+`test_evals_pass_on_shipped_kit` hardcoded `benign FP 0/11` while its own comment claimed to be
+count-agnostic, so it false-failed on arithmetic every time a task was added — now a `\d+` regex on
+the property that actually matters (rate 1.00, zero FPs).
+
+v3.8.29 adds DECLARATIVE DOC ASSERTIONS — the second knowledge-layer addition, and the safe
+adaptation of ClariLayer's declared-vs-observed reconciliation. The gap: `check_doc_drift.py` verified
+docs were REVIEWED recently (coverage, dates, manifest registration) but never whether their CLAIMS
+were still true. Knowledge docs name functions (`_raw_tracked_hash`, `_load_verify`, `wappend`); a
+rename made the doc silently lie while every gate stayed green. New OPTIONAL front-matter key:
+`asserts:` holding flat `path::substring` entries, checked by a new `assert_failed` category in
+detect(). A missing substring, a missing file, and a MALFORMED entry are each reported — malformed is
+deliberately NOT silently skipped, because an assertion that quietly does not run is false assurance,
+the v3.8.25 lesson restated. NOTHING IS EXECUTED: running commands declared in an agent-writable
+markdown file would make repo prose executable, which this threat model refuses (that option is
+logged in docs/REJECTED.md, and a test asserts command-shaped assertion text is treated as a
+substring to search for, never run). The flat `path::substring` shape is load-bearing:
+`parse_front_matter` supports only top-level scalars and flat lists, so a nested block would have
+required touching the hand-rolled YAML subset and its blind-spot ritual; this needs ZERO parser
+changes. A bare scalar (`asserts: a::b`) is normalized to one entry rather than iterated as
+characters. Bounded at 50 assertions/doc, 300-char substrings, 4 MB reads. OPT-IN by construction —
+unknown front-matter keys were already ignored, so a doc without `asserts:` behaves exactly as before
+and no existing consumer install changes behavior until it adopts the key. `asserts` is deliberately
+NOT added to update_manifest.knowledge(), which would rewrite docs/manifest.json for every doc and
+trip update-manifest-check. Dogfooded: 00_substrate.md now asserts 10 claims about memory_log,
+session_handoff, substrate_upgrade, bootstrap, run_python_gate and command_policy. Note the drift
+gate's seven categories previously had no category-level tests at all; this ships four.
+
+v3.8.30 adds a PER-DOC KNOWLEDGE SIZE BUDGET, warn-only — the third knowledge-layer addition. The
+gap was measurement without feedback: `context-report` reported on-demand context at ~23.7k tok of
+which THIS FILE was 75% (17.8k tok, 15x the next contributor), because a paragraph accreted per
+release while nothing named the growth. Two surfaces, one estimator (`_tok()`, bytes/4): a
+`knowledge_doc` entry in `context_report._BUDGETS` that emits one warn row PER over-budget doc, NAMED
+`knowledge_doc:<path>` so the warning is actionable rather than a bare total; and an `oversize_doc`
+list in `check_doc_drift.detect()` printed by report(). Default 3000 tok (~12 KB), overridable via
+`SUBSTRATE_KNOWLEDGE_DOC_TOKENS` — generous enough that a normal consumer doc (the template is 1.9 KB)
+never trips it. The DELIBERATE ASYMMETRY: every other drift category ORs into report()'s failure
+boolean, and size does NOT. Breaking that uniformity is the point and is commented as such at the
+site — an over-budget doc is a shape problem to fix deliberately, not a reason to block a commit, and
+the kit's own 00_substrate.md is already ~6x over, so a blocking version would have shipped the gate
+red. `SUBSTRATE_ENFORCE_DOC_BUDGET=1` opts in to hard enforcement, following the precedent the
+completion gate set (shipped warning-only, blocking deferred until after dogfooding). Additions to
+`--json` are purely additive because the existing budget-row shape is pinned by tests; a regression
+asserts all four legacy rows survive alongside the new ones. NOT done here: splitting this file. That
+is a ~71 KB content migration deserving its own review — the warning now names it, which is the
+mechanism that was missing.
 
 v3.8.10 is Codex's SIXTH-round re-audit (of v3.8.9) — 6 substantive findings (operator stopping rule:
 fix everything substantive until a clean pass). THREE in `memory_log.py`: (a) the hidden-path loop

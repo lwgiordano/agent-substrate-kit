@@ -13,3 +13,4 @@ For a decision that needs full context and consequences, write an ADR in
 - [2026-07-29T19:41:23Z] Raising ABSOLUTE_MAX_CONTEXT_CHARS to fit a new injected block — rejected because operator review of PR #4 chose separate per-block budgets instead; a new block must take existing headroom
 - [2026-07-29T19:41:24Z] Executing commands declared in knowledge-doc front-matter — rejected because it makes agent-writable repo prose executable, which this threat model refuses; use declarative assertions
 - [2026-07-29T19:41:24Z] LLM-judged checks anywhere in the gate chain — rejected because gates must be deterministic and re-runnable; a model verdict is not reproducible evidence
+- [2026-08-09T15:33:43Z] O_APPEND direct write for the append-only logs — rejected because an O_APPEND fd writes through a hard-linked leaf, regressing the v3.8.25 no-write-through-links invariant; serialize writers with a parent-directory flock around the existing replace instead

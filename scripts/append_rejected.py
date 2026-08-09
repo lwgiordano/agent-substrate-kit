@@ -29,15 +29,13 @@ Exit codes: 0 ok | 1 invalid args | 2 file I/O error.
 from __future__ import annotations
 
 import argparse
-import os
 import sys
-import tempfile
 from pathlib import Path
 
 # Explicit local import path so this works under `python -I` (isolated mode
 # does NOT auto-prepend the script dir). Stdlib imports above resolve first.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _doc_common import repo_root, utc_now_iso
+from _doc_common import locked_atomic_append, repo_root, utc_now_iso
 
 REJECTED_HEADER = """\
 # REJECTED.md — Append-only log of rejected approaches
@@ -63,26 +61,13 @@ def compose_entry(timestamp: str, what: str, why: str) -> str:
 
 
 def atomic_append(target: Path, entry: str) -> None:
-    """Read existing file, append entry, write tmp, os.replace.
+    """Serialized atomic append — see _doc_common.locked_atomic_append.
 
-    Same atomic-replace shape as append_history.atomic_append: replacing the
-    directory entry (rather than writing through it) is also what keeps a
-    hard-linked or symlinked target from being followed (the v3.8.25 lesson)."""
-    target.parent.mkdir(parents=True, exist_ok=True)
-    existing = target.read_text(encoding="utf-8") if target.exists() else REJECTED_HEADER
-    new_text = existing + entry
-    fd, tmp_path = tempfile.mkstemp(prefix=".REJECTED.", suffix=".tmp", dir=str(target.parent))
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(new_text)
-        os.replace(tmp_path, target)
-        tmp_path = ""
-    finally:
-        if tmp_path and os.path.exists(tmp_path):
-            try:
-                os.remove(tmp_path)
-            except OSError:
-                pass
+    v3.8.31: the previous read/mkstemp/replace here (mirrored verbatim from
+    append_history) was atomic for readers but raced concurrent WRITERS — two
+    simultaneous `./manage.sh reject` calls lost an entry. Both appenders now
+    share the one flock-serialized implementation."""
+    locked_atomic_append(target, entry, REJECTED_HEADER, ".REJECTED.")
 
 
 def main(argv=None) -> int:

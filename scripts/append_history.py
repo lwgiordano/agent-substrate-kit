@@ -27,17 +27,15 @@ Exit codes: 0 ok | 1 invalid args | 2 file I/O error.
 from __future__ import annotations
 
 import argparse
-import os
 import re
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 # Explicit local import path so this works under `python -I` (isolated mode
 # does NOT auto-prepend the script dir). Stdlib imports above resolve first.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _doc_common import git_short_sha, repo_root, utc_now_iso
+from _doc_common import git_short_sha, locked_atomic_append, repo_root, utc_now_iso
 
 
 def _other_files_dirty(root: Path) -> list[str]:
@@ -112,19 +110,14 @@ def compose_entry(
 
 
 def atomic_append(target: Path, entry: str) -> None:
-    """Read existing file, append entry, write tmp, os.replace."""
-    target.parent.mkdir(parents=True, exist_ok=True)
-    existing = target.read_text(encoding="utf-8") if target.exists() else HISTORY_HEADER
-    new_text = existing + entry
-    fd, tmp_path = tempfile.mkstemp(prefix=".HISTORY.", suffix=".tmp", dir=str(target.parent))
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(new_text)
-        os.replace(tmp_path, target)
-    except Exception:
-        if os.path.exists(tmp_path):
-            os.unlink(tmp_path)
-        raise
+    """Serialized atomic append — see _doc_common.locked_atomic_append.
+
+    v3.8.31: the previous read/mkstemp/replace here was atomic for readers but
+    raced concurrent WRITERS — two simultaneous appends kept only one entry
+    (Codex reproduced it against append_rejected, which had mirrored this
+    function verbatim). Both appenders now share the one flock-serialized
+    implementation."""
+    locked_atomic_append(target, entry, HISTORY_HEADER, ".HISTORY.")
 
 
 def main() -> int:

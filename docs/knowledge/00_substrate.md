@@ -3,6 +3,7 @@ purpose: Universal Agent Substrate Kit v3 files installed in this repo.
 asserts:
   - scripts/memory_log.py::_raw_tracked_hash
   - scripts/memory_log.py::_write_tree_oid
+  - scripts/_doc_common.py::locked_atomic_append
   - scripts/session_handoff.py::_safe_history_line
   - scripts/session_handoff.py::_rejected_block
   - scripts/substrate_upgrade.py::_exec_module_from_source
@@ -917,6 +918,22 @@ completion gate set (shipped warning-only, blocking deferred until after dogfood
 asserts all four legacy rows survive alongside the new ones. NOT done here: splitting this file. That
 is a ~71 KB content migration deserving its own review — the warning now names it, which is the
 mechanism that was missing.
+
+v3.8.31 fixes the CONCURRENT-APPEND RACE in both append-only logs (Codex finding, AGENT_BUS
+2026-07-30; operator-directed reclaim after the claim sat unstarted for 9 days). The defect class:
+mkstemp + os.replace is atomic for READERS and never writes through a hard/symlinked leaf, but does
+NOT serialize WRITERS — two concurrent appenders read the same base text and the second replace
+silently discards the first entry (reproduced: two `./manage.sh reject` calls, both rc 0, one entry
+lost; empirically 12 concurrent old-style appends kept only 10). It was a CLASS because
+append_rejected.atomic_append was mirrored verbatim from append_history.atomic_append, inheriting
+the race — so the fix is ONE shared implementation, `_doc_common.locked_atomic_append`, that both
+appenders now call. Serialization is an exclusive flock on the parent DIRECTORY fd: no sidecar
+lockfile (nothing to gitignore, no stale-lock recovery — the kernel drops the lock with the fd, even
+on crash), and locking the TARGET inode would not work because os.replace swaps the directory entry,
+letting a second writer lock the pre-swap inode and race anyway. The mkstemp+replace step stays
+INSIDE the lock, so the no-write-through-links property is unchanged. O_APPEND was rejected (logged
+in docs/REJECTED.md): it writes through a hard-linked leaf. Two deterministic regressions launch 12
+overlapping appender subprocesses per log and require every entry to survive plus a single header.
 
 v3.8.10 is Codex's SIXTH-round re-audit (of v3.8.9) — 6 substantive findings (operator stopping rule:
 fix everything substantive until a clean pass). THREE in `memory_log.py`: (a) the hidden-path loop

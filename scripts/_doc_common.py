@@ -12,8 +12,13 @@ Surface (substrate internal helpers):
 
 from __future__ import annotations
 
+import errno
+import fcntl
+import os
 import re
 import subprocess
+import tempfile
+import time
 from collections.abc import Iterator
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -289,6 +294,78 @@ def repo_root(start: Path | None = None) -> Path:
     base = (start or Path.cwd()).resolve()
     out = _git(["rev-parse", "--show-toplevel"], cwd=base)
     return Path(out).resolve() if out else base
+
+
+def locked_atomic_append(target: Path, entry: str, header: str, tmp_prefix: str) -> None:
+    """Append `entry` to `target`, SERIALIZED against concurrent appenders.
+
+    mkstemp + os.replace alone is atomic for READERS and never writes through a
+    hard-linked or symlinked leaf (the v3.8.25 lesson), but it does NOT
+    serialize WRITERS: two concurrent appenders both read the same base text
+    and the second replace silently discards the first entry (Codex finding,
+    AGENT_BUS 2026-07-30 — reproduced with two `./manage.sh reject` calls).
+    Both append-only logs (HISTORY.md, REJECTED.md) shared that defect because
+    one appender was mirrored from the other; this helper is the single fix
+    for the class.
+
+    Serialization is an exclusive flock on the parent DIRECTORY fd:
+    - no sidecar lockfile (nothing new to gitignore, nothing an aliased path
+      could create somewhere unexpected);
+    - no stale-lock recovery needed — the kernel drops the lock when the fd
+      closes, including on crash;
+    - locking the TARGET inode would not work: os.replace swaps the directory
+      entry, so a second writer could lock the old inode after the swap and
+      race anyway.
+    The replace step is kept inside the lock so the no-write-through-links
+    property is unchanged. O_APPEND on the target was rejected instead: it
+    writes through a hard-linked leaf (see docs/REJECTED.md).
+
+    The wait is BOUNDED (security-audit finding on the first cut): a blocking
+    LOCK_EX would let one stuck or hostile holder hang every future append
+    forever, where the house rule is fail closed FAST. A healthy append holds
+    the lock for milliseconds, so a deadline measured in seconds only ever
+    trips on a genuinely wedged holder; the TimeoutError is an OSError, so
+    both CLIs surface it through their existing rc-2 path. Operational caveat:
+    flock is advisory and a no-op on some network filesystems — the logs are
+    repo files, expected on a local checkout.
+    """
+    target.parent.mkdir(parents=True, exist_ok=True)
+    dir_fd = os.open(str(target.parent), os.O_RDONLY)
+    try:
+        try:
+            timeout_s = float(os.environ.get("SUBSTRATE_APPEND_LOCK_TIMEOUT") or 10.0)
+        except ValueError:
+            timeout_s = 10.0  # garbage override must not escape the rc-2 contract
+        deadline = time.monotonic() + timeout_s
+        while True:
+            try:
+                fcntl.flock(dir_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError as e:
+                # EINTR is retryable (signal delivery), not a real failure.
+                if e.errno not in (errno.EAGAIN, errno.EACCES, errno.EINTR):
+                    raise  # real failure (EBADF, ...), not contention
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        f"append lock on {target.parent} not acquired within "
+                        f"{timeout_s:g}s — another appender is wedged") from e
+                time.sleep(0.02)
+        existing = target.read_text(encoding="utf-8") if target.exists() else header
+        fd, tmp_path = tempfile.mkstemp(
+            prefix=tmp_prefix, suffix=".tmp", dir=str(target.parent))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(existing + entry)
+            os.replace(tmp_path, target)
+            tmp_path = ""
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+    finally:
+        os.close(dir_fd)  # releases the flock
 
 
 def utc_now_iso() -> str:

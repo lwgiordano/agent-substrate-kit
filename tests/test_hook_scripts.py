@@ -1196,6 +1196,151 @@ def test_append_rejected_cli_validates_and_appends(tmp_path) -> None:
     assert len([ln for ln in body2.splitlines() if ln.startswith("- [")]) == 2
 
 
+def _concurrent_appends(script: str, cwd, arg_sets: list[list[str]]) -> list[int]:
+    """Launch one appender subprocess per arg set, all overlapping, and return
+    their exit codes. Popen-then-wait (not sequential run) so the append
+    windows genuinely overlap."""
+    procs = [subprocess.Popen([sys.executable, "-I", script, *args], cwd=cwd,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+             for args in arg_sets]
+    return [p.wait(timeout=120) for p in procs]
+
+
+def test_append_rejected_concurrent_writers_lose_nothing(tmp_path) -> None:
+    """v3.8.31 (Codex finding, AGENT_BUS 2026-07-30): two concurrent
+    `./manage.sh reject` calls both exited 0 but only one entry survived —
+    mkstemp+os.replace is atomic for readers, not writers. With the flock
+    serialization EVERY concurrent append must survive, deterministically."""
+    if not (SCRIPTS / "append_rejected.py").exists():
+        return
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / "docs").mkdir()
+    n = 12
+    rcs = _concurrent_appends(str(SCRIPTS / "append_rejected.py"), tmp_path, [
+        ["--what", f"Concurrently rejected idea number {i:02d}",
+         "--why", "exercises the writer-serialization lock"] for i in range(n)])
+    assert rcs == [0] * n, rcs
+    body = (tmp_path / "docs" / "REJECTED.md").read_text(encoding="utf-8")
+    for i in range(n):
+        assert f"idea number {i:02d}" in body, f"entry {i} lost — writers raced"
+    # header written exactly once, never duplicated by a racing first-writer
+    assert body.count("# REJECTED.md") == 1
+
+
+def test_append_history_concurrent_writers_lose_nothing(tmp_path) -> None:
+    """Same class, sibling file: append_history.atomic_append had the
+    byte-identical read-modify-replace race (append_rejected mirrored it).
+    All concurrent HISTORY entries must survive."""
+    if not (SCRIPTS / "append_history.py").exists():
+        return
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / "docs").mkdir()
+    n = 12
+    rcs = _concurrent_appends(str(SCRIPTS / "append_history.py"), tmp_path, [
+        ["--commit-hash", f"cafe{i:03d}",
+         "--summary", f"concurrent history entry {i:02d}",
+         "--files", "docs/HISTORY.md",
+         "--intent", "regression for the writer race",
+         "--knowledge", "flock on the parent dir serializes appenders"]
+        for i in range(n)])
+    assert rcs == [0] * n, rcs
+    body = (tmp_path / "docs" / "HISTORY.md").read_text(encoding="utf-8")
+    for i in range(n):
+        assert f"cafe{i:03d}" in body, f"entry {i} lost — writers raced"
+    assert body.count("# HISTORY.md") == 1
+
+
+def test_append_lock_contention_fails_closed_fast(tmp_path) -> None:
+    """v3.8.31 security-audit finding on the first cut: a BLOCKING flock would
+    let one wedged holder hang every future append forever. The wait is bounded
+    — a held lock must surface as the CLI's existing rc-2 I/O error within the
+    (env-overridable) timeout, and must leave no tmp litter behind."""
+    if not (SCRIPTS / "append_rejected.py").exists():
+        return
+    import fcntl
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    holder = os.open(str(docs), os.O_RDONLY)
+    try:
+        fcntl.flock(holder, fcntl.LOCK_EX)
+        p = subprocess.run([sys.executable, "-I", str(SCRIPTS / "append_rejected.py"),
+                            "--what", "entry blocked by a wedged holder",
+                            "--why", "must fail closed fast, not hang"],
+                           cwd=tmp_path, capture_output=True, text=True, timeout=60,
+                           env=dict(os.environ, SUBSTRATE_APPEND_LOCK_TIMEOUT="0.5"))
+    finally:
+        os.close(holder)
+    assert p.returncode == 2, (p.returncode, p.stderr[-300:])
+    assert "append lock" in p.stderr
+    assert not (docs / "REJECTED.md").exists()
+    assert not list(docs.glob(".REJECTED.*")), "tmp file leaked under contention"
+
+
+def test_append_unwritable_parent_is_rc2_with_no_tmp_litter(tmp_path) -> None:
+    """The consolidated failure path (test-audit finding): an OSError inside
+    locked_atomic_append must surface as rc 2 in BOTH CLIs and clean up any tmp
+    file. Premise-aware: root ignores 0555, so assert the negative path only
+    when the premise (unwritable dir) actually holds."""
+    if not (SCRIPTS / "append_history.py").exists():
+        return
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    docs.chmod(0o555)
+    try:
+        probe_denied = False
+        try:
+            (docs / ".probe").write_text("x")
+            (docs / ".probe").unlink()
+        except OSError:
+            probe_denied = True
+        p = subprocess.run([sys.executable, "-I", str(SCRIPTS / "append_history.py"),
+                            "--commit-hash", "cafef00",
+                            "--summary", "entry that cannot be written",
+                            "--files", "docs/HISTORY.md",
+                            "--intent", "exercise the rc-2 contract",
+                            "--knowledge", "unwritable parent must not crash"],
+                           cwd=tmp_path, capture_output=True, text=True, timeout=60)
+        if probe_denied:
+            assert p.returncode == 2, (p.returncode, p.stderr[-300:])
+            assert not list(docs.glob(".HISTORY.*")), "tmp file leaked on failure"
+        else:  # running as root: premise not establishable — must still succeed
+            assert p.returncode == 0, (p.returncode, p.stderr[-300:])
+    finally:
+        docs.chmod(0o755)
+
+
+def test_append_history_cli_validates_and_guards_off_by_one(tmp_path) -> None:
+    """append_history's CLI contract, previously untested (test-audit finding):
+    short narrative fields are rc 1; a dirty non-HISTORY file WITHOUT
+    --commit-hash trips the parent-vs-current off-by-one guard (rc 1, nothing
+    written); with --commit-hash the same tree appends the four-field entry."""
+    if not (SCRIPTS / "append_history.py").exists():
+        return
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / "docs").mkdir()
+    script = str(SCRIPTS / "append_history.py")
+    base = ["--files", "src/app.py", "--intent", "a sufficiently long intent",
+            "--knowledge", "a sufficiently long knowledge note"]
+    short = subprocess.run([sys.executable, "-I", script, "--summary", "tiny", *base],
+                          cwd=tmp_path, capture_output=True, text=True, timeout=60)
+    assert short.returncode == 1 and ">=10 characters" in short.stderr
+    (tmp_path / "pending.py").write_text("x = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "pending.py"], cwd=tmp_path, check=True)
+    guard = subprocess.run([sys.executable, "-I", script,
+                            "--summary", "documents the wrong parent commit", *base],
+                           cwd=tmp_path, capture_output=True, text=True, timeout=60)
+    assert guard.returncode == 1 and "off-by-one" in guard.stderr
+    assert not (tmp_path / "docs" / "HISTORY.md").exists()
+    ok = subprocess.run([sys.executable, "-I", script, "--commit-hash", "abc1234",
+                         "--summary", "documents an explicit commit", *base],
+                        cwd=tmp_path, capture_output=True, text=True, timeout=60)
+    assert ok.returncode == 0, (ok.returncode, ok.stderr[-300:])
+    body = (tmp_path / "docs" / "HISTORY.md").read_text(encoding="utf-8")
+    assert "abc1234" in body and "**Knowledge:**" in body
+
+
 def test_session_handoff_history_injection_neutralized(tmp_path) -> None:
     """HISTORY text is agent-authored: [SYSTEM:], zero-width smuggling, HTML
     comments, and shell-ish directives must not reach restore context."""

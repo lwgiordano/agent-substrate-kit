@@ -201,3 +201,9 @@ This file is `merge=union` in `.gitattributes` so concurrent branch entries comb
 **Intent:** Close the Codex-reported writer race (two concurrent ./manage.sh reject calls both rc 0, one entry lost) as a class: append_rejected mirrored append_history's read/mkstemp/replace verbatim, so both logs shared the defect. Operator-directed reclaim of the stalled claim.
 **Knowledge:** mkstemp+os.replace serializes READERS, not WRITERS. Lock the parent DIRECTORY fd, not the target inode — replace swaps the directory entry so a late writer can lock the pre-swap inode and race anyway. Keep replace inside the lock to preserve no-write-through-links; O_APPEND writes through hard links (rejected, logged). Bound the wait (LOCK_NB + monotonic deadline, TimeoutError is an OSError so the rc-2 contract holds); a blocking LOCK_EX trades data loss for a hang. Fresh CI/cloud clones are SHALLOW — check_history_sha false-fails until git fetch --unshallow.
 
+## 2026-08-10T00:04:26Z — NO_SESSION — 31f29eb
+**Summary:** Plan v3.8.32 functional knowledge split and record the ungoverned Superpowers plan surface
+**Files:** AGENT_BUS.md,docs/REJECTED.md,docs/superpowers/specs/2026-07-30-substrate-knowledge-split-design.md,docs/superpowers/plans/2026-08-09-substrate-knowledge-split.md
+**Intent:** Lock the reviewed architecture, red-green seams, and release gates before implementation
+**Knowledge:** v3.8.31 already owns append serialization; v3.8.32 preserves eleven assertions, keeps consumer installs on generated 00 only, fixes four integration gaps, and governs docs/superpowers as optional context
+

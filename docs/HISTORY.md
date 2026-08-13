@@ -207,3 +207,9 @@ This file is `merge=union` in `.gitattributes` so concurrent branch entries comb
 **Intent:** Lock the reviewed architecture, red-green seams, and release gates before implementation
 **Knowledge:** v3.8.31 already owns append serialization; v3.8.32 preserves eleven assertions, keeps consumer installs on generated 00 only, fixes four integration gaps, and governs docs/superpowers as optional context
 
+## 2026-08-13T19:35:18Z — NO_SESSION — 628da16
+**Summary:** v3.8.32: functional substrate knowledge map with governed project context and fail-closed ownership migration
+**Files:** README.md,BENCHMARK.md,VERSION,ai/audits/2026-08-13T192443Z/audit-report.md,docs/README.md,docs/REJECTED.md,docs/decisions/0001-substrate-knowledge-boundaries.md,docs/knowledge,docs/manifest.json,docs/postmortems/2026-08-10-knowledge-ownership-migration.md,docs/superpowers,scripts/_substrate_surfaces.py,scripts/check_doc_drift.py,scripts/check_harness_smoke.py,scripts/code_shape.py,scripts/context_report.py,scripts/substrate_doctor.py,scripts/substrate_upgrade.py,scripts/write_install_json.py,tests/conftest.py,tests/test_doc_consistency.py,tests/test_hook_scripts.py
+**Intent:** Replace the oversized chronological knowledge document with enforceable functional boundaries without weakening consumer ownership, upgrade safety, or long-running release verification
+**Knowledge:** Source has eight bounded knowledge docs; consumers retain generated 00 plus _template; project knowledge and plans are governed but excluded from provenance; pre-v3.8.32 crossings run the verified new kit engine; canonical coverage is source-bound, shape-checked, exact, and required before render; the finite test watchdog now has nearly 3x measured slow-host margin
+

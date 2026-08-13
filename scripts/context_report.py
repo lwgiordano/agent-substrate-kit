@@ -276,7 +276,7 @@ _BUDGETS = {"always_loaded_prompt": 2500, "AGENTS.md": 1500,
             "knowledge_doc": int(os.environ.get("SUBSTRATE_KNOWLEDGE_DOC_TOKENS") or 3000)}
 
 
-def _budget(d: dict) -> list:
+def _budget(d: dict, root: Path) -> list:
     files = d["always_loaded"]["files"]
     agents = next((v for k, v in files.items() if k == "AGENTS.md"), 0)
     skill = next((v for k, v in files.items() if k.startswith("skill index")), 0)
@@ -287,13 +287,18 @@ def _budget(d: dict) -> list:
     out = [{"item": item, "est_tokens": tok, "budget": _BUDGETS[item],
             "status": "warn" if tok > _BUDGETS[item] else "pass"} for item, tok in rows]
     # One row per OVER-budget knowledge doc, named, so the warning is actionable
-    # rather than an aggregate nobody can act on.
+    # rather than an aggregate nobody can act on. Enumerate the source directory
+    # directly: largest_contributors is intentionally a top-ten display and must
+    # never become an accidental completeness boundary for budget enforcement.
     kb = _BUDGETS["knowledge_doc"]
-    for c in d["largest_contributors"]:
-        rel = c["path"]
-        if not (rel.startswith("docs/knowledge/") and rel.endswith(".md")):
-            continue
-        tok = _tok(c["bytes"])
+    knowledge = root / "docs" / "knowledge"
+    docs = []
+    if knowledge.is_dir():
+        for path in knowledge.glob("*.md"):
+            if path.is_file() and not path.name.startswith("_"):
+                rel = path.relative_to(root).as_posix()
+                docs.append((_tok(_size(path)), rel))
+    for tok, rel in sorted(docs, key=lambda row: (-row[0], row[1])):
         if tok > kb:
             out.append({"item": f"knowledge_doc:{rel}", "est_tokens": tok,
                         "budget": kb, "status": "warn"})
@@ -306,9 +311,10 @@ def main() -> int:
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--budget", action="store_true", help="evaluate warn-only token budgets")
     a = ap.parse_args()
-    d = build(Path(a.root))
+    root = Path(a.root).resolve()
+    d = build(root)
     if a.budget:
-        d["budget"] = _budget(d)
+        d["budget"] = _budget(d, root)
     if a.json:
         print(json.dumps(d, indent=2))
     else:

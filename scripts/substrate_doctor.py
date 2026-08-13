@@ -125,7 +125,10 @@ try:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from _substrate_surfaces import (OWNED_DIRS as _SENSITIVE_DIRS,
         OWNED_FILES as _SENSITIVE_FILES, OPTIONAL_FILES as _SENSITIVE_OPTIONAL_FILES,
-        OPTIONAL_DIRS as _SENSITIVE_OPTIONAL_DIRS, COVERAGE_SKIP_PARTS as _COVERAGE_SKIP_PARTS)
+        OPTIONAL_DIRS as _SENSITIVE_OPTIONAL_DIRS,
+        GOVERNED_DIRS as _SENSITIVE_GOVERNED_DIRS,
+        GOVERNED_OPTIONAL_DIRS as _SENSITIVE_GOVERNED_OPTIONAL_DIRS,
+        COVERAGE_SKIP_PARTS as _COVERAGE_SKIP_PARTS)
 except Exception:  # pragma: no cover - fall back if inventory unreadable
     # This fallback MUST mirror _substrate_surfaces EXACTLY — test_doctor_fallback_
     # matches_canonical_inventory fails CI if it drifts. (v3.8.6: the fallback was
@@ -133,10 +136,12 @@ except Exception:  # pragma: no cover - fall back if inventory unreadable
     # design-system/templates optional dirs + trust-anchor optional files — so an
     # import failure would silently DROP those coverage requirements and overstate
     # remote-governance coverage.)
-    _SENSITIVE_DIRS=['scripts','tests','.claude','.codex','.agents','docs/knowledge','docs/decisions','docs/blind-spot-checklists','docs/templates','.github/hooks','.github/instructions','.github/workflows']
-    _SENSITIVE_FILES=['AGENTS.md','CLAUDE.md','DESIGN.md','manage.sh','pytest.ini','.pre-commit-config.yaml','.gitattributes','.gitignore','.github/copilot-instructions.md','.github/dependabot.yml','.substrate/config','.substrate/required_profile','docs/HISTORY.md','docs/README.md','docs/ARCHITECTURE.md','docs/INTENT.md']
+    _SENSITIVE_DIRS=['scripts','tests','.claude','.codex','.agents','docs/decisions','docs/blind-spot-checklists','docs/templates','.github/hooks','.github/instructions','.github/workflows']
+    _SENSITIVE_FILES=['AGENTS.md','CLAUDE.md','DESIGN.md','manage.sh','pytest.ini','.pre-commit-config.yaml','.gitattributes','.gitignore','.github/copilot-instructions.md','.github/dependabot.yml','.substrate/config','.substrate/required_profile','docs/HISTORY.md','docs/README.md','docs/ARCHITECTURE.md','docs/INTENT.md','docs/knowledge/00_substrate.md','docs/knowledge/_template.md']
     _SENSITIVE_OPTIONAL_FILES=['.mcp.json','.substrate/trust/minisign.pub','.substrate/trust/sigstore_identity.json','.substrate/install.json']
     _SENSITIVE_OPTIONAL_DIRS=['.github/skills','docs/postmortems','design-system','templates']
+    _SENSITIVE_GOVERNED_DIRS=['docs/knowledge']
+    _SENSITIVE_GOVERNED_OPTIONAL_DIRS=['docs/superpowers']
     _COVERAGE_SKIP_PARTS={'__pycache__','venv','node_modules','.pytest_cache','.ruff_cache','.mypy_cache'}
 def _sensitive_files_on_disk():
     """Enumerate the actual privileged files that must be owned, plus the
@@ -148,7 +153,8 @@ def _sensitive_files_on_disk():
     # .github/, repo root, or docs/ (GitHub searches those in order).
     co=_codeowners_path()
     if co is not None: out.append(co.relative_to(ROOT).as_posix())
-    for d in _SENSITIVE_DIRS+_SENSITIVE_OPTIONAL_DIRS:
+    for d in (_SENSITIVE_DIRS+_SENSITIVE_OPTIONAL_DIRS+_SENSITIVE_GOVERNED_DIRS
+              +_SENSITIVE_GOVERNED_OPTIONAL_DIRS):
         base=ROOT/d
         if not base.is_dir(): continue
         for p in base.rglob('*'):

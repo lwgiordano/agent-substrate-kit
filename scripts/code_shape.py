@@ -10,8 +10,9 @@ is a code-SHAPE and reviewability problem.
 
 This is a deterministic warn-only REPORT (no LLM, no gate, no network, no writes). It does
 NOT block `check`. Crucially it measures the USER's PROJECT, not the substrate it is
-installed into: substrate-owned files (the harness's own scripts/, kit tests, agent config,
-docs/knowledge, …) are classified separately and excluded from the project shape by default
+installed into: substrate-owned files (the harness's own scripts/, kit tests,
+agent config, and exact installed knowledge artifacts) are classified separately
+and excluded from the project shape by default
 (v3.7.9 — else a fresh install reads as "your repo has sprawl/god-functions/a huge diff",
 which is the harness, not the user). Use `--include-substrate` to dogfood the kit itself.
 
@@ -57,18 +58,26 @@ _DEP_MANIFESTS = {"package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.l
 #     specific test files there; users add their own), so only the kit's specific test
 #     files are owned — not the whole dir. (v3.7.9)
 try:
-    from _substrate_surfaces import OWNED_DIRS, OWNED_FILES, OPTIONAL_DIRS, OPTIONAL_FILES, KIT_TEST_FILES
+    from _substrate_surfaces import (
+        GOVERNED_DIRS, GOVERNED_OPTIONAL_DIRS, KIT_TEST_FILES, OPTIONAL_DIRS,
+        OPTIONAL_FILES, OWNED_DIRS, OWNED_FILES,
+    )
     # +extras/ (strict-profile substrate code; not in the inventory's coverage dirs).
     _OWNED_DIRS = tuple(d.rstrip("/") + "/" for d in (OWNED_DIRS + OPTIONAL_DIRS) if d != "tests") + ("extras/",)
     _OWNED_FILES = set(OWNED_FILES) | set(OPTIONAL_FILES)
+    _GOVERNED_DIRS = tuple(
+        d.rstrip("/") + "/" for d in GOVERNED_DIRS + GOVERNED_OPTIONAL_DIRS
+    )
 except Exception:
     _OWNED_DIRS = ("scripts/", "extras/", ".claude/", ".codex/", ".agents/", ".github/hooks/",
                    ".github/instructions/", ".github/workflows/", ".github/skills/",
-                   "docs/knowledge/", "docs/decisions/", "docs/blind-spot-checklists/",
-                   "docs/templates/", "docs/postmortems/")
+                   "docs/decisions/", "docs/blind-spot-checklists/", "docs/templates/",
+                   "docs/postmortems/")
     _OWNED_FILES = {"AGENTS.md", "CLAUDE.md", "GEMINI.md", "DESIGN.md", "manage.sh", "pytest.ini",
                     ".pre-commit-config.yaml", ".gitattributes", ".gitignore",
-                    ".github/copilot-instructions.md", ".github/dependabot.yml", ".mcp.json"}
+                    ".github/copilot-instructions.md", ".github/dependabot.yml", ".mcp.json",
+                    "docs/knowledge/00_substrate.md", "docs/knowledge/_template.md"}
+    _GOVERNED_DIRS = ("docs/knowledge/", "docs/superpowers/")
     KIT_TEST_FILES = {"tests/conftest.py", "tests/test_doc_consistency.py", "tests/test_hook_scripts.py",
                       "tests/test_smoke.py", "tests/test_substrate_files.py"}
 # kit-source-only files + the kit's own test files (shipped into user repos by name).
@@ -78,9 +87,9 @@ _KIT_TEST_FILES = set(KIT_TEST_FILES)
 # --- governance / agent-control surfaces (flag CHURN regardless of ownership): the
 #     highest-review-value files an agent might casually edit in a broad patch. (v3.7.9)
 _GOV_PREFIXES = (".github/", ".substrate/", ".claude/", ".codex/", ".agents/",
-                 "scripts/", "docs/knowledge/", "docs/decisions/",
+                 "scripts/", "docs/decisions/",
                  "docs/blind-spot-checklists/", "docs/templates/", "docs/postmortems/",
-                 "design-system/")
+                 "design-system/") + _GOVERNED_DIRS
 _GOV_FILES = {"AGENTS.md", "CLAUDE.md", "GEMINI.md", "DESIGN.md", "CODEOWNERS",
               ".pre-commit-config.yaml", ".mcp.json", "Dockerfile",
               ".github/copilot-instructions.md", ".github/dependabot.yml",

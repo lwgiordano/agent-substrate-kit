@@ -10,13 +10,44 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _doc_common import CODE_SUFFIXES, DEFAULT_EXCLUDES, git_file_last_modified, iter_code_modules, parse_front_matter, repo_root
 KNOWLEDGE_DIR='docs/knowledge'; MANIFEST_PATH='docs/manifest.json'
 def _git(args, cwd):
-    try: return subprocess.run(['git',*args], cwd=str(cwd), check=True, capture_output=True, text=True, timeout=30).stdout.strip()
-    except Exception: return ''
+    try:
+        return subprocess.run(
+            ['git', *args], cwd=str(cwd), check=True, capture_output=True,
+            text=False, timeout=30,
+        ).stdout
+    except Exception as exc:
+        raise RuntimeError(f"cannot read staged git state: {type(exc).__name__}") from exc
 def _excluded(rel):
     parts=rel.split('/'); bare={d for d in DEFAULT_EXCLUDES if '/' not in d}; paths=[d.strip('/') for d in DEFAULT_EXCLUDES if '/' in d]
     return any(p in bare for p in parts) or any(rel==x or rel.startswith(x+'/') for x in paths)
-def _staged(root): return {x.strip() for x in _git(['diff','--cached','--name-only','--diff-filter=ACMRT'], root).splitlines() if x.strip()}
-def _staged_code(root): return {p for p in _staged(root) if Path(p).suffix in CODE_SUFFIXES and not _excluded(p) and (root/p).exists()}
+def _staged(root):
+    """Return every staged path, retaining both sides of renames/copies.
+
+    NUL framing preserves unusual pathnames. Deletions and rename sources matter
+    because a knowledge doc may cover the old path even when it no longer exists.
+    """
+    raw = _git([
+        'diff', '--cached', '--name-status', '-z', '--diff-filter=ACMRTD',
+        '--find-renames', '--find-copies',
+    ], root)
+    fields = raw.split(b'\0')
+    out = set()
+    i = 0
+    while i < len(fields) and fields[i]:
+        status = fields[i]
+        i += 1
+        count = 2 if status[:1] in {b'R', b'C'} else 1
+        for _ in range(count):
+            if i >= len(fields) or not fields[i]:
+                return out
+            out.add(os.fsdecode(fields[i]))
+            i += 1
+    return out
+
+
+def _staged_code(root, staged=None):
+    staged = _staged(root) if staged is None else staged
+    return {p for p in staged if Path(p).suffix in CODE_SUFFIXES and not _excluded(p) and (root/p).exists()}
 def _load_docs(root):
     out=[]; d=root/KNOWLEDGE_DIR
     if not d.is_dir(): return out
@@ -128,16 +159,22 @@ def detect(root:Path):
     for doc in docs:
         for cov in doc['covers']: cov_to_docs.setdefault(cov,[]).append(doc)
     covered=set(cov_to_docs); code={p.as_posix() for p in iter_code_modules(root)}
-    staged=_staged(root); staged_docs={p for p in staged if p.startswith(KNOWLEDGE_DIR+'/') and p.endswith('.md')}; today=date.today()
+    staged_error = None
+    try:
+        staged = _staged(root)
+    except RuntimeError as exc:
+        staged = set()
+        staged_error = str(exc)
+    staged_docs={p for p in staged if p.startswith(KNOWLEDGE_DIR+'/') and p.endswith('.md')}
     pending=[]
-    for code_path in sorted(_staged_code(root)):
+    for code_path in sorted(staged & covered):
         for doc in cov_to_docs.get(code_path,[]):
-            if doc['path'] not in staged_docs and _date(doc.get('last_human_reviewed','')) != today:
+            if doc['path'] not in staged_docs:
                 pending.append((doc['path'], code_path, str(doc.get('last_human_reviewed',''))))
     manifest=_manifest_paths(root); on_disk={d['path'] for d in docs}
     return {
       'coverage_gap':sorted(code-covered),
-      'staged_coverage_gap':sorted(p for p in _staged_code(root) if p not in cov_to_docs),
+      'staged_coverage_gap':sorted(p for p in _staged_code(root, staged) if p not in cov_to_docs),
       'pending_stale_doc':pending,
       'phantom_doc':[(d['path'],c) for d in docs for c in d['covers'] if not (root/c).exists()],
       'stale_doc':[r for d in docs for c in d['covers'] if (r:=_doc_stale(d,c,root)) is not None],
@@ -145,6 +182,7 @@ def detect(root:Path):
       'assert_failed':[f for d in docs for f in _assert_failures(d, root)],
       'oversize_doc':_oversize_docs(docs, root),
       'missing_manifest':manifest is None,
+      'staged_read_error':staged_error,
     }
 def report(d,file=sys.stdout):
     found=False
@@ -156,6 +194,8 @@ def report(d,file=sys.stdout):
             print('  Fix: '+fix, file=file)
     if d['missing_manifest']:
         found=True; print('MISSING_MANIFEST: run `python scripts/update_manifest.py --fix`.', file=file)
+    if d.get('staged_read_error'):
+        found=True; print(f"STAGED READ ERROR: {d['staged_read_error']}", file=file)
     section('COVERAGE GAP — source modules with no knowledge-doc coverage', d['coverage_gap'], 'add covers: entries and bump last_human_reviewed.')
     section('STAGED COVERAGE GAP — staged source files lack coverage', d['staged_coverage_gap'], 'cover staged files, run update_manifest --fix, and stage docs/manifest.')
     section('PENDING STALE DOC — staged source changed but covering doc was not reviewed/staged', d['pending_stale_doc'], 'review code+doc, bump last_human_reviewed to today, and stage the doc.')

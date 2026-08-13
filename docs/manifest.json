@@ -1,75 +1,169 @@
 {
-  "decisions": [],
+  "decisions": [
+    {
+      "path": "docs/decisions/0001-substrate-knowledge-boundaries.md",
+      "status": "Accepted",
+      "title": "0001: Functional boundaries for substrate knowledge"
+    }
+  ],
   "knowledge_docs": [
     {
       "covers": [
+        "bootstrap.sh",
+        "manage.sh",
+        "package_release.sh"
+      ],
+      "last_human_reviewed": "2026-08-09",
+      "path": "docs/knowledge/00_substrate.md",
+      "purpose": "Entry point for current substrate contracts and functional knowledge."
+    },
+    {
+      "covers": [
+        "bootstrap.sh",
+        "manage.sh",
+        "scripts/_substrate_config.sh",
+        "scripts/_substrate_root.py",
+        "scripts/check_substrate_config.py",
+        "scripts/lang_gate.sh",
+        "scripts/new_validator.py",
+        "scripts/run_python_gate.sh",
+        "scripts/substrate_doctor.py",
+        "scripts/substrate_profile.py",
+        "scripts/update_manifest.py",
+        "scripts/write_install_json.py"
+      ],
+      "last_human_reviewed": "2026-08-09",
+      "path": "docs/knowledge/01_install_adoption.md",
+      "purpose": "Installation and adoption across new and existing repositories."
+    },
+    {
+      "covers": [
+        "bootstrap.sh",
+        "manage.sh",
+        "scripts/_minisign.py",
+        "scripts/_substrate_config.sh",
+        "scripts/_verify_backends.py",
+        "scripts/check_substrate_config.py",
+        "scripts/substrate_profile.py",
+        "scripts/substrate_upgrade.py",
+        "scripts/update_manifest.py",
+        "scripts/verify_release.py",
+        "scripts/write_install_json.py"
+      ],
+      "last_human_reviewed": "2026-08-09",
+      "path": "docs/knowledge/02_upgrade_integrity.md",
+      "purpose": "Upgrade provenance, authority floors, transactions, and postconditions."
+    },
+    {
+      "covers": [
+        "manage.sh",
+        "scripts/_doc_common.py",
+        "scripts/append_history.py",
+        "scripts/append_rejected.py",
+        "scripts/completion_gate.py",
+        "scripts/lint_on_write.py",
+        "scripts/memory_log.py",
+        "scripts/session_handoff.py",
+        "scripts/todo_state_hook.py"
+      ],
+      "last_human_reviewed": "2026-08-09",
+      "path": "docs/knowledge/03_memory_sessions.md",
+      "purpose": "Tamper-evident memory, session restore, completion, and append-only logs."
+    },
+    {
+      "covers": [
+        "manage.sh",
+        "scripts/_substrate_config.sh",
+        "scripts/_substrate_surfaces.py",
+        "scripts/_text_safety.py",
+        "scripts/check_dep_cooldown.py",
+        "scripts/check_exfil_guard.py",
+        "scripts/check_github_governance.py",
+        "scripts/check_hook_smoke.py",
+        "scripts/check_policy_code_integrity.py",
+        "scripts/check_substrate_config.py",
+        "scripts/check_validator_input_coverage.py",
+        "scripts/command_policy.py",
+        "scripts/copilot_hook_adapter.py",
+        "scripts/lang_gate.sh",
+        "scripts/remote_detect.py",
+        "scripts/sandbox_detect.py",
+        "scripts/sandbox_exec.sh",
+        "scripts/setup_branch_protection.sh",
+        "scripts/substrate_profile.py"
+      ],
+      "last_human_reviewed": "2026-08-09",
+      "path": "docs/knowledge/04_policy_governance.md",
+      "purpose": "Command policy, hooks, sandboxing, and local or remote governance."
+    },
+    {
+      "covers": [
+        "manage.sh",
         "extras/calibrate_diy_ultrareview.py",
         "extras/check_license_headers.py",
         "extras/check_stale_phrases.py",
-        "scripts/_doc_common.py",
-        "scripts/_minisign.py",
-        "scripts/_substrate_config.sh",
-        "scripts/_substrate_root.py",
-        "scripts/_substrate_surfaces.py",
-        "scripts/_text_safety.py",
-        "scripts/_verify_backends.py",
         "scripts/agent_system_audit.sh",
-        "scripts/append_history.py",
-        "scripts/append_rejected.py",
         "scripts/build_review_bundle.py",
-        "scripts/check_agent_harness.py",
         "scripts/check_bandit_skip_baseline.py",
         "scripts/check_coverage_floors.py",
-        "scripts/check_dep_cooldown.py",
-        "scripts/check_doc_drift.py",
-        "scripts/check_exfil_guard.py",
         "scripts/check_finding_response.py",
-        "scripts/check_github_governance.py",
         "scripts/check_harness_patterns.py",
         "scripts/check_harness_smoke.py",
         "scripts/check_history_sha.py",
-        "scripts/check_hook_smoke.py",
         "scripts/check_import_shadowing.py",
         "scripts/check_policy_code_integrity.py",
         "scripts/check_postmortem_for_bug_fix.py",
         "scripts/check_postmortem_gates_resolved.py",
         "scripts/check_python_syntax.py",
         "scripts/check_secrets.py",
-        "scripts/check_substrate_config.py",
         "scripts/check_validator_input_coverage.py",
         "scripts/code_shape.py",
-        "scripts/command_policy.py",
-        "scripts/completion_gate.py",
-        "scripts/context_report.py",
-        "scripts/copilot_hook_adapter.py",
         "scripts/diy_ultrareview.sh",
-        "scripts/lang_gate.sh",
-        "scripts/lint_on_write.py",
-        "scripts/memory_log.py",
-        "scripts/new_validator.py",
-        "scripts/release_gate.sh",
-        "scripts/remote_detect.py",
-        "scripts/run_python_gate.sh",
         "scripts/run_security_scanners.py",
         "scripts/run_smoke_verification.py",
         "scripts/run_substrate_evals.py",
-        "scripts/sandbox_detect.py",
-        "scripts/sandbox_exec.sh",
-        "scripts/session_handoff.py",
+        "scripts/substrate_audit.py"
+      ],
+      "last_human_reviewed": "2026-08-09",
+      "path": "docs/knowledge/05_evals_assurance.md",
+      "purpose": "Behavioral evals, deterministic validators, audits, and assurance limits."
+    },
+    {
+      "covers": [
+        "manage.sh",
+        "package_release.sh",
+        "scripts/_minisign.py",
+        "scripts/_verify_backends.py",
+        "scripts/build_review_bundle.py",
+        "scripts/release_gate.sh",
         "scripts/setup_release_key.sh",
-        "scripts/setup_branch_protection.sh",
-        "scripts/substrate_audit.py",
-        "scripts/substrate_doctor.py",
-        "scripts/substrate_profile.py",
-        "scripts/substrate_upgrade.py",
-        "scripts/todo_state_hook.py",
         "scripts/update_manifest.py",
         "scripts/verify_release.py",
         "scripts/write_install_json.py"
       ],
-      "last_human_reviewed": "2026-07-10",
-      "path": "docs/knowledge/00_substrate.md",
-      "purpose": "Universal Agent Substrate Kit v3 files installed in this repo."
+      "last_human_reviewed": "2026-08-09",
+      "path": "docs/knowledge/06_release_distribution.md",
+      "purpose": "Release packaging, signing, manifests, and artifact verification."
+    },
+    {
+      "covers": [
+        "manage.sh",
+        "scripts/_doc_common.py",
+        "scripts/_substrate_root.py",
+        "scripts/_substrate_surfaces.py",
+        "scripts/_text_safety.py",
+        "scripts/check_agent_harness.py",
+        "scripts/check_doc_drift.py",
+        "scripts/check_harness_patterns.py",
+        "scripts/check_harness_smoke.py",
+        "scripts/context_report.py",
+        "scripts/new_validator.py",
+        "scripts/session_handoff.py",
+        "scripts/todo_state_hook.py"
+      ],
+      "last_human_reviewed": "2026-08-09",
+      "path": "docs/knowledge/07_agent_context_governance.md",
+      "purpose": "Agent context inventory, harness scanning, budgets, and doc drift."
     }
   ]
 }

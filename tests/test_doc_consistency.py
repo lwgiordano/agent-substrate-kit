@@ -26,6 +26,46 @@ def _kit_root() -> Path | None:
 KIT = _kit_root()
 pytestmark = pytest.mark.skipif(KIT is None, reason="not in kit source tree")
 
+KNOWLEDGE_DOCS = {
+    "00_substrate.md": "Entry point for current substrate contracts and functional knowledge.",
+    "01_install_adoption.md": "Installation and adoption across new and existing repositories.",
+    "02_upgrade_integrity.md": "Upgrade provenance, authority floors, transactions, and postconditions.",
+    "03_memory_sessions.md": "Tamper-evident memory, session restore, completion, and append-only logs.",
+    "04_policy_governance.md": "Command policy, hooks, sandboxing, and local or remote governance.",
+    "05_evals_assurance.md": "Behavioral evals, deterministic validators, audits, and assurance limits.",
+    "06_release_distribution.md": "Release packaging, signing, manifests, and artifact verification.",
+    "07_agent_context_governance.md": "Agent context inventory, harness scanning, budgets, and doc drift.",
+}
+
+KNOWLEDGE_ASSERTS = {
+    "bootstrap.sh::_safe_mkdir_p",
+    "bootstrap.sh::wappend",
+    "scripts/_doc_common.py::locked_atomic_append",
+    "scripts/command_policy.py::looks_dangerous_command",
+    "scripts/memory_log.py::_raw_tracked_hash",
+    "scripts/memory_log.py::_write_tree_oid",
+    "scripts/run_python_gate.sh::_ruff_args",
+    "scripts/session_handoff.py::_rejected_block",
+    "scripts/session_handoff.py::_safe_history_line",
+    "scripts/substrate_upgrade.py::_apply_capability_floor",
+    "scripts/substrate_upgrade.py::_exec_module_from_source",
+}
+
+ROOT_ENTRYPOINTS = {"bootstrap.sh", "manage.sh", "package_release.sh"}
+KNOWLEDGE_TOKEN_BUDGET = 3000
+
+
+def _front_matter(path: Path) -> dict:
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "_knowledge_doc_common", KIT / "scripts" / "_doc_common.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    front_matter, _ = module.parse_front_matter(path)
+    return front_matter
+
 
 # Generated toolchain/cache state that is NOT kit source. A leftover .venv
 # (e.g. from a prior `manage.sh setup` at the source root) must not be
@@ -71,6 +111,80 @@ def _scannable() -> list[Path]:
                 continue
             out.append(p)
     return out
+
+
+def test_source_knowledge_is_functionally_partitioned() -> None:
+    knowledge = KIT / "docs" / "knowledge"
+    docs = {
+        path.name: path
+        for path in knowledge.glob("*.md")
+        if not path.name.startswith("_")
+    }
+    assert set(docs) == set(KNOWLEDGE_DOCS)
+
+    assertion_counts: dict[str, int] = {}
+    covers: set[str] = set()
+    purposes: set[str] = set()
+    for name, path in docs.items():
+        front_matter = _front_matter(path)
+        assert front_matter.get("purpose") == KNOWLEDGE_DOCS[name]
+        assert front_matter.get("last_human_reviewed") == "2026-08-09"
+        purposes.add(str(front_matter.get("purpose")))
+        covers.update(str(item) for item in front_matter.get("covers", []))
+        for assertion in front_matter.get("asserts", []):
+            key = str(assertion)
+            assertion_counts[key] = assertion_counts.get(key, 0) + 1
+        assert round(path.stat().st_size / 4) <= KNOWLEDGE_TOKEN_BUDGET, name
+
+    assert len(purposes) == len(KNOWLEDGE_DOCS)
+    assert set(assertion_counts) == KNOWLEDGE_ASSERTS
+    assert all(count == 1 for count in assertion_counts.values())
+    assert ROOT_ENTRYPOINTS <= covers
+
+    entry = docs["00_substrate.md"].read_text(encoding="utf-8")
+    for sibling in sorted(set(KNOWLEDGE_DOCS) - {"00_substrate.md"}):
+        assert f"]({sibling})" in entry
+    assert "](../../CHANGES_V3.md)" in entry
+    assert "](../HISTORY.md)" in entry
+    for name, path in docs.items():
+        if name != "00_substrate.md":
+            assert "](00_substrate.md)" in path.read_text(encoding="utf-8")
+
+
+def test_source_knowledge_covers_every_discovered_module() -> None:
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "_knowledge_doc_common", KIT / "scripts" / "_doc_common.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    covered = {
+        str(item)
+        for path in (KIT / "docs" / "knowledge").glob("[0-9][0-9]_*.md")
+        for item in _front_matter(path).get("covers", [])
+    }
+    discovered = {path.as_posix() for path in module.iter_code_modules(KIT)}
+    assert discovered <= covered
+
+
+def test_superpowers_execution_docs_are_governed_context() -> None:
+    """Plans/specs drive agent execution and need scanning plus ownership."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "_substrate_surfaces", KIT / "scripts" / "_substrate_surfaces.py"
+    )
+    inventory = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(inventory)
+    assert "docs/superpowers/**/*.md" in inventory.CONTEXT_GLOBS
+    assert "docs/knowledge" in inventory.GOVERNED_DIRS
+    assert "docs/knowledge" not in inventory.OWNED_DIRS
+    assert "docs/superpowers" in inventory.GOVERNED_OPTIONAL_DIRS
+    assert "docs/superpowers" not in inventory.OPTIONAL_DIRS
+    assert {"docs/knowledge/00_substrate.md", "docs/knowledge/_template.md"} <= set(
+        inventory.OWNED_FILES
+    )
 
 
 def test_no_old_product_names() -> None:
@@ -298,3 +412,30 @@ def test_doc_consistency_skips_generated_venv(tmp_path) -> None:
     assert _is_generated(fake)
     assert _is_generated(KIT / "dist" / "x.zip")
     assert not _is_generated(KIT / "scripts" / "check_exfil_guard.py")
+
+
+def test_full_suite_watchdog_has_measured_runtime_margin(monkeypatch) -> None:
+    """The session watchdog must not kill a healthy full suite at its measured runtime.
+
+    The exact pre-commit path took 602.85 seconds on the slow supported host. Require
+    two complete measured runs of margin while keeping a finite fail-closed deadline.
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "_substrate_test_conftest", KIT / "tests" / "conftest.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    scheduled = {}
+
+    monkeypatch.setattr(module.faulthandler, "enable", lambda: None)
+    monkeypatch.setattr(
+        module.faulthandler,
+        "dump_traceback_later",
+        lambda seconds, **kwargs: scheduled.update(seconds=seconds, **kwargs),
+    )
+    module.pytest_configure(None)
+
+    assert scheduled["seconds"] >= 2 * 603
+    assert scheduled["exit"] is True

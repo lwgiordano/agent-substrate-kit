@@ -14,12 +14,17 @@
 - Do not edit `scripts/_doc_common.py`, `scripts/append_history.py`, or `scripts/append_rejected.py`; v3.8.31 already fixed that class.
 - Preserve all eleven current `asserts: path::substring` entries exactly once across the source knowledge set.
 - Keep `docs/knowledge/00_substrate.md` plus seven source-only siblings named `01_install_adoption.md` through `07_agent_context_governance.md`.
-- A fresh consumer install must retain only its generated compact `00_substrate.md`; do not add the seven source siblings to bootstrap, upgrade, packaging, or the owned-file baseline.
+- A fresh consumer install must retain its generated compact `00_substrate.md`
+  and installed `_template.md`, but none of the seven source siblings; do not add
+  those siblings to bootstrap, upgrade, packaging, or the owned-file baseline.
 - Use many-to-many `covers` entries. Cover `bootstrap.sh`, `manage.sh`, and `package_release.sh` wherever their behavior supports a documented contract.
 - Set `last_human_reviewed: 2026-08-09` only after comparing each migrated claim with running code.
 - Keep every non-template knowledge doc at or below the default 3,000-token estimate (`round(bytes / 4)`).
 - Never hand-edit `docs/manifest.json`; run `python scripts/update_manifest.py --fix`.
 - Run `./manage.sh evals` because the harness and policy-adjacent checks change.
+- Prove the ownership migration by running the new kit's engine against a target
+  holding a legacy recursive baseline; the old target engine cannot know this
+  future rule, so document the one-time boundary command explicitly.
 - Land this plan, its design spec, and the two split-design rejection entries as a reviewed planning commit before Task 1 changes implementation files.
 - Create one coherent v3.8.32 code commit after Tasks 1 through 4 pass together. Then append HISTORY with that commit SHA, commit HISTORY, post the bus RELEASE, and push without squashing.
 
@@ -40,10 +45,15 @@
 | `scripts/check_doc_drift.py` | Review every staged path already named in `covers`, independent of suffix |
 | `scripts/context_report.py` | Enumerate every knowledge doc for per-document budget rows |
 | `scripts/check_harness_smoke.py` | Prove each context surface independently, including arbitrary knowledge and execution-plan siblings |
-| `scripts/_substrate_surfaces.py` | Scan and optional-own the Superpowers plan/spec directory through the canonical inventory |
+| `scripts/_substrate_surfaces.py` | Separate governed project context from exact install-owned knowledge files |
+| `scripts/write_install_json.py` | Baseline only substrate-owned files, excluding project knowledge and plans |
+| `scripts/code_shape.py` | Classify governed project context as governance churn without substrate ownership |
+| `scripts/substrate_doctor.py` | Preserve governed-directory ownership checks if the canonical inventory import fails |
 | `tests/test_doc_consistency.py` | Source knowledge shape, assertion, coverage, link, and size invariants |
-| `tests/test_hook_scripts.py` | Behavioral regressions for consumers and the three integration fixes |
+| `tests/test_hook_scripts.py` | Behavioral regressions for consumers and the four integration fixes |
 | `docs/manifest.json` | Generated knowledge and ADR index |
+| `docs/REJECTED.md` | Record why governed project context cannot share directory-wide install ownership |
+| `docs/postmortems/2026-08-10-knowledge-ownership-migration.md` | Record the legacy serialized-baseline migration gap and permanent transition gate |
 | `VERSION`, `README.md`, `BENCHMARK.md` | Release identity and measured results |
 
 ---
@@ -653,13 +663,15 @@ def test_superpowers_execution_docs_are_governed_context() -> None:
     inventory = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(inventory)
     assert "docs/superpowers/**/*.md" in inventory.CONTEXT_GLOBS
-    assert "docs/superpowers" in inventory.OPTIONAL_DIRS
+    assert "docs/superpowers" in inventory.GOVERNED_OPTIONAL_DIRS
+    assert "docs/superpowers" not in inventory.OPTIONAL_DIRS
 ```
 
 Add this regression beside `test_harness_smoke_catches_stubbed_agent_harness`:
 
 ```python
-def test_harness_smoke_catches_scanner_that_ignores_knowledge_siblings(tmp_path) -> None:
+@pytest.mark.parametrize("ignored", ("knowledge", "plans"))
+def test_harness_smoke_catches_scanner_that_ignores_dynamic_surface(tmp_path, ignored) -> None:
     _stage(
         tmp_path,
         "check_harness_smoke.py",
@@ -691,7 +703,7 @@ Run:
 ```bash
 uv run pytest \
   tests/test_doc_consistency.py::test_superpowers_execution_docs_are_governed_context \
-  tests/test_hook_scripts.py::test_harness_smoke_catches_scanner_that_ignores_knowledge_siblings -vv
+  tests/test_hook_scripts.py::test_harness_smoke_catches_scanner_that_ignores_dynamic_surface -vv
 ```
 
 Expected result: the inventory test fails because both entries are absent. The old smoke passes because injected `AGENTS.md` makes the fake scanner block even though it ignores the sibling, so the behavioral regression fails its `returncode == 1` assertion.
@@ -705,16 +717,15 @@ Add the context glob beside the other documentation surfaces:
 "docs/superpowers/**/*.md",
 ```
 
-Add the optional ownership rule:
+Add a distinct optional governance rule so project-authored plans do not enter
+the substrate install baseline:
 
 ```python
-OPTIONAL_DIRS = [
-    ".github/skills",
-    "docs/postmortems",
-    "docs/superpowers",
-    "design-system",
-    "templates",
-]
+GOVERNED_DIRS = ["docs/knowledge"]
+GOVERNED_OPTIONAL_DIRS = ["docs/superpowers"]
+
+# OWNED_FILES retains docs/knowledge/00_substrate.md and
+# docs/knowledge/_template.md as the generated/install-supplied artifacts.
 ```
 
 Keep it optional so a consumer that never creates the directory does not fail strict doctor. The existing `audit_trigger_paths()` derivation will add `docs/superpowers/**` without a workflow-specific duplicate.
@@ -815,7 +826,7 @@ uv run pytest \
   tests/test_doc_consistency.py::test_superpowers_execution_docs_are_governed_context \
   tests/test_hook_scripts.py::test_harness_smoke_passes_shipped \
   tests/test_hook_scripts.py::test_harness_smoke_catches_stubbed_agent_harness \
-  tests/test_hook_scripts.py::test_harness_smoke_catches_scanner_that_ignores_knowledge_siblings -vv
+  tests/test_hook_scripts.py::test_harness_smoke_catches_scanner_that_ignores_dynamic_surface -vv
 python scripts/check_harness_smoke.py
 python scripts/check_agent_harness.py
 ```
@@ -863,7 +874,7 @@ uv run pytest \
   tests/test_hook_scripts.py::test_context_report_budget_enumerates_all_knowledge_docs \
   tests/test_hook_scripts.py::test_context_report_budget_names_oversize_knowledge_doc \
   tests/test_hook_scripts.py::test_harness_smoke_passes_shipped \
-  tests/test_hook_scripts.py::test_harness_smoke_catches_scanner_that_ignores_knowledge_siblings -vv
+  tests/test_hook_scripts.py::test_harness_smoke_catches_scanner_that_ignores_dynamic_surface -vv
 SUBSTRATE_ENFORCE_DOC_BUDGET=1 python scripts/check_doc_drift.py --strict
 python scripts/update_manifest.py --check
 python scripts/check_agent_harness.py
@@ -902,6 +913,7 @@ Stage only the claimed v3.8.32 files, inspect the staged diff, and commit with h
 ```bash
 git add \
   VERSION README.md BENCHMARK.md docs/README.md \
+  docs/REJECTED.md \
   docs/decisions/0001-substrate-knowledge-boundaries.md \
   docs/knowledge/00_substrate.md \
   docs/knowledge/01_install_adoption.md \
@@ -911,12 +923,18 @@ git add \
   docs/knowledge/05_evals_assurance.md \
   docs/knowledge/06_release_distribution.md \
   docs/knowledge/07_agent_context_governance.md \
+  docs/postmortems/2026-08-10-knowledge-ownership-migration.md \
   docs/manifest.json \
+  docs/superpowers/plans/2026-08-09-substrate-knowledge-split.md \
+  docs/superpowers/specs/2026-07-30-substrate-knowledge-split-design.md \
   scripts/_substrate_surfaces.py scripts/check_doc_drift.py \
   scripts/context_report.py scripts/check_harness_smoke.py \
+  scripts/substrate_doctor.py scripts/substrate_upgrade.py \
+  scripts/write_install_json.py scripts/code_shape.py \
   tests/test_doc_consistency.py tests/test_hook_scripts.py
 git diff --cached --check
-git commit -m "v3.8.32: split substrate knowledge by function"
+git commit -m "v3.8.32: split substrate knowledge by function" \
+  -m "Postmortem: docs/postmortems/2026-08-10-knowledge-ownership-migration.md"
 ```
 
 - [ ] **Step 6: Append HISTORY using the landed code SHA**
@@ -928,16 +946,16 @@ sha=$(git rev-parse --short HEAD)
 python scripts/append_history.py \
   --commit-hash "$sha" \
   --summary "v3.8.32: functional substrate knowledge map with complete drift, budget, and harness enforcement" \
-  --files "docs/knowledge,docs/decisions/0001-substrate-knowledge-boundaries.md,scripts/_substrate_surfaces.py,scripts/check_doc_drift.py,scripts/context_report.py,scripts/check_harness_smoke.py,tests/test_doc_consistency.py,tests/test_hook_scripts.py" \
+  --files "docs/knowledge,docs/decisions/0001-substrate-knowledge-boundaries.md,docs/postmortems/2026-08-10-knowledge-ownership-migration.md,docs/REJECTED.md,docs/superpowers,scripts/_substrate_surfaces.py,scripts/check_doc_drift.py,scripts/context_report.py,scripts/check_harness_smoke.py,scripts/substrate_doctor.py,scripts/substrate_upgrade.py,scripts/write_install_json.py,scripts/code_shape.py,tests/test_doc_consistency.py,tests/test_hook_scripts.py" \
   --intent "Replace the oversized chronological knowledge file with enforceable functional boundaries" \
-  --knowledge "Source has eight bounded knowledge docs; consumers keep generated 00 only; staged covered paths are suffix-independent; budgets and harness smoke enumerate every sibling; Superpowers plans are scanned and optional-owned"
+  --knowledge "Source has eight bounded knowledge docs; consumers keep generated 00 plus the installed knowledge template; staged covered paths are suffix-independent; budgets and harness smoke enumerate every sibling; project knowledge and plans are governed but excluded from install ownership; the first upgrade retires obsolete project-knowledge baseline entries"
 git add docs/HISTORY.md
 git commit -m "docs: HISTORY for v3.8.32"
 ```
 
 - [ ] **Step 7: Post the bus RELEASE and publish without rewriting history**
 
-Append one line to `AGENT_BUS.md` with the code SHA, HISTORY SHA, gate results, auditor verdicts, the eight-document source shape, consumer-layout proof, and the three fixed integration defects. Then:
+Append one line to `AGENT_BUS.md` with the code SHA, HISTORY SHA, gate results, auditor verdicts, the eight-document source shape, consumer-layout proof, and the four fixed integration defects. Then:
 
 ```bash
 git add AGENT_BUS.md

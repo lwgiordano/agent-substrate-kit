@@ -6,14 +6,18 @@ and never raise.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
+import shlex
 import signal
 import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 ROOT = Path.cwd()
 SCRIPTS = ROOT / "scripts"
@@ -160,6 +164,235 @@ def test_consumer_install_omits_heavy_selftests(tmp_path) -> None:
     assert (td / "test_substrate_files.py").exists(), "install-integrity test missing"
     assert (td / "test_smoke.py").exists(), "exit-5 guard test missing"
     assert (td / "conftest.py").exists(), "test fixtures missing"
+
+
+def test_consumer_install_gets_only_compact_substrate_knowledge(tmp_path) -> None:
+    if not _bootstrapped(tmp_path):
+        return
+    knowledge = tmp_path / "docs" / "knowledge"
+    installed = {
+        path.name for path in knowledge.glob("*.md") if not path.name.startswith("_")
+    }
+    assert installed == {"00_substrate.md"}
+    text = (knowledge / "00_substrate.md").read_text(encoding="utf-8")
+    assert "This document covers the installed AI/self-audit substrate scripts." in text
+    assert "01_install_adoption.md" not in text
+    owned = json.loads((tmp_path / ".substrate" / "install.json").read_text())["owned_file_sha256"]
+    assert not any(path.startswith("docs/knowledge/0") and path != "docs/knowledge/00_substrate.md"
+                   for path in owned)
+
+
+def test_consumer_authored_context_is_governed_but_not_upgrade_drift(tmp_path) -> None:
+    """Project knowledge and execution plans are governed, never install-owned."""
+    if not _bootstrapped(tmp_path):
+        return
+    plan = tmp_path / "docs" / "superpowers" / "plans" / "project.md"
+    plan.parent.mkdir(parents=True)
+    plan.write_text("# Project plan\n\nfirst revision\n", encoding="utf-8")
+    project_doc = tmp_path / "docs" / "knowledge" / "project.md"
+    project_doc.write_text("# Project knowledge\n\nfirst revision\n", encoding="utf-8")
+    first = subprocess.run(
+        ["./manage.sh", "upgrade", "--from", str(ROOT), "--allow-unverified", "--write"],
+        cwd=tmp_path, capture_output=True, text=True, timeout=180,
+    )
+    assert first.returncode == 0, first.stdout + first.stderr
+    owned = json.loads((tmp_path / ".substrate" / "install.json").read_text())["owned_file_sha256"]
+    assert "docs/superpowers/plans/project.md" not in owned
+    assert "docs/knowledge/project.md" not in owned
+    plan.write_text("# Project plan\n\nsecond revision\n", encoding="utf-8")
+    project_doc.write_text("# Project knowledge\n\nsecond revision\n", encoding="utf-8")
+    second = subprocess.run(
+        ["./manage.sh", "upgrade", "--from", str(ROOT), "--allow-unverified", "--write"],
+        cwd=tmp_path, capture_output=True, text=True, timeout=180,
+    )
+    assert second.returncode == 0, second.stdout + second.stderr
+    assert "second revision" in plan.read_text(encoding="utf-8")
+    assert "second revision" in project_doc.read_text(encoding="utf-8")
+
+
+def test_new_kit_engine_retires_legacy_project_knowledge_baseline(tmp_path) -> None:
+    """A pre-v3.8.32 baseline must not strand newly project-owned knowledge."""
+    if not _bootstrapped(tmp_path):
+        return
+    project_doc = tmp_path / "docs" / "knowledge" / "project.md"
+    original = b"# Project knowledge\n\nlegacy baseline revision\n"
+    project_doc.write_bytes(original)
+    install_json = tmp_path / ".substrate" / "install.json"
+    baseline = json.loads(install_json.read_text(encoding="utf-8"))
+    baseline["owned_file_sha256"]["docs/knowledge/project.md"] = hashlib.sha256(
+        original
+    ).hexdigest()
+    target = tmp_path / "docs" / "knowledge" / "project-target.md"
+    target.write_text("# In-repo project target\n", encoding="utf-8")
+    linked = tmp_path / "docs" / "knowledge" / "project-link.md"
+    linked.symlink_to(target.name)
+    baseline["owned_file_sha256"]["docs/knowledge/project-link.md"] = hashlib.sha256(
+        target.read_bytes()
+    ).hexdigest()
+    install_json.write_text(json.dumps(baseline, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    project_doc.write_text("# Project knowledge\n\nproject-owned revision\n", encoding="utf-8")
+
+    # Crossing the boundary must run the NEW kit's engine. A pre-v3.8.32
+    # consumer's `./manage.sh upgrade` necessarily dispatches its old engine,
+    # which cannot know a future ownership migration.
+    upgraded = subprocess.run(
+        [sys.executable, "-I", str(SCRIPTS / "substrate_upgrade.py"),
+         "--root", str(tmp_path), "--from", str(ROOT), "--allow-unverified", "--write"],
+        cwd=ROOT, capture_output=True, text=True, timeout=180,
+    )
+    assert upgraded.returncode == 0, upgraded.stdout + upgraded.stderr
+    assert "project-owned revision" in project_doc.read_text(encoding="utf-8")
+    assert linked.is_symlink() and linked.readlink() == Path(target.name)
+    owned = json.loads(install_json.read_text(encoding="utf-8"))["owned_file_sha256"]
+    assert "docs/knowledge/project.md" not in owned
+    assert "docs/knowledge/project-link.md" not in owned
+
+
+@pytest.mark.parametrize("name", ("00_substrate.md", "_template.md"))
+def test_upgrade_still_blocks_drift_in_installed_knowledge_files(tmp_path, name) -> None:
+    """Retiring legacy siblings must not weaken the two installed knowledge files."""
+    if not _bootstrapped(tmp_path):
+        return
+    entry = tmp_path / "docs" / "knowledge" / name
+    entry.write_text(entry.read_text(encoding="utf-8") + "\nlocal drift\n", encoding="utf-8")
+    upgraded = subprocess.run(
+        ["./manage.sh", "upgrade", "--from", str(ROOT), "--allow-unverified", "--write"],
+        cwd=tmp_path, capture_output=True, text=True, timeout=180,
+    )
+    assert upgraded.returncode == 2
+    assert f"docs/knowledge/{name}" in upgraded.stdout + upgraded.stderr
+
+
+def test_upgrade_non_string_hash_is_not_a_vouch(tmp_path) -> None:
+    """A forged null hash must be incomplete provenance, never proof of trust."""
+    if not _bootstrapped(tmp_path):
+        return
+    rel = "docs/knowledge/00_substrate.md"
+    entry = tmp_path / rel
+    entry.write_text(entry.read_text(encoding="utf-8") + "\nlocal drift\n", encoding="utf-8")
+    install_json = tmp_path / ".substrate" / "install.json"
+    baseline = json.loads(install_json.read_text(encoding="utf-8"))
+    baseline["owned_file_sha256"][rel] = None
+    install_json.write_text(json.dumps(baseline, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    upgraded = subprocess.run(
+        ["./manage.sh", "upgrade", "--from", str(ROOT), "--allow-unverified", "--write"],
+        cwd=tmp_path, capture_output=True, text=True, timeout=180,
+    )
+    assert upgraded.returncode == 2
+    assert rel in upgraded.stdout + upgraded.stderr
+    assert "local drift" in entry.read_text(encoding="utf-8")
+
+
+def test_upgrade_missing_baseline_coverage_aborts_before_render(tmp_path) -> None:
+    """An unusable new-kit ownership oracle is a hard pre-mutation failure."""
+    if not _bootstrapped(tmp_path):
+        return
+    kit = tmp_path.parent / "kit-without-provenance-writer"
+    (kit / "scripts").mkdir(parents=True)
+    (kit / "VERSION").write_text("3.8.32\n", encoding="utf-8")
+    (kit / "scripts" / "_substrate_surfaces.py").write_text(
+        "OWNED_FILES = ['manage.sh']\n"
+        "OPTIONAL_FILES = []\n"
+        "OWNED_DIRS = []\n"
+        "OPTIONAL_DIRS = []\n"
+        "COVERAGE_SKIP_PARTS = set()\n",
+        encoding="utf-8",
+    )
+    sentinel = tmp_path / "coverage-missing-rendered"
+    (kit / "bootstrap.sh").write_text(
+        f"#!/usr/bin/env bash\nprintf rendered > {shlex.quote(str(sentinel))}\n",
+        encoding="utf-8",
+    )
+
+    upgraded = subprocess.run(
+        [sys.executable, "-I", str(SCRIPTS / "substrate_upgrade.py"),
+         "--root", str(tmp_path), "--from", str(kit), "--allow-unverified",
+         "--write", "--force"],
+        cwd=ROOT, capture_output=True, text=True, timeout=180,
+    )
+    assert upgraded.returncode == 2
+    assert "baseline coverage" in (upgraded.stdout + upgraded.stderr).lower()
+    assert not sentinel.exists(), "render ran before ownership coverage was established"
+
+
+def test_upgrade_missing_canonical_inventory_aborts_before_render(tmp_path) -> None:
+    """A self-consistent writer fallback cannot replace the canonical inventory."""
+    if not _bootstrapped(tmp_path):
+        return
+    kit = tmp_path.parent / "kit-without-canonical-inventory"
+    (kit / "scripts").mkdir(parents=True)
+    (kit / "VERSION").write_text("3.8.32\n", encoding="utf-8")
+    sentinel = tmp_path / "missing-inventory-rendered"
+    (kit / "bootstrap.sh").write_text(
+        f"#!/usr/bin/env bash\nprintf rendered > {shlex.quote(str(sentinel))}\n",
+        encoding="utf-8",
+    )
+    (kit / "scripts" / "write_install_json.py").write_text(
+        "OWNED_FILES = ['manage.sh']\n"
+        "OPTIONAL_FILES = []\n"
+        "OWNED_DIRS = []\n"
+        "OPTIONAL_DIRS = []\n"
+        "COVERAGE_SKIP_PARTS = set()\n"
+        "def owned_files(root):\n    return ['manage.sh']\n",
+        encoding="utf-8",
+    )
+
+    upgraded = subprocess.run(
+        [sys.executable, "-I", str(SCRIPTS / "substrate_upgrade.py"),
+         "--root", str(tmp_path), "--from", str(kit), "--allow-unverified",
+         "--write", "--force"],
+        cwd=ROOT, capture_output=True, text=True, timeout=180,
+    )
+    assert upgraded.returncode == 2
+    assert "baseline coverage" in (upgraded.stdout + upgraded.stderr).lower()
+    assert not sentinel.exists(), "writer fallback replaced the canonical inventory"
+
+
+@pytest.mark.parametrize(("slug", "result"), (
+    ("empty", "[]"),
+    ("non-string", "[123]"),
+    ("absolute", "['/absolute/not-relative']"),
+    ("irrelevant", "['irrelevant']"),
+))
+def test_upgrade_malformed_baseline_coverage_aborts_before_render(
+    tmp_path, slug, result,
+) -> None:
+    """A present but malformed coverage oracle is the same hard failure."""
+    if not _bootstrapped(tmp_path):
+        return
+    kit = tmp_path.parent / f"kit-with-malformed-provenance-writer-{slug}"
+    (kit / "scripts").mkdir(parents=True)
+    (kit / "VERSION").write_text("3.8.32\n", encoding="utf-8")
+    sentinel = tmp_path / "malformed-coverage-rendered"
+    (kit / "bootstrap.sh").write_text(
+        f"#!/usr/bin/env bash\nprintf rendered > {shlex.quote(str(sentinel))}\n",
+        encoding="utf-8",
+    )
+    (kit / "scripts" / "_substrate_surfaces.py").write_text(
+        "OWNED_FILES = ['manage.sh']\n"
+        "OPTIONAL_FILES = []\n"
+        "OWNED_DIRS = []\n"
+        "OPTIONAL_DIRS = []\n"
+        "COVERAGE_SKIP_PARTS = set()\n",
+        encoding="utf-8",
+    )
+    (kit / "scripts" / "write_install_json.py").write_text(
+        "from _substrate_surfaces import (COVERAGE_SKIP_PARTS, OPTIONAL_DIRS, "
+        "OPTIONAL_FILES, OWNED_DIRS, OWNED_FILES)\n"
+        f"def owned_files(root):\n    return {result}\n",
+        encoding="utf-8",
+    )
+
+    upgraded = subprocess.run(
+        [sys.executable, "-I", str(SCRIPTS / "substrate_upgrade.py"),
+         "--root", str(tmp_path), "--from", str(kit), "--allow-unverified",
+         "--write", "--force"],
+        cwd=ROOT, capture_output=True, text=True, timeout=180,
+    )
+    assert upgraded.returncode == 2
+    assert "baseline coverage" in (upgraded.stdout + upgraded.stderr).lower()
+    assert not sentinel.exists(), "malformed coverage reached the renderer"
 
 
 def test_dev_tests_flag_vendors_full_suite(tmp_path) -> None:
@@ -4333,6 +4566,25 @@ def test_doctor_strict_requires_sensitive_surface_coverage(tmp_path) -> None:
     assert "unowned" not in (p.stdout + p.stderr).lower()
 
 
+def test_doctor_requires_codeowner_for_superpowers_plan(tmp_path) -> None:
+    """A project-authored plan is governed even though upgrade does not own it."""
+    if not (SCRIPTS / "substrate_doctor.py").exists():
+        return
+    _strict_repo(tmp_path)
+    plan = tmp_path / "docs" / "superpowers" / "plans" / "project.md"
+    plan.parent.mkdir(parents=True)
+    plan.write_text("# Project plan\n", encoding="utf-8")
+    gh = tmp_path / ".github"
+    gh.mkdir(exist_ok=True)
+    (gh / "CODEOWNERS").write_text(
+        "** @realuser\n/docs/superpowers/\n", encoding="utf-8"
+    )
+    p = _run("substrate_doctor.py", ["--strict"], "", cwd=tmp_path)
+    out = p.stdout + p.stderr
+    assert p.returncode == 1
+    assert "docs/superpowers/plans/project.md" in out
+
+
 # --- host-payload contract: Codex-style payload (tool_name + tool_input) ---
 
 def test_exfil_guard_codex_style_payload(tmp_path) -> None:
@@ -5280,6 +5532,39 @@ def test_harness_smoke_catches_stubbed_agent_harness(tmp_path) -> None:
     assert "did not block" in (p.stdout + p.stderr).lower()
 
 
+@pytest.mark.parametrize("ignored", ("knowledge", "plans"))
+def test_harness_smoke_catches_scanner_that_ignores_dynamic_surface(tmp_path, ignored) -> None:
+    """Smoke each surface alone so one detected file cannot mask an ignored one."""
+    if not (SCRIPTS / "check_harness_smoke.py").exists():
+        return
+    _stage(tmp_path, "check_harness_smoke.py", "_substrate_root.py",
+           "_substrate_surfaces.py", "harness_patterns.json")
+    dynamic = (
+        "paths += list(Path('docs/superpowers').glob('**/*.md'))"
+        if ignored == "knowledge"
+        else "paths += list(Path('docs/knowledge').glob('*.md'))"
+    )
+    (tmp_path / "scripts" / "check_agent_harness.py").write_text(
+        f"""#!/usr/bin/env python3
+from pathlib import Path
+import re
+paths = [Path('AGENTS.md'), Path('docs/HISTORY.md'), Path('docs/knowledge/00_substrate.md')]
+{dynamic}
+pat = re.compile(r'ignore previous|disregard all earlier|from now on|system override', re.I)
+for path in paths:
+    if path.is_file() and pat.search(path.read_text(encoding='utf-8')):
+        print(str(path) + ': prompt injection')
+        raise SystemExit(1)
+print('agent-harness: ok')
+raise SystemExit(0)
+""",
+        encoding="utf-8",
+    )
+    p = _run_staged(tmp_path, "check_harness_smoke.py")
+    assert p.returncode == 1
+    assert "did not block" in (p.stdout + p.stderr).lower()
+
+
 def test_manage_check_blocks_stubbed_agent_harness(tmp_path) -> None:
     """Full-gate: a stubbed harness scanner must stop check at harness-smoke."""
     if not _bootstrapped(tmp_path):
@@ -5728,9 +6013,28 @@ def test_doctor_fallback_matches_canonical_inventory() -> None:
     assert _fallback("_SENSITIVE_FILES") == set(inv.OWNED_FILES)
     assert _fallback("_SENSITIVE_OPTIONAL_FILES") == set(inv.OPTIONAL_FILES)
     assert _fallback("_SENSITIVE_OPTIONAL_DIRS") == set(inv.OPTIONAL_DIRS)
+    assert _fallback("_SENSITIVE_GOVERNED_DIRS") == set(inv.GOVERNED_DIRS)
+    assert _fallback("_SENSITIVE_GOVERNED_OPTIONAL_DIRS") == set(inv.GOVERNED_OPTIONAL_DIRS)
     # v3.8.7: the set-literal tier must match too (was omitted despite "exact parity").
     m = re.search(r"^\s*_COVERAGE_SKIP_PARTS=(\{[^}]*\})", src, re.MULTILINE)
     assert m and ast.literal_eval(m.group(1)) == set(inv.COVERAGE_SKIP_PARTS)
+
+
+def test_write_install_json_fallback_keeps_project_context_out_of_baseline() -> None:
+    """Import failure must not turn governed project docs back into provenance."""
+    import ast
+
+    src = (SCRIPTS / "write_install_json.py").read_text(encoding="utf-8")
+
+    def _fallback(name):
+        match = re.search(rf"^    {name} = (\[[^\]]*\])", src, re.MULTILINE)
+        assert match, f"fallback {name} not found in write_install_json.py"
+        return set(ast.literal_eval(match.group(1)))
+
+    assert "docs/knowledge" not in _fallback("OWNED_DIRS")
+    assert {"docs/knowledge/00_substrate.md", "docs/knowledge/_template.md"} <= _fallback(
+        "OWNED_FILES"
+    )
 
 
 def test_doctor_go_live_runs_and_reports() -> None:
@@ -6618,8 +6922,13 @@ def test_code_shape_flags_context_surface_churn(tmp_path) -> None:
     repo = _bootstrap_repo_for_shape(tmp_path)
     with (repo / "docs" / "HISTORY.md").open("a", encoding="utf-8") as f:
         f.write("\nagent changed context\n")
+    plan = repo / "docs" / "superpowers" / "plans" / "project.md"
+    plan.parent.mkdir(parents=True)
+    plan.write_text("# Project plan\n", encoding="utf-8")
     d = _shape(repo)
-    assert "docs/HISTORY.md" in d["diff"]["buckets"].get("governance", []), d["diff"]["buckets"]
+    governance = d["diff"]["buckets"].get("governance", [])
+    assert "docs/HISTORY.md" in governance, d["diff"]["buckets"]
+    assert "docs/superpowers/plans/project.md" in governance, d["diff"]["buckets"]
     assert any("governance" in w.lower() for w in d["diff"]["warnings"]), d["diff"]["warnings"]
 
 
@@ -7177,6 +7486,7 @@ def _drift_repo(tmp_path: Path, asserts_block: str) -> Path:
     (tmp_path / "docs" / "knowledge" / "01_mod.md").write_text(
         "---\npurpose: mod\nlast_human_reviewed: 2026-07-29\ncovers:\n  - src/mod.py\n"
         + asserts_block + "---\n\n# Mod\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
     return tmp_path
 
 
@@ -7184,6 +7494,125 @@ def _drift_json(repo: Path) -> dict:
     p = subprocess.run([sys.executable, "-I", str(SCRIPTS / "check_doc_drift.py"), "--json"],
                        cwd=repo, capture_output=True, text=True, timeout=120)
     return json.loads(p.stdout)
+
+
+def _staged_drift_repo(tmp_path: Path, covered_path: str, review_date="2026-01-01") -> Path:
+    """Create a committed repo whose knowledge doc covers ``covered_path``."""
+    target = tmp_path / covered_path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("baseline\n", encoding="utf-8")
+    knowledge = tmp_path / "docs" / "knowledge"
+    knowledge.mkdir(parents=True)
+    doc = knowledge / "01_surface.md"
+    doc.write_text(
+        f"---\npurpose: staged surface\nlast_human_reviewed: {review_date}\n"
+        f"covers:\n  - {covered_path}\n---\n\n# Surface\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "docs" / "manifest.json").write_text(
+        json.dumps({"knowledge_docs": [{"path": "docs/knowledge/01_surface.md"}]}),
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "x@x"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "x"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "baseline"], cwd=tmp_path, check=True)
+    return tmp_path
+
+
+@pytest.mark.parametrize(
+    "covered_path",
+    ("scripts/tool.sh", ".github/workflows/ci.yml", "config/policy.json", ".substrate/config"),
+)
+def test_doc_drift_reviews_every_staged_covered_path(tmp_path, covered_path) -> None:
+    """Every staged covered path requires review, not only source-code suffixes."""
+    repo = _staged_drift_repo(tmp_path, covered_path)
+    target = repo / covered_path
+    target.write_text("changed\n", encoding="utf-8")
+    subprocess.run(["git", "add", covered_path], cwd=repo, check=True)
+    pending = _drift_json(repo)["pending_stale_doc"]
+    assert any(row[1] == covered_path for row in pending), pending
+
+
+@pytest.mark.parametrize("covered_path", ("scripts/tool.py", ".substrate/config"))
+@pytest.mark.parametrize("operation", ("delete", "rename"))
+def test_doc_drift_keeps_old_covered_path_for_delete_or_rename(
+        tmp_path, operation, covered_path) -> None:
+    """A deleted or renamed covered path must not disappear from staged review."""
+    repo = _staged_drift_repo(tmp_path, covered_path)
+    if operation == "delete":
+        (repo / covered_path).unlink()
+        subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    else:
+        renamed = str(Path(covered_path).with_name("renamed" + Path(covered_path).suffix))
+        subprocess.run(["git", "mv", covered_path, renamed], cwd=repo, check=True)
+    pending = _drift_json(repo)["pending_stale_doc"]
+    assert any(row[1] == covered_path for row in pending), pending
+
+
+def test_doc_drift_requires_review_even_when_review_date_is_today(tmp_path) -> None:
+    """A date alone is not evidence that the doc joined this staged change."""
+    from datetime import date
+
+    covered_path = "scripts/tool.py"
+    repo = _staged_drift_repo(tmp_path, covered_path, date.today().isoformat())
+    (repo / covered_path).write_text("changed\n", encoding="utf-8")
+    subprocess.run(["git", "add", covered_path], cwd=repo, check=True)
+    pending = _drift_json(repo)["pending_stale_doc"]
+    assert any(row[1] == covered_path for row in pending), pending
+
+
+def test_doc_drift_non_utf8_path_cannot_hide_normal_staged_change(tmp_path) -> None:
+    """One undecodable index pathname must not erase every staged path."""
+    covered_path = "normal.py"
+    repo = _staged_drift_repo(tmp_path, covered_path)
+    raw_repo = os.fsencode(repo)
+    raw_path = raw_repo + b"/odd-\xff.py"
+    try:
+        fd = os.open(raw_path, os.O_WRONLY | os.O_CREAT, 0o644)
+    except OSError:
+        pytest.skip("filesystem does not accept a non-UTF-8 pathname")
+    else:
+        os.write(fd, b"x = 1\n")
+        os.close(fd)
+    (repo / covered_path).write_text("changed\n", encoding="utf-8")
+    subprocess.run([b"git", b"add", b"-A"], cwd=raw_repo, check=True)
+    pending = _drift_json(repo)["pending_stale_doc"]
+    assert any(row[1] == covered_path for row in pending), pending
+
+
+def test_doc_drift_nul_parser_preserves_non_utf8_and_normal_paths(monkeypatch) -> None:
+    """Exercise raw-byte parsing even when the host filesystem rejects such names."""
+    import importlib
+
+    dd = importlib.import_module("check_doc_drift")
+    raw = b"M\0odd-\xff.py\0M\0normal.py\0"
+    monkeypatch.setattr(dd, "_git", lambda args, cwd: raw)
+    staged = dd._staged(Path("."))
+    assert os.fsdecode(b"odd-\xff.py") in staged
+    assert "normal.py" in staged
+
+
+def test_doc_drift_fails_closed_when_staged_state_is_unreadable(tmp_path) -> None:
+    """No Git repository is an error, not evidence that nothing is staged."""
+    (tmp_path / "docs" / "knowledge").mkdir(parents=True)
+    (tmp_path / "docs" / "knowledge" / "01_topic.md").write_text(
+        "---\npurpose: topic\nlast_human_reviewed: 2026-01-01\ncovers: []\n---\n",
+        encoding="utf-8",
+    )
+    p = subprocess.run(
+        [sys.executable, "-I", str(SCRIPTS / "check_doc_drift.py"), "--json"],
+        cwd=tmp_path, capture_output=True, text=True, timeout=120,
+    )
+    assert p.returncode == 0  # JSON mode reports findings without changing its stable rc.
+    assert json.loads(p.stdout)["staged_read_error"]
+    gate = subprocess.run(
+        [sys.executable, "-I", str(SCRIPTS / "check_doc_drift.py")],
+        cwd=tmp_path, capture_output=True, text=True, timeout=120,
+    )
+    assert gate.returncode == 1
+    assert "STAGED READ ERROR" in gate.stdout
 
 
 def test_doc_drift_asserts_catch_renamed_and_missing(tmp_path) -> None:
@@ -7293,6 +7722,45 @@ def test_context_report_budget_names_oversize_knowledge_doc() -> None:
     assert kdocs, "no per-doc knowledge budget row emitted"
     assert all(r["status"] == "warn" for r in kdocs)
     assert all("docs/knowledge/" in r["item"] for r in kdocs)
+
+
+def test_context_report_budget_enumerates_all_knowledge_docs(tmp_path) -> None:
+    """Budget rows must not inherit the top-ten contributor display cap."""
+    if not (SCRIPTS / "context_report.py").exists():
+        return
+    knowledge = tmp_path / "docs" / "knowledge"
+    knowledge.mkdir(parents=True)
+    expected = set()
+    for i in range(12):
+        name = f"{i:02d}_topic.md"
+        expected.add(f"knowledge_doc:docs/knowledge/{name}")
+        (knowledge / name).write_text("x" * (100 + i), encoding="utf-8")
+    (knowledge / "_template.md").write_text("x" * 500, encoding="utf-8")
+    p = subprocess.run(
+        [sys.executable, "-I", str(SCRIPTS / "context_report.py"),
+         "--root", str(tmp_path), "--budget", "--json"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env=dict(os.environ, SUBSTRATE_KNOWLEDGE_DOC_TOKENS="1"),
+    )
+    assert p.returncode == 0, p.stderr
+    rows = json.loads(p.stdout)["budget"]
+    actual_rows = [r for r in rows if r["item"].startswith("knowledge_doc:")]
+    assert {r["item"] for r in actual_rows} == expected
+    actual_order = [(r["est_tokens"], r["item"]) for r in actual_rows]
+    assert actual_order == sorted(
+        actual_order, key=lambda row: (-row[0], row[1])
+    )
+    human = subprocess.run(
+        [sys.executable, "-I", str(SCRIPTS / "context_report.py"),
+         "--root", str(tmp_path), "--budget"],
+        capture_output=True, text=True, timeout=120,
+        env=dict(os.environ, SUBSTRATE_KNOWLEDGE_DOC_TOKENS="1"),
+    )
+    assert human.returncode == 0, human.stderr
+    for item in expected:
+        assert item in human.stdout
 
 
 def test_doc_drift_doc_committed_with_code_is_not_stale(monkeypatch) -> None:

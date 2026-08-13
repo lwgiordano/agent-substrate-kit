@@ -1,6 +1,6 @@
 # Substrate Knowledge Boundaries and Integration Hardening
 
-**Status:** Approved design; implementation pending operator review of this file
+**Status:** Approved design; implemented in v3.8.32
 
 **Date:** 2026-07-30
 
@@ -167,8 +167,9 @@ documentation. Consumer installation remains intentionally compact:
 
 Tests must distinguish these two modes explicitly. A source checkout must contain
 and validate all eight documents. A freshly bootstrapped disposable consumer must
-contain only the generated `00_substrate.md` unless the consumer already owns
-additional knowledge docs.
+contain the generated `00_substrate.md` and installed `_template.md`, but none of
+the seven source siblings, unless the consumer already owns additional knowledge
+docs.
 
 ## Integration Changes
 
@@ -219,10 +220,26 @@ test validates the same discovery rule used by the production scanner.
 ### Agent-plan surface governance
 
 The canonical substrate inventory adds `docs/superpowers/**/*.md` to context
-scanning. `docs/superpowers` becomes an optional-owned directory: source repos
-and projects that use the workflow require CODEOWNER coverage, while consumer
-repos that do not create the directory remain valid. The audit-trigger paths
-continue to derive from that inventory.
+scanning. `docs/superpowers` becomes governed when present: source repos and
+projects that use the workflow require CODEOWNER coverage, while consumer repos
+that do not create the directory remain valid. The audit-trigger paths
+continue to derive from that inventory. This governed project context is a
+separate inventory class from substrate-owned optional directories, so plans do
+not enter the install drift baseline.
+
+The same mixed-ownership rule applies to `docs/knowledge`: the directory is
+governed recursively, while only generated `00_substrate.md` and the installed
+`_template.md` are substrate-owned. Project knowledge siblings never enter
+provenance or block an upgrade after ordinary edits.
+
+A pre-v3.8.32 target engine cannot know this future migration. The one-time
+boundary crossing therefore runs the verified new kit's engine with the old
+consumer as `--root`; operator docs and a regression pin that temporal ordering.
+Normal target-local upgrades resume after v3.8.32 rewrites the baseline.
+The new kit's provenance writer is the ownership oracle; if it is absent or
+cannot run, migration fails before render and `--force` cannot bypass that fact.
+Its inventory must bind to the selected kit's independently loaded canonical
+`_substrate_surfaces.py`; writer fallback constants cannot authorize migration.
 
 ## Decision Record
 
@@ -270,7 +287,8 @@ Implementation is not complete until all of these are proven:
 - a randomized injection in a non-`00` knowledge sibling is blocked by the real
   scanner;
 - a randomized injection in a Superpowers execution plan is blocked by the real
-  scanner and the directory is optional-owned when present;
+  scanner, and the directory requires governance coverage when present without
+  becoming install-owned;
 - a bootstrapped consumer contains the generated compact `00_substrate.md`
   without source-only siblings.
 

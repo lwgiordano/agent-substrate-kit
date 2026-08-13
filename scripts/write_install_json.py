@@ -28,10 +28,11 @@ try:
         COVERAGE_SKIP_PARTS, OPTIONAL_DIRS, OPTIONAL_FILES, OWNED_DIRS, OWNED_FILES,
     )
 except Exception:  # fail-soft: a baseline is a safety aid, not a gate
-    OWNED_DIRS = ["scripts", "tests", ".claude", ".codex", ".agents", "docs/knowledge",
+    OWNED_DIRS = ["scripts", "tests", ".claude", ".codex", ".agents",
                   ".github/hooks", ".github/instructions", ".github/workflows"]
     OWNED_FILES = ["AGENTS.md", "CLAUDE.md", "manage.sh", "pytest.ini",
-                   ".pre-commit-config.yaml", ".substrate/config"]
+                   ".pre-commit-config.yaml", ".substrate/config",
+                   "docs/knowledge/00_substrate.md", "docs/knowledge/_template.md"]
     OPTIONAL_FILES, OPTIONAL_DIRS = [".mcp.json"], []
     COVERAGE_SKIP_PARTS = {"__pycache__", "venv", "node_modules", ".pytest_cache",
                            ".ruff_cache", ".mypy_cache"}

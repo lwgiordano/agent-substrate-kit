@@ -13,7 +13,7 @@
         "manage.sh",
         "package_release.sh"
       ],
-      "last_human_reviewed": "2026-08-09",
+      "last_human_reviewed": "2026-08-21",
       "path": "docs/knowledge/00_substrate.md",
       "purpose": "Entry point for current substrate contracts and functional knowledge."
     },
@@ -141,7 +141,7 @@
         "scripts/verify_release.py",
         "scripts/write_install_json.py"
       ],
-      "last_human_reviewed": "2026-08-09",
+      "last_human_reviewed": "2026-08-21",
       "path": "docs/knowledge/06_release_distribution.md",
       "purpose": "Release packaging, signing, manifests, and artifact verification."
     },
@@ -152,6 +152,7 @@
         "scripts/_substrate_root.py",
         "scripts/_substrate_surfaces.py",
         "scripts/_text_safety.py",
+        "scripts/bus_claims.py",
         "scripts/check_agent_harness.py",
         "scripts/check_doc_drift.py",
         "scripts/check_harness_patterns.py",

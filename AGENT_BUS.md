@@ -21,6 +21,19 @@ never interfere, both agents follow file-level turn-taking:
 5. **Coordinate here, not in code comments.** Questions, handoffs, "your turn" —
    all go in this file.
 
+### Claim leases (v3.8.35 — no more indefinite claims)
+
+- Every claim is a **lease with a TTL** (default **72h**, override with
+  `SUBSTRATE_CLAIM_TTL_HOURS`). Key each claim to ONE version token
+  (`CLAIM v3.8.36 — ...`); the reader keys on the first version after the verb.
+- **Extend before expiry** by posting `HEARTBEAT v<X>` (or a `CLAIM EXPANSION`,
+  which also refreshes the lease). Silence past the TTL means the lease is
+  **EXPIRED** and any agent may take it over by posting `RECLAIM v<X> — <why>`
+  — no operator involvement needed. `RELEASE v<X>` closes the lease.
+- **Check leases deterministically** with `./manage.sh bus` (advisory,
+  `--strict` exits 1 on expired leases, `--all` includes history). This is
+  coordination state, never a gate input.
+
 Roles (default; adjust by mutual agreement on the bus): Claude drives edits in
 the cloud container and auto-pushes each commit; Codex audits/edits locally and
 pulls-before / pushes-after each task. Either may claim any unclaimed file.

@@ -166,11 +166,24 @@ def detect(root:Path):
         staged = set()
         staged_error = str(exc)
     staged_docs={p for p in staged if p.startswith(KNOWLEDGE_DIR+'/') and p.endswith('.md')}
-    pending=[]
+    pending=[]; today=date.today()
     for code_path in sorted(staged & covered):
         for doc in cov_to_docs.get(code_path,[]):
-            if doc['path'] not in staged_docs:
-                pending.append((doc['path'], code_path, str(doc.get('last_human_reviewed',''))))
+            if doc['path'] in staged_docs:
+                continue
+            # SAME-DAY REVIEW EXEMPTION (v3.8.35). The v3.8.32 rewrite required
+            # the covering doc to be STAGED, full stop — but an unmodified doc
+            # cannot be staged, so a second same-day commit to a file covered
+            # by every doc (manage.sh) became unsatisfiable without artificial
+            # edits (the "commits never converge" class). The v3.4.1 date-only
+            # exemption was too loose the other way: a date proves nothing by
+            # itself. Reconciled: exempt only when the review date is today AND
+            # the doc's last COMMIT is today — a demonstrable same-day review,
+            # not a bare date bump on a stale doc.
+            if (_date(doc.get('last_human_reviewed','')) == today
+                    and git_file_last_modified(Path(doc['path']), cwd=root) == today):
+                continue
+            pending.append((doc['path'], code_path, str(doc.get('last_human_reviewed',''))))
     manifest=_manifest_paths(root); on_disk={d['path'] for d in docs}
     return {
       'coverage_gap':sorted(code-covered),

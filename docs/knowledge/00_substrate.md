@@ -1,6 +1,6 @@
 ---
 purpose: Entry point for current substrate contracts and functional knowledge.
-last_human_reviewed: 2026-08-09
+last_human_reviewed: 2026-08-21
 covers:
   - bootstrap.sh
   - manage.sh

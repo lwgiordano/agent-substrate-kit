@@ -7,6 +7,7 @@ covers:
   - scripts/_substrate_root.py
   - scripts/_substrate_surfaces.py
   - scripts/_text_safety.py
+  - scripts/bus_claims.py
   - scripts/check_agent_harness.py
   - scripts/check_doc_drift.py
   - scripts/check_harness_patterns.py
@@ -88,3 +89,8 @@ top ten.
 Budgets guide document shape. They do not prove relevance or accuracy. The
 source map uses one current-contract document per function, while release
 chronology remains in CHANGES and HISTORY.
+
+Bus claims are leases: `scripts/bus_claims.py` derives ACTIVE/EXPIRED/RELEASED
+deterministically from AGENT_BUS.md entries (default TTL 72h; HEARTBEAT and
+CLAIM EXPANSION refresh; an expired lease is reclaimable by any agent via
+RECLAIM). Advisory only — coordination state is never a gate input.

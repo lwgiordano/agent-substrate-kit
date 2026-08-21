@@ -1574,6 +1574,61 @@ def test_append_history_cli_validates_and_guards_off_by_one(tmp_path) -> None:
     assert "abc1234" in body and "**Knowledge:**" in body
 
 
+def _bus_repo(tmp_path, entries: str) -> Path:
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / "AGENT_BUS.md").write_text("# Bus\n\n" + entries, encoding="utf-8")
+    return tmp_path
+
+
+def test_bus_claims_lease_lifecycle(tmp_path) -> None:
+    """v3.8.35: claims are leases. Active within TTL; EXPIRED past it (and
+    --strict then exits 1); HEARTBEAT refreshes; RELEASE closes; RECLAIM
+    transfers. The motivating incident: a claim sat unstarted for 9 days with
+    no protocol-level way to take it over."""
+    if not (SCRIPTS / "bus_claims.py").exists():
+        return
+    repo = _bus_repo(tmp_path, (
+        "- [2026-08-01T00:00:00Z] **codex**: CLAIM v9.9.1 — stale, never heartbeat\n"
+        "- [2026-08-01T00:00:00Z] **codex**: CLAIM v9.9.2 — will be refreshed\n"
+        "- [2026-08-21T00:00:00Z] **codex**: HEARTBEAT v9.9.2 still working\n"
+        "- [2026-08-01T00:00:00Z] **claude**: CLAIM v9.9.3 — will be released\n"
+        "- [2026-08-02T00:00:00Z] **claude**: RELEASE v9.9.3 done\n"
+        "- [2026-08-01T00:00:00Z] **codex**: CLAIM v9.9.4 — will be reclaimed\n"
+        "- [2026-08-20T00:00:00Z] **claude**: RECLAIM v9.9.4 — lease expired\n"))
+    env = dict(os.environ, SUBSTRATE_CLAIM_TTL_HOURS="87600")  # 10y: nothing expires
+    p = subprocess.run([sys.executable, "-I", str(SCRIPTS / "bus_claims.py"), "--all"],
+                       cwd=repo, capture_output=True, text=True, timeout=60, env=env)
+    assert p.returncode == 0, p.stderr[-300:]
+    out = p.stdout
+    assert re.search(r"ACTIVE\s+v9\.9\.1\s+codex", out)
+    assert re.search(r"ACTIVE\s+v9\.9\.2\s+codex", out)
+    assert re.search(r"RELEASED\s+v9\.9\.3", out)
+    assert re.search(r"ACTIVE\s+v9\.9\.4\s+claude", out), "RECLAIM must transfer the lease"
+    # tiny TTL: the un-heartbeat claims expire; --strict surfaces rc 1
+    env["SUBSTRATE_CLAIM_TTL_HOURS"] = "0.001"
+    p = subprocess.run([sys.executable, "-I", str(SCRIPTS / "bus_claims.py"), "--strict"],
+                       cwd=repo, capture_output=True, text=True, timeout=60, env=env)
+    assert p.returncode == 1 and "EXPIRED" in p.stdout, (p.returncode, p.stdout[-300:])
+
+
+def test_bus_claims_is_advisory_and_fails_open(tmp_path) -> None:
+    """Missing bus file, malformed lines, and garbage TTL must all report
+    cleanly with rc 0 — a coordination reader is never a gate."""
+    if not (SCRIPTS / "bus_claims.py").exists():
+        return
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    p = subprocess.run([sys.executable, "-I", str(SCRIPTS / "bus_claims.py")],
+                       cwd=tmp_path, capture_output=True, text=True, timeout=60)
+    assert p.returncode == 0 and "no AGENT_BUS.md" in p.stdout
+    (tmp_path / "AGENT_BUS.md").write_text(
+        "# Bus\n\nnot an entry\n- [not-a-timestamp] **x**: CLAIM v1.2.3\n"
+        "- [2026-08-01T00:00:00Z] **claude**: ACK not a claim verb\n", encoding="utf-8")
+    p = subprocess.run([sys.executable, "-I", str(SCRIPTS / "bus_claims.py")],
+                       cwd=tmp_path, capture_output=True, text=True, timeout=60,
+                       env=dict(os.environ, SUBSTRATE_CLAIM_TTL_HOURS="garbage"))
+    assert p.returncode == 0 and "no open claims" in p.stdout, (p.returncode, p.stdout)
+
+
 def test_session_handoff_history_injection_neutralized(tmp_path) -> None:
     """HISTORY text is agent-authored: [SYSTEM:], zero-width smuggling, HTML
     comments, and shell-ish directives must not reach restore context."""
@@ -7703,15 +7758,44 @@ def test_doc_drift_keeps_old_covered_path_for_delete_or_rename(
 
 
 def test_doc_drift_requires_review_even_when_review_date_is_today(tmp_path) -> None:
-    """A date alone is not evidence that the doc joined this staged change."""
+    """A date alone is not evidence that the doc joined this staged change:
+    a doc whose front matter says TODAY but whose last COMMIT is older must
+    still flag (v3.8.35 refinement — the bare-date exemption was too loose,
+    but requiring a STAGED doc deadlocked same-day repeat commits, since an
+    unmodified doc cannot be staged; see the same-day exemption test)."""
     from datetime import date
 
     covered_path = "scripts/tool.py"
     repo = _staged_drift_repo(tmp_path, covered_path, date.today().isoformat())
+    # Re-commit everything with a committer/author date in the past: the doc
+    # now CLAIMS today's review but was demonstrably not committed today.
+    old = "2026-01-02T00:00:00 +0000"
+    env = dict(os.environ, GIT_COMMITTER_DATE=old, GIT_AUTHOR_DATE=old)
+    subprocess.run(["git", "commit", "-q", "--amend", "--no-edit", "--reset-author"],
+                   cwd=repo, check=True, env=env)
     (repo / covered_path).write_text("changed\n", encoding="utf-8")
     subprocess.run(["git", "add", covered_path], cwd=repo, check=True)
     pending = _drift_json(repo)["pending_stale_doc"]
     assert any(row[1] == covered_path for row in pending), pending
+
+
+def test_doc_drift_same_day_reviewed_and_committed_doc_is_not_pending(tmp_path) -> None:
+    """v3.8.35: review date TODAY + doc last COMMITTED today = a demonstrable
+    same-day review — staging covered code again the same day must NOT flag.
+    Without this, an unmodified doc cannot be staged, so a second same-day
+    commit to a file covered by every doc is unsatisfiable without artificial
+    edits (the commits-never-converge class)."""
+    if not (SCRIPTS / "check_doc_drift.py").exists():
+        return
+    from datetime import date
+
+    covered_path = "scripts/tool.py"
+    repo = _staged_drift_repo(tmp_path, covered_path, date.today().isoformat())
+    # fixture commits doc+code today with today's review date
+    (repo / covered_path).write_text("changed again\n", encoding="utf-8")
+    subprocess.run(["git", "add", covered_path], cwd=repo, check=True)
+    pending = _drift_json(repo)["pending_stale_doc"]
+    assert pending == [], pending
 
 
 def test_doc_drift_non_utf8_path_cannot_hide_normal_staged_change(tmp_path) -> None:

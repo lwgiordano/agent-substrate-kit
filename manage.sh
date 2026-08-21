@@ -287,10 +287,11 @@ case "$cmd" in
   handoff) run_py scripts/session_handoff.py capture ;;
   memory) run_py scripts/memory_log.py "$@" ;;
   reject) run_py scripts/append_rejected.py "$@" ;;
+  bus) run_py scripts/bus_claims.py "$@" ;;
   new-validator) run_py scripts/new_validator.py "$@" ;;
   design-init) mkdir -p design-system/pages design-system/tokens; echo "design-system/ scaffolded" ;;
   *) cat <<'HELP'
-Usage: ./manage.sh setup|doctor|go-live|context-report|code-shape|verify-release|upgrade|enable|security|check|evals|audit|full-audit|release|manifest|agent-system-audit|handoff|memory|reject|design-init|new-validator
+Usage: ./manage.sh setup|doctor|go-live|context-report|code-shape|verify-release|upgrade|enable|security|check|evals|audit|full-audit|release|manifest|agent-system-audit|handoff|memory|reject|bus|design-init|new-validator
   evals                                       adversarial behavior evals (block-rate / FP-rate, writes a trace)
   doctor [--quick|--security|--operational]   readiness levels
   go-live [--json]                            local/remote/deep readiness map (offline, side-effect-light)
@@ -299,6 +300,7 @@ Usage: ./manage.sh setup|doctor|go-live|context-report|code-shape|verify-release
   enable remote [--plan|--write|--check]      turn on the remote-governance tier (CODEOWNERS + trusted-base)
   memory [verify|tail|tasks]                  append-only event log
   reject --what "<X>" --why "<Y>"             log a rejected approach (injected at SessionStart so it is not re-proposed)
+  bus [--all|--strict]                        AGENT_BUS.md claim-lease report (expired leases are reclaimable)
 Config: .substrate/config (profile, language, LINT_CMD/TYPECHECK_CMD/TEST_CMD indirection)
 Substrate validators + pre-commit run from .substrate/venv (works in any language).
 HELP

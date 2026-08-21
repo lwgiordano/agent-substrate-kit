@@ -2,7 +2,7 @@
 purpose: Command policy, hooks, sandboxing, and local or remote governance.
 asserts:
   - scripts/command_policy.py::looks_dangerous_command
-last_human_reviewed: 2026-08-09
+last_human_reviewed: 2026-08-21
 covers:
   - manage.sh
   - scripts/_substrate_config.sh
@@ -81,3 +81,11 @@ mappings and the doctor's fail-safe fallback.
 Dependency cooldown and security scanner tiers are explicit. Offline or missing
 backend states report skipped or unavailable instead of false success, and a
 required tier blocks when its evidence cannot be produced.
+
+Frozen `.substrate/required_*` locks fail closed at every reader: an absent
+lock means no lock was pinned, but a present lock that is unreadable or holds
+an out-of-domain value fails the config gate, and the exfil guard treats an
+unreadable sandbox lock as containment-required. Permission flips are not
+content drift, so unreadable must never be cheaper than a governed edit. An
+absent `.substrate/config` does not bypass the locks either — every pinned
+minimum above a default fails the gate rather than vanishing with the file.

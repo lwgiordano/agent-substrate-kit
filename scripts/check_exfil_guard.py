@@ -59,11 +59,28 @@ def _root() -> Path:
 
 def _sandbox_required(root: Path) -> bool:
     """Containment is a REQUIRED minimum (so an UNCONTAINED Bash command must be
-    blocked) when .substrate/required_sandbox=1 or SUBSTRATE_SANDBOX="1" in config."""
+    blocked) when .substrate/required_sandbox=1 or SUBSTRATE_SANDBOX="1" in config.
+
+    v3.8.33: the LOCK read fails CLOSED. The old single try/except returned
+    False on ANY error, so a present-but-unreadable required_sandbox=1 (chmod —
+    not content drift, so the freeze never sees it) silently allowed uncontained
+    Bash. A lock that EXISTS but cannot be read, or holds a value outside
+    {'0','1'}, now counts as REQUIRED. Config stays best-effort: it is the
+    agent-writable OPT-IN surface, not the authority — an unreadable config
+    simply fails to opt in."""
     rs = root / ".substrate" / "required_sandbox"
-    try:
-        if rs.is_file() and rs.read_text(encoding="utf-8").strip() == "1":
+    if rs.is_file():
+        try:
+            val = rs.read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeDecodeError):
+            # present but unreadable/undecodable: treat as tampering, require
+            # containment. UnicodeDecodeError matters: it is a ValueError, so a
+            # bare OSError catch would CRASH (exit 1) on garbage bytes — and hook
+            # exit 1 is a non-blocking error, i.e. the tool RUNS (audit finding).
             return True
+        if val == "1" or val not in {"0", "1"}:
+            return True  # garbage in a present lock also fails closed
+    try:
         cfg = root / ".substrate" / "config"
         if cfg.is_file():
             for ln in cfg.read_text(encoding="utf-8", errors="replace").splitlines():

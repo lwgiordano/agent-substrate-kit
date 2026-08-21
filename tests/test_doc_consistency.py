@@ -10,6 +10,7 @@ is skipped (no bootstrap.sh) inside an installed repo.
 from __future__ import annotations
 
 import re
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -128,7 +129,11 @@ def test_source_knowledge_is_functionally_partitioned() -> None:
     for name, path in docs.items():
         front_matter = _front_matter(path)
         assert front_matter.get("purpose") == KNOWLEDGE_DOCS[name]
-        assert front_matter.get("last_human_reviewed") == "2026-08-09"
+        # v3.8.33: a VALID review date on/after the split, not a pinned one —
+        # last_human_reviewed exists precisely to be bumped at each review, so
+        # equality with a frozen date made every legitimate review a test failure.
+        reviewed = date.fromisoformat(str(front_matter.get("last_human_reviewed")))
+        assert reviewed >= date(2026, 8, 9), (name, reviewed)
         purposes.add(str(front_matter.get("purpose")))
         covers.update(str(item) for item in front_matter.get("covers", []))
         for assertion in front_matter.get("asserts", []):

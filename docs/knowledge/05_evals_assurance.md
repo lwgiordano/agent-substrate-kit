@@ -1,6 +1,6 @@
 ---
 purpose: Behavioral evals, deterministic validators, audits, and assurance limits.
-last_human_reviewed: 2026-08-09
+last_human_reviewed: 2026-08-21
 covers:
   - manage.sh
   - extras/calibrate_diy_ultrareview.py

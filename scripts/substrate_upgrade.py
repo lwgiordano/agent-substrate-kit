@@ -729,31 +729,46 @@ def _read_cfg_profile(root: Path) -> str:
     return _parse_config(root).get("SUBSTRATE_PROFILE", "standard")
 
 
-def _read_required_profile(root: Path) -> str:
+def _read_lock_or_refuse(root: Path, name: str, allowed: set, absent: str) -> str:
+    """Read a frozen `.substrate/<name>` lock for render authority (v3.8.33).
+
+    ABSENT file → `absent` (no lock was ever pinned). PRESENT but unreadable or
+    holding a value outside `allowed` → REFUSE THE UPGRADE. The old readers
+    fell back to the LOWEST tier on any error, so an unreadable lock let the
+    render silently drop a required tier — the same 'trust anchor may not fail
+    open' class as v3.8.25. SystemExit surfaces as a nonzero refusal."""
+    p = root / ".substrate" / name
+    if not p.is_file():
+        return absent
     try:
-        v = (root / ".substrate" / "required_profile").read_text(encoding="utf-8").strip()
-        return v if v in _PROF_RANK else "starter"
-    except Exception:
-        return "starter"
+        v = p.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError) as e:
+        raise SystemExit(
+            f"substrate-upgrade: refusing — .substrate/{name} exists but is unreadable "
+            f"({e.__class__.__name__}); an unreadable lock must not lower the render "
+            f"authority. Fix its permissions and re-run.")
+    if v not in allowed:
+        raise SystemExit(
+            f"substrate-upgrade: refusing — .substrate/{name} holds invalid value "
+            f"{v[:40]!r} (allowed: {sorted(allowed)}); fix the lock and re-run.")
+    return v
+
+
+def _read_required_profile(root: Path) -> str:
+    return _read_lock_or_refuse(root, "required_profile", set(_PROF_RANK), "starter")
 
 
 def _read_required_remote_governance(root: Path) -> str:
     """The frozen remote-governance lock. "1" means the repo REQUIRES remote
     governance (the trusted-base workflow), so the render must never turn it off
     regardless of what the agent-writable install.json/config claims (v3.8.7)."""
-    try:
-        return (root / ".substrate" / "required_remote_governance").read_text(encoding="utf-8").strip()
-    except Exception:
-        return ""
+    return _read_lock_or_refuse(root, "required_remote_governance", {"0", "1"}, "")
 
 
 def _read_required_sandbox(root: Path) -> str:
     """The frozen egress-containment lock. "1" means the repo REQUIRES the sandbox,
     so the render must never turn it off regardless of provenance/config (v3.8.8)."""
-    try:
-        return (root / ".substrate" / "required_sandbox").read_text(encoding="utf-8").strip()
-    except Exception:
-        return ""
+    return _read_lock_or_refuse(root, "required_sandbox", {"0", "1"}, "")
 
 
 def _authority_snapshot(root: Path) -> dict:

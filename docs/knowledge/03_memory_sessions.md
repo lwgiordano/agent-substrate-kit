@@ -6,7 +6,7 @@ asserts:
   - scripts/_doc_common.py::locked_atomic_append
   - scripts/session_handoff.py::_safe_history_line
   - scripts/session_handoff.py::_rejected_block
-last_human_reviewed: 2026-08-09
+last_human_reviewed: 2026-08-21
 covers:
   - manage.sh
   - scripts/_doc_common.py
@@ -76,3 +76,9 @@ The completion gate is opt-in. It compares the current repository state with the
 session-start baseline and checks whether a verified self-audit event occurred
 after the last project change. It warns by default; it does not turn an
 agent-authored note into proof or silently claim that unfinished work is done.
+
+The structured handoff snapshot is untracked, agent-writable state whose
+writer is not authenticated, so restore sanitizes every field at READ time
+through the same chain HISTORY and REJECTED lines use. Write-side
+sanitization alone is bypassable by forging the file; a forged snapshot
+yields neutralized labels, never verbatim directives.

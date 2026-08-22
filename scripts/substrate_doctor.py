@@ -83,15 +83,14 @@ def _dep_cooldown_days():
 def _required_remote_governance():
     """.substrate/required_remote_governance ('0'/'1' or None) — the pinned remote-
     governance minimum, frozen by the trusted-base audit. v3.6.1.
-    v3.8.33: a PRESENT lock that is unreadable or holds garbage reads as '1' —
-    doctor then reports the remote tier as required-but-unproven instead of
-    silently dropping it (fail toward requiring; the gate itself refuses in
-    check_substrate_config)."""
-    p=ROOT/'.substrate'/'required_remote_governance'
-    if not p.is_file(): return None
-    try: val=p.read_text(encoding='utf-8').strip()
-    except (OSError, UnicodeDecodeError): return '1'
-    return val if val in {'0','1'} else '1'
+    v3.8.33/36: any PRESENT-but-malformed lock (unreadable, garbage, symlink,
+    directory — the canonical reader decides) reads as '1' — doctor then reports
+    the remote tier as required-but-unproven instead of silently dropping it
+    (fail toward requiring; the gate itself refuses in check_substrate_config)."""
+    from _doc_common import read_lock as _dc_read_lock
+    state, val, _r = _dc_read_lock(ROOT/'.substrate'/'required_remote_governance', {'0','1'})
+    if state == 'absent': return None
+    return val if state == 'ok' else '1'
 def _codeowners_path():
     for loc in ('.github/CODEOWNERS','CODEOWNERS','docs/CODEOWNERS'):
         if (ROOT/loc).exists(): return ROOT/loc

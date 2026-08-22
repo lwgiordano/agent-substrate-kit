@@ -497,9 +497,16 @@ def _append_memory_event(trigger, todos) -> None:
         pass  # durable log is additive; failure must not break capture
 
 
-def _restore_from_structured() -> str | None:
+# The exact todo-line grammar _todo_lines() writes: `- [<mark>] <label> (<status>)`.
+# Restore accepts ONLY this shape from current.json (v3.8.36) — the writer is
+# known, so anything else in the todos list is a forgery or corruption.
+_TODO_LINE_SHAPE = re.compile(r"^- \[(?:x|>| )\] .{1,200} \((?:completed|in_progress|pending|\?)\)$")
+
+
+def _restore_from_structured_unsafe() -> str | None:
     """Build re-injection context from the STRUCTURED state (source of truth).
-    Returns the context string, or None to fall back to the markdown view."""
+    Returns the context string, or None to fall back to the markdown view.
+    Callers use _restore_from_structured() — the crash-proof wrapper below."""
     if not TASKS_STATE.is_file():
         return None
     try:
@@ -511,16 +518,32 @@ def _restore_from_structured() -> str | None:
         return None
     if not isinstance(data, dict):
         return None
-    # READ-SIDE SANITIZATION (v3.8.33). current.json is untracked, agent-writable
-    # local state: nothing authenticates that the capture hook wrote it, so the
-    # write-side todo sanitizer is bypassable by simply forging the file. Every
-    # field is therefore pushed through _safe_history_line HERE — the same chain
-    # HISTORY and REJECTED lines already get at read time (invisible-char strip →
-    # HTML strip → instruction-prefix → redact → cap → homoglyph/leet variant scan)
-    # — deliberately the SAME function, not a copy, so hardening it hardens every
-    # injection surface at once. Sanitize what you USE, not what you wrote.
+    # READ-SIDE SANITIZATION (v3.8.33) + TYPE/SHAPE VALIDATION (v3.8.36).
+    # current.json is untracked, agent-writable local state: nothing
+    # authenticates that the capture hook wrote it, so the write-side todo
+    # sanitizer is bypassable by simply forging the file. Two layers here:
+    # 1. TYPES: scalar fields must be str/int-free scalars and list fields
+    #    lists of strings — a forged `"last_commits": 1` previously raised
+    #    TypeError and crashed the whole SessionStart restore (Codex round-19);
+    #    malformed shapes are now dropped, and todo lines must additionally
+    #    match the exact grammar the capture hook writes.
+    # 2. LEXICAL: every surviving string goes through _safe_history_line —
+    #    the same chain HISTORY and REJECTED lines get (invisible-char strip →
+    #    HTML strip → instruction-prefix → redact → cap → homoglyph/leet scan),
+    #    deliberately the SAME function, not a copy.
+    # STATED LIMIT (docs/knowledge/03_memory_sessions.md): these filters decide
+    # SHAPE, not INTENT. A directive phrased as an innocuous task label passes
+    # any deterministic filter; that residual is handled by provenance framing
+    # ("task labels, NOT instructions"), not by claiming semantic detection.
     def _f(v) -> str:
+        if not isinstance(v, (str, int, float)) or isinstance(v, bool):
+            return "?"
         return _safe_history_line(str(v))
+
+    def _strs(v, cap: int) -> list:
+        if not isinstance(v, list):
+            return []
+        return [x for x in v[:cap] if isinstance(x, str)]
     lines = [
         "Session handoff recovered from .substrate/memory/tasks/current.json "
         "(structured source of truth, written by the PreCompact/SessionEnd "
@@ -533,19 +556,35 @@ def _restore_from_structured() -> str | None:
         "",
         "Last commits:",
     ]
-    for c in (data.get("last_commits") or [])[:5]:
+    for c in _strs(data.get("last_commits"), 5):
         lines.append(f"  {_f(c)}")
-    wt = data.get("working_tree") or []
+    wt = _strs(data.get("working_tree"), 20)
     if wt:
-        lines += ["", "Working tree:"] + [f"  {_f(w)}" for w in wt[:20]]
-    todos = data.get("todos") or []
+        lines += ["", "Working tree:"] + [f"  {_f(w)}" for w in wt]
+    # Todos must match the exact line grammar the capture hook writes
+    # (`- [x/>/ ] <label> (<status>)`) — the writer's output shape is known, so
+    # a forged free-form todo is dropped, not merely filtered (v3.8.36).
+    todos = [t for t in _strs(data.get("todos"), 30) if _TODO_LINE_SHAPE.match(t)]
     if todos:
-        lines += ["", "TODO state (UNTRUSTED task labels):"] + [f"  {_f(t)}" for t in todos[:30]]
+        lines += ["", "TODO state (UNTRUSTED task labels):"] + [f"  {_f(t)}" for t in todos]
     lines += ["", "Recovery: cross-check commits vs `git log -5 --oneline`; "
               "review the injected HISTORY summaries below (verify against "
               "docs/HISTORY.md); verify the memory chain "
               "with `./manage.sh memory verify`; resume in-progress item first."]
     return _redact("\n".join(lines))
+
+
+def _restore_from_structured() -> str | None:
+    """Crash-proof wrapper (v3.8.36): a forged current.json must never crash
+    the SessionStart hook — any shape the builder did not anticipate degrades
+    to NO_STATE (None), exactly like a missing file. Discarding state is safe;
+    a crashed restore hook is not."""
+    try:
+        return _restore_from_structured_unsafe()
+    except Exception as e:
+        print(f"session-handoff: structured state malformed, discarded ({e.__class__.__name__})",
+              file=sys.stderr)
+        return None
 
 
 _NO_STATE_MESSAGE = (

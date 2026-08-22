@@ -14,7 +14,7 @@ is the system-level view that connects them.
 | Knowledge layer | `docs/knowledge/`, `scripts/check_doc_drift.py`, `scripts/context_report.py` | Functional contract docs with coverage, declarative `asserts`, review dates, and warn-only size budgets |
 | Policy | `scripts/command_policy.py`, `scripts/harness_patterns.json` | Single shared detection source used by both the Bash hook and the config-value validator |
 | Evals | `scripts/run_substrate_evals.py` | Behavioral proof: malicious tasks must be blocked, benign tasks must pass, in kit and installed layouts |
-| Release / upgrade | `package_release.sh`, `release_gate.sh`, `scripts/substrate_upgrade.py` | Signed artifact, gate re-run from the built artifact, verified in-place upgrade with ownership migration |
+| Release / upgrade | `package_release.sh`, `scripts/release_gate.sh`, `scripts/substrate_upgrade.py` | Artifact packaged (signed when a maintainer key is present, else honestly unsigned), gate re-run from the built artifact, verified in-place upgrade with ownership migration |
 | Coordination | `AGENT_BUS.md`, `docs/HISTORY.md`, `docs/REJECTED.md` | Append-only, git-carried records for multi-agent claims, history, and rejected designs |
 
 ## Data flow
@@ -29,8 +29,13 @@ is the system-level view that connects them.
    appends a hash-chained memory event.
 4. **Commit**: pre-commit runs the full gate chain; commits that fail any
    deterministic check do not land.
-5. **Release**: the artifact is packaged, signed, and the gates re-run from
-   the built artifact before a release is claimed.
+5. **Release**: the artifact is packaged and the gates re-run from the built
+   artifact before a release is claimed. Signing is CONDITIONAL — with a
+   maintainer key (`SUBSTRATE_RELEASE_SECKEY` + minisign) the artifact is
+   signed and self-verified against the committed trust pubkey, and a claimed
+   signature that fails that check aborts the build; without a key the package
+   is honestly reported as UNSIGNED rather than blocked. Signature is the
+   consumer's authenticity anchor at upgrade time, not a packaging gate.
 
 ## Trust boundaries
 
@@ -83,12 +88,20 @@ a substrate feature.
 | Bash pre-execution guard | yes (PreToolUse, exit 2 blocks) | yes (PreToolUse via hooks.json, trusted-hash gated) | yes (preToolUse → permissionDecision via adapter) | no hook API — instructions only |
 | Lint on every write | yes (PostToolUse Edit/Write) | no (edits arrive as patches; run `./manage.sh check`) | no | no |
 | Todo-state mirror | yes (PostToolUse TodoWrite) | no | no | no |
-| Session capture/restore | yes (PreCompact/SessionEnd/SessionStart) | SessionStart only | no | no |
-| Completion nudge (Stop) | yes (opt-in gate) | Stop event available | no | no |
+| Session capture/restore | yes (SessionStart restore + PreCompact/SessionEnd capture) | yes (SessionStart restore + Stop capture, via hooks.json) | yes (sessionStart restore + sessionEnd capture, via .github/hooks/exfil-guard.json) | no |
+| Completion nudge (Stop) | yes (opt-in gate) | Stop wired to capture (no completion-gate nudge) | no | no |
 | Non-Bash tools (Read/Edit/MCP/web) | host permission rules, not substrate hooks | host approval model | host approval model | host model |
+
+Row source of truth: the host hook-config files themselves —
+`.claude/settings.json`, `.codex/hooks.json` (SessionStart, PreToolUse, Stop),
+and `.github/hooks/exfil-guard.json` (sessionStart, sessionEnd, preToolUse).
+Codex and Copilot capture/restore the SAME session_handoff.py state Claude
+does; what Claude alone has is per-edit lint/todo hooks and the opt-in
+completion-gate nudge. This table is drift-checked against those configs.
 
 Consequences the substrate accepts and documents rather than papers over:
 non-Bash tool calls are not command-policy-mediated on any host; Codex and
-Copilot sessions must rely on the gate chain (commit-time) where Claude has
-per-edit hooks; and an unknown host gets fail-closed treatment wherever a
-proof is host-bound (containment proofs do not transfer between hosts).
+Copilot lack the per-EDIT lint/todo hooks Claude has and must rely on the gate
+chain (commit-time) for that coverage; and an unknown host gets fail-closed
+treatment wherever a proof is host-bound (containment proofs do not transfer
+between hosts).

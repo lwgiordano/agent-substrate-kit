@@ -296,6 +296,57 @@ def repo_root(start: Path | None = None) -> Path:
     return Path(out).resolve() if out else base
 
 
+import stat as _stat
+
+
+def read_lock(path: Path, allowed: set) -> tuple:
+    """Canonical fail-closed read of a frozen `.substrate/required_*` lock
+    (v3.8.36 — the complete class fix after v3.8.33's partial sweep).
+
+    Returns (state, value, reason):
+      ("absent", None, None)  — nothing exists at the path (no lock was pinned);
+      ("ok", value, None)     — regular file, valid UTF-8, value in `allowed`;
+      ("bad", None, reason)   — PRESENT but wrong: symlink, directory/special
+                                file, unreadable, undecodable, or out-of-domain
+                                value. Callers MUST fail closed on "bad".
+
+    Properties every reader must share (Codex round-19 findings):
+    - O_NOFOLLOW open + fstat S_ISREG: a SYMLINKED lock is "bad", never read
+      through (is_file() follows links, so a link to attacker-controlled '0'
+      lowered the containment floor), and a DIRECTORY lock is "bad", never
+      "absent" (is_file() on a dir is False — reading intent from the wrong
+      stat predicate turned malformed into missing).
+    - bytes + explicit UTF-8 decode: undecodable content is "bad" — a
+      UnicodeDecodeError must neither crash the caller nor vanish into a
+      bare `except OSError`.
+    """
+    try:
+        fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError as e:
+        if e.errno in (errno.ENOENT, errno.ENOTDIR):
+            return ("absent", None, None)
+        if e.errno == errno.ELOOP:
+            return ("bad", None, "lock is a symlink — refusing to follow it")
+        return ("bad", None, f"unreadable ({e.__class__.__name__})")
+    try:
+        st = os.fstat(fd)
+        if not _stat.S_ISREG(st.st_mode):
+            return ("bad", None, "lock is not a regular file (directory/special)")
+        try:
+            raw = os.read(fd, 4096)
+        except OSError as e:
+            return ("bad", None, f"unreadable ({e.__class__.__name__})")
+    finally:
+        os.close(fd)
+    try:
+        val = raw.decode("utf-8").strip()
+    except UnicodeDecodeError:
+        return ("bad", None, "lock is not valid UTF-8")
+    if val not in allowed:
+        return ("bad", None, f"invalid value {val[:40]!r} (allowed: {sorted(allowed)})")
+    return ("ok", val, None)
+
+
 def locked_atomic_append(target: Path, entry: str, header: str, tmp_prefix: str) -> None:
     """Append `entry` to `target`, SERIALIZED against concurrent appenders.
 

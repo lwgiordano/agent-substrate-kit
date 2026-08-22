@@ -48,7 +48,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 #   shasum -a 256 scripts/command_policy.py scripts/check_agent_harness.py
 # (identical on every Python — see the module docstring on why raw bytes, not AST).
 MODULE_SOURCE_SHA256 = {
-    "command_policy.py": "b7fdfb1d45284d8fc354acc9e1f5db1f0be4e91a7f53f3facb3c20a99302cb4b",
+    "command_policy.py": "195217a4aa3f0e76f5645bce3fd3bdc74cb2b135bfa2b172f168eee7b56bc72d",
     "check_agent_harness.py": "de54ebbd60f33dec211dcd2c4e1c090e53a8ee6fab33a063fe59560ccebed1bb",
 }
 

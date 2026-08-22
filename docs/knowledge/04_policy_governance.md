@@ -2,7 +2,7 @@
 purpose: Command policy, hooks, sandboxing, and local or remote governance.
 asserts:
   - scripts/command_policy.py::looks_dangerous_command
-last_human_reviewed: 2026-08-21
+last_human_reviewed: 2026-08-22
 covers:
   - manage.sh
   - scripts/_substrate_config.sh

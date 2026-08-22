@@ -33,6 +33,9 @@ import types
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _doc_common import read_lock as _dc_read_lock  # noqa: E402
+
 
 def _load_verify(root: Path | None = None):
     """Import the multi-backend verifier LAZILY, only when a source is actually being verified
@@ -736,22 +739,19 @@ def _read_lock_or_refuse(root: Path, name: str, allowed: set, absent: str) -> st
     holding a value outside `allowed` → REFUSE THE UPGRADE. The old readers
     fell back to the LOWEST tier on any error, so an unreadable lock let the
     render silently drop a required tier — the same 'trust anchor may not fail
-    open' class as v3.8.25. SystemExit surfaces as a nonzero refusal."""
-    p = root / ".substrate" / name
-    if not p.is_file():
+    open' class as v3.8.25. SystemExit surfaces as a nonzero refusal.
+
+    v3.8.36: delegates to the canonical reader — is_file() treated a DIRECTORY
+    lock as absent (Codex reproduced a --plan run sailing past a
+    required_sandbox/ directory) and followed symlinked locks; both now refuse."""
+    state, val, reason = _dc_read_lock(root / ".substrate" / name, allowed)
+    if state == "absent":
         return absent
-    try:
-        v = p.read_text(encoding="utf-8").strip()
-    except (OSError, UnicodeDecodeError) as e:
+    if state == "bad":
         raise SystemExit(
-            f"substrate-upgrade: refusing — .substrate/{name} exists but is unreadable "
-            f"({e.__class__.__name__}); an unreadable lock must not lower the render "
-            f"authority. Fix its permissions and re-run.")
-    if v not in allowed:
-        raise SystemExit(
-            f"substrate-upgrade: refusing — .substrate/{name} holds invalid value "
-            f"{v[:40]!r} (allowed: {sorted(allowed)}); fix the lock and re-run.")
-    return v
+            f"substrate-upgrade: refusing — .substrate/{name}: {reason}; a malformed "
+            f"lock must not lower the render authority. Fix the lock and re-run.")
+    return val
 
 
 def _read_required_profile(root: Path) -> str:
@@ -777,6 +777,21 @@ def _authority_snapshot(root: Path) -> dict:
     (_resolve_kit can be slow / involve verification), so re-comparing this snapshot
     just before the write catches a lock/config change mid-run that would otherwise
     render a stale, inconsistent state (v3.8.10 / P1 TOCTOU)."""
+    # v3.8.36: VALIDATE the locks before snapshotting them (Codex round-19 —
+    # the render answers derive from these bytes, and the refusing readers were
+    # never on this path, so a directory/symlink/undecodable lock sailed into
+    # `--plan`/render as "no lock"). A "bad" lock state refuses the upgrade
+    # here, before any derivation; the byte snapshot below is unchanged and
+    # still backs the pre-write TOCTOU re-compare.
+    _lock_domains = {"required_profile": set(_PROF_RANK),
+                     "required_remote_governance": {"0", "1"},
+                     "required_sandbox": {"0", "1"}}
+    for rel, dom in _lock_domains.items():
+        state, _v, reason = _dc_read_lock(root / ".substrate" / rel, dom)
+        if state == "bad":
+            raise SystemExit(
+                f"substrate-upgrade: refusing — .substrate/{rel}: {reason}; a malformed "
+                f"lock must not enter the render authority. Fix the lock and re-run.")
     snap = {}
     for rel in ("config", "required_profile", "required_remote_governance", "required_sandbox"):
         try:
@@ -858,6 +873,20 @@ def main(argv=None) -> int:
     ap.add_argument("--profile", choices=["standard", "strict"],
                     help="RAISE the governance profile during the upgrade (raise-only)")
     a = ap.parse_args(argv)
+    try:
+        return _main_after_args(a)
+    except SystemExit as e:
+        # v3.8.36: the fail-closed lock readers signal refusal via SystemExit;
+        # at the CLI boundary that is exit code 2, never an uncaught traceback,
+        # even when a lock is truncated mid-run (TOCTOU) so the refusal fires
+        # from a later _authority_snapshot rather than the first read.
+        if isinstance(e.code, int):
+            return e.code
+        print(str(e.code), file=sys.stderr)
+        return 2
+
+
+def _main_after_args(a) -> int:
     root = Path(a.root).resolve()
     src = Path(a.src).resolve()
     if not src.exists():

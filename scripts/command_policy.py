@@ -23,8 +23,11 @@ Stdlib only.
 """
 from __future__ import annotations
 
+import errno
+import os
 import re
 import shlex
+import stat
 from pathlib import Path
 
 import sys as _sys
@@ -191,15 +194,40 @@ def profile() -> str:
                 break
     # PROFILE LOCK: never run BELOW the pinned minimum, even at the runtime hook
     # boundary (before the gate runs). A downgraded config can't disable strict.
+    # v3.8.36 FAIL CLOSED (Codex round-19): the old read ignored the lock on ANY
+    # error, so undecodable bytes in required_profile silently downgraded the
+    # live hook policy to the config value. A lock that is PRESENT but is a
+    # symlink, a non-regular file, unreadable, undecodable, or out-of-domain now
+    # raises CommandPolicyUnavailable so the hook BLOCKS. Inline (not shared
+    # _doc_common.read_lock): this module is AST-pinned and dependency-light —
+    # the semantics are the same contract by construction, covered by tests.
     req = _ROOT / ".substrate" / "required_profile"
-    if req.exists():
-        try:
-            r = req.read_text(encoding="utf-8").strip()
-        except Exception:
-            r = ""
-        order = {"starter": 0, "standard": 1, "strict": 2}
-        if r in order and order[r] > order.get(configured, 0):
-            return r
+    order = {"starter": 0, "standard": 1, "strict": 2}
+    try:
+        fd = os.open(str(req), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError as e:
+        if e.errno in (errno.ENOENT, errno.ENOTDIR):
+            return configured  # genuinely absent — no lock was pinned
+        raise CommandPolicyUnavailable(
+            f"required_profile lock unreadable ({e.__class__.__name__}) — failing closed")
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise CommandPolicyUnavailable(
+                "required_profile lock is not a regular file — failing closed")
+        raw = os.read(fd, 4096)
+    finally:
+        os.close(fd)
+    try:
+        r = raw.decode("utf-8").strip()
+    except UnicodeDecodeError:
+        raise CommandPolicyUnavailable(
+            "required_profile lock is not valid UTF-8 — failing closed") from None
+    if r not in order:
+        raise CommandPolicyUnavailable(
+            f"required_profile lock holds invalid value {r[:40]!r} — failing closed")
+    if order[r] > order.get(configured, 0):
+        return r
     return configured
 
 

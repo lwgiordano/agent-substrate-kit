@@ -34,6 +34,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _doc_common import read_lock as _dc_read_lock  # noqa: E402
 try:
     from _substrate_root import substrate_root as _sr
     _DEFAULT_ROOT = _sr()
@@ -64,11 +65,15 @@ def _cfg(root: Path, key: str, default: str = "0") -> str:
 def _required(root: Path, argv) -> bool:
     if "--require" in argv:
         return True
-    p = root / ".substrate" / "required_security_scanners"
-    try:
-        return p.is_file() and p.read_text(encoding="utf-8").strip() == "1"
-    except OSError:
-        return False
+    # v3.8.36: canonical fail-closed lock read (Codex round-19) — the old
+    # `except OSError` both failed OPEN on I/O errors and CRASHED on
+    # undecodable bytes (UnicodeDecodeError is a ValueError). A malformed
+    # present lock now means the tier IS required.
+    state, val, _reason = _dc_read_lock(
+        root / ".substrate" / "required_security_scanners", {"0", "1"})
+    if state == "bad":
+        return True
+    return state == "ok" and val == "1"
 
 
 def _run_scanner(cmd, root: Path) -> tuple[int, str]:

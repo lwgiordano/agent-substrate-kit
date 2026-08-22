@@ -63,51 +63,112 @@ def _parse_ts(raw: str) -> datetime | None:
         return None
 
 
-def parse_claims(text: str, now: datetime) -> list[dict]:
-    """Chronological state machine over bus entries -> list of claim states."""
-    keyed: dict[str, dict] = {}
-    unkeyed: list[dict] = []
-    for line in text.splitlines():
+def read_bus_tail(bus: Path) -> str:
+    """Last _BUS_MAX_READ bytes of the bus. v3.8.36 (Codex round-19): the bus
+    is APPEND-ONLY, so the newest — authoritative — state lives at the BOTTOM;
+    the old head-slice (`read_text()[:N]`) kept the OLDEST bytes and reported
+    a long-released lease as ACTIVE once the file outgrew the bound. A partial
+    first line after seeking is dropped."""
+    with bus.open("rb") as fh:
+        fh.seek(0, 2)
+        size = fh.tell()
+        start = max(0, size - _BUS_MAX_READ)
+        fh.seek(start)
+        raw = fh.read()
+    text = raw.decode("utf-8", errors="replace")
+    if start > 0:
+        nl = text.find("\n")
+        text = text[nl + 1:] if nl >= 0 else ""
+    return text
+
+
+def _expired_at(lease: dict, ts: datetime, ttl: timedelta) -> bool:
+    return ts - lease["since"] > ttl
+
+
+def parse_claims(text: str, now: datetime) -> tuple[list[dict], list[str]]:
+    """Chronological state machine over bus entries.
+
+    Returns (claims, violations). v3.8.36 corrections (Codex round-19):
+    - Events are SORTED BY TIMESTAMP (file order only as tie-break) before
+      folding: the bus is merge=union, so physical order is not chronology —
+      a stale branch's 09:00 RELEASE merged after a 10:00 CLAIM must not roll
+      the lease backward.
+    - Transitions validate OWNER and EXPIRY: HEARTBEAT/EXPANSION refresh and
+      RELEASE close only the OWNER's lease; RECLAIM takes a lease only when
+      it is already released or EXPIRED AS OF the reclaim entry's timestamp.
+      An invalid transition changes nothing and is reported as a violation —
+      a foreign RELEASE or premature RECLAIM must not silently end a fresh
+      lease. (TTL for historical expiry checks is the configured TTL; the
+      protocol does not model TTL changes over time.)
+    """
+    events = []
+    for seq, line in enumerate(text.splitlines()):
         m = _ENTRY.match(line)
         if not m:
             continue
         ts = _parse_ts(m.group("ts"))
         if ts is None:
             continue  # malformed timestamp: not an entry this reader can use
-        agent, verb, rest = m.group("agent"), m.group("verb"), m.group("rest")
-        vm = _VERSION_NEAR_VERB.match(rest)
-        key = vm.group(1) if vm else None
+        vm = _VERSION_NEAR_VERB.match(m.group("rest"))
+        events.append((ts, seq, m.group("agent"), m.group("verb"),
+                       vm.group(1) if vm else None, m.group("rest").strip()[:80]))
+    events.sort(key=lambda e: (e[0], e[1]))
+    ttl = _ttl()
+    keyed: dict[str, dict] = {}
+    unkeyed: list[dict] = []
+    violations: list[str] = []
+    for ts, _seq, agent, verb, key, txt in events:
         if key is None:
             if verb in ("CLAIM", "RECLAIM"):
                 unkeyed.append({"key": None, "agent": agent, "since": ts,
-                                "text": rest.strip()[:80], "state": "active"})
+                                "text": txt, "state": "active"})
             elif verb == "RELEASE":
                 for c in unkeyed:  # same-agent later RELEASE closes area claims
                     if c["agent"] == agent and c["state"] == "active" and ts > c["since"]:
                         c["state"] = "released"
             continue
         cur = keyed.get(key)
-        if verb in ("CLAIM", "RECLAIM"):
+        holds = (cur is not None and cur["state"] == "active"
+                 and not _expired_at(cur, ts, ttl))
+        if verb == "CLAIM":
+            if holds and cur["agent"] != agent:
+                violations.append(f"v{key}: CLAIM by {agent} at {ts.isoformat()} ignored — "
+                                  f"{cur['agent']}'s lease is still fresh")
+                continue
             keyed[key] = {"key": key, "agent": agent, "since": ts,
-                          "text": rest.strip()[:80], "state": "active"}
+                          "text": txt, "state": "active"}
+        elif verb == "RECLAIM":
+            if holds:
+                violations.append(f"v{key}: RECLAIM by {agent} at {ts.isoformat()} ignored — "
+                                  f"{cur['agent']}'s lease is not expired (protocol: "
+                                  "reclaim only past TTL)")
+                continue
+            keyed[key] = {"key": key, "agent": agent, "since": ts,
+                          "text": txt, "state": "active"}
         elif verb in ("CLAIM EXPANSION", "HEARTBEAT"):
-            if cur is not None and cur["state"] == "active":
-                cur["since"] = ts  # refresh the lease
-            else:  # expansion without a base claim still claims
+            if holds and cur["agent"] == agent:
+                cur["since"] = ts  # refresh the OWNER's lease
+            elif holds:
+                violations.append(f"v{key}: {verb} by {agent} at {ts.isoformat()} ignored — "
+                                  f"lease belongs to {cur['agent']}")
+            else:  # expansion onto a free/expired key still claims it
                 keyed[key] = {"key": key, "agent": agent, "since": ts,
-                              "text": rest.strip()[:80], "state": "active"}
+                              "text": txt, "state": "active"}
         elif verb == "RELEASE":
-            if cur is not None:
-                cur["state"] = "released"
-            else:  # release without recorded claim — key is simply closed
+            if cur is None:
                 keyed[key] = {"key": key, "agent": agent, "since": ts,
-                              "text": rest.strip()[:80], "state": "released"}
+                              "text": txt, "state": "released"}
+            elif holds and cur["agent"] != agent:
+                violations.append(f"v{key}: RELEASE by {agent} at {ts.isoformat()} ignored — "
+                                  f"only the owner ({cur['agent']}) may release a fresh lease")
+            else:
+                cur["state"] = "released"
     out = list(keyed.values()) + unkeyed
-    ttl = _ttl()
     for c in out:
         if c["state"] == "active" and now - c["since"] > ttl:
             c["state"] = "expired"
-    return out
+    return out, violations
 
 
 def main(argv=None) -> int:
@@ -122,13 +183,15 @@ def main(argv=None) -> int:
         print("bus-claims: no AGENT_BUS.md — nothing to report.")
         return 0
     try:
-        text = bus.read_text(encoding="utf-8", errors="replace")[:_BUS_MAX_READ]
+        text = read_bus_tail(bus)
     except OSError as e:
         print(f"bus-claims: cannot read AGENT_BUS.md ({e}) — advisory reader, not failing.")
         return 0
     now = datetime.now(UTC)
-    claims = parse_claims(text, now)
+    claims, violations = parse_claims(text, now)
     ttl_h = _ttl().total_seconds() / 3600
+    for v in violations:
+        print(f"  PROTOCOL VIOLATION (ignored): {v}")
     shown = [c for c in claims if a.all or c["state"] != "released"]
     if not shown:
         print(f"bus-claims: no open claims (TTL {ttl_h:g}h).")

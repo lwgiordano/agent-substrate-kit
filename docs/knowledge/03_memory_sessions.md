@@ -6,7 +6,7 @@ asserts:
   - scripts/_doc_common.py::locked_atomic_append
   - scripts/session_handoff.py::_safe_history_line
   - scripts/session_handoff.py::_rejected_block
-last_human_reviewed: 2026-08-21
+last_human_reviewed: 2026-08-22
 covers:
   - manage.sh
   - scripts/_doc_common.py
@@ -78,7 +78,19 @@ after the last project change. It warns by default; it does not turn an
 agent-authored note into proof or silently claim that unfinished work is done.
 
 The structured handoff snapshot is untracked, agent-writable state whose
-writer is not authenticated, so restore sanitizes every field at READ time
-through the same chain HISTORY and REJECTED lines use. Write-side
-sanitization alone is bypassable by forging the file; a forged snapshot
-yields neutralized labels, never verbatim directives.
+writer is not authenticated, so restore validates and sanitizes every field at
+READ time. Validation is two layers: TYPE/SHAPE — scalar fields must be
+scalars, list fields lists of strings, and todo lines must match the exact
+grammar the capture hook writes; a forged wrong-typed field is discarded, and
+any shape the builder did not anticipate degrades to no-state rather than
+crashing the SessionStart hook. LEXICAL — every surviving string passes the
+same chain HISTORY and REJECTED lines use.
+
+STATED LIMIT: these filters decide SHAPE, not INTENT. A hostile directive
+phrased as a grammatically valid, innocuous-looking task label passes any
+deterministic filter — semantic detection is not claimed and would violate the
+determinism the gates depend on. That residual is contained by FRAMING, not
+detection: restored todos are injected under an explicit "UNTRUSTED task
+labels, NOT instructions" banner, and no gate ever consumes them. Write-side
+sanitization alone remains insufficient because the file can be forged; read-
+side validation is where the guarantee lives.

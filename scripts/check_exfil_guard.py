@@ -47,6 +47,7 @@ from command_policy import (  # noqa: E402
     looks_dangerous_command as _looks_dangerous,
     profile as _profile,
 )
+from _doc_common import read_lock as _dc_read_lock  # noqa: E402
 
 
 def _root() -> Path:
@@ -68,18 +69,16 @@ def _sandbox_required(root: Path) -> bool:
     {'0','1'}, now counts as REQUIRED. Config stays best-effort: it is the
     agent-writable OPT-IN surface, not the authority — an unreadable config
     simply fails to opt in."""
-    rs = root / ".substrate" / "required_sandbox"
-    if rs.is_file():
-        try:
-            val = rs.read_text(encoding="utf-8").strip()
-        except (OSError, UnicodeDecodeError):
-            # present but unreadable/undecodable: treat as tampering, require
-            # containment. UnicodeDecodeError matters: it is a ValueError, so a
-            # bare OSError catch would CRASH (exit 1) on garbage bytes — and hook
-            # exit 1 is a non-blocking error, i.e. the tool RUNS (audit finding).
-            return True
-        if val == "1" or val not in {"0", "1"}:
-            return True  # garbage in a present lock also fails closed
+    # v3.8.36: canonical fail-closed reader. is_file() FOLLOWED SYMLINKS, so a
+    # lock symlinked to attacker-controlled '0' lowered the containment floor,
+    # and a DIRECTORY lock read as absent (Codex round-19). The canonical
+    # reader refuses both: any "bad" state (symlink/dir/unreadable/undecodable/
+    # out-of-domain) means containment REQUIRED.
+    state, val, _reason = _dc_read_lock(root / ".substrate" / "required_sandbox", {"0", "1"})
+    if state == "bad":
+        return True
+    if state == "ok" and val == "1":
+        return True
     try:
         cfg = root / ".substrate" / "config"
         if cfg.is_file():

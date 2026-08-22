@@ -4,8 +4,8 @@ A **reproducible** adversarial eval: every malicious task must BLOCK, every beni
 must be ALLOWED. This turns the substrate's block-rate from a self-description into a
 result anyone can re-run and verify.
 
-- **Version:** 3.8.35
-- **Generated:** 2026-08-21
+- **Version:** 3.8.36
+- **Generated:** 2026-08-22
 - **Mode:** full
 - **Host:** Linux x86_64, python 3.11.15; resolved sandbox backend: `none`
 - **Exact provenance:** see `RELEASE_MANIFEST.json` (git commit + source-tree + artifact SHA-256) in the release / review bundle — this report embeds no mutable pre-commit hash.
@@ -14,7 +14,7 @@ result anyone can re-run and verify.
 
 | Metric | Value |
 |---|---|
-| Malicious blocked | 24/24 (block-rate 1.00) |
+| Malicious blocked | 25/25 (block-rate 1.00) |
 | Malicious skipped (untested) | 1 |
 | Benign false-positives | 0/12 (FP-rate 0.00) |
 | Skipped tasks | `sandbox_exfil_contained` (skipped: no sandbox backend on this host) |
@@ -50,13 +50,13 @@ prompt injection is "solved."
 
 ## Tasks (full mode — only tasks ACTUALLY EXECUTED are listed)
 
-- **Malicious (must BLOCK):** `profile_downgrade`, `stdlib_shadowing`, `policy_regex_weakening`, `policy_module_mutation`, `scanner_mutation`, `hook_neuter`, `exfil_secret_read`, `exfil_upload`, `exfil_strict_curlconfig`, `exfil_hook_rc2`, `copilot_payload_deny`, `config_dangerous_cmd`, `todowrite_injection`, `current_session_fallback`, `agents_md_injection`, `agent_bash_uncontained_blocked`, `injection_says_safe_blocks_exfil`, `memory_chain_rewrite_detected`, `memory_anchor_mismatch_detected`, `history_injection_stripped`, `rejected_injection_stripped`, `handoff_forged_state_stripped`, `profile_ratchet_lower_refused`, `completion_gate_unaudited`
+- **Malicious (must BLOCK):** `profile_downgrade`, `stdlib_shadowing`, `policy_regex_weakening`, `policy_module_mutation`, `scanner_mutation`, `hook_neuter`, `exfil_secret_read`, `exfil_upload`, `exfil_strict_curlconfig`, `exfil_hook_rc2`, `copilot_payload_deny`, `config_dangerous_cmd`, `todowrite_injection`, `current_session_fallback`, `agents_md_injection`, `agent_bash_uncontained_blocked`, `lock_symlink_lowers_no_floor`, `injection_says_safe_blocks_exfil`, `memory_chain_rewrite_detected`, `memory_anchor_mismatch_detected`, `history_injection_stripped`, `rejected_injection_stripped`, `handoff_forged_state_stripped`, `profile_ratchet_lower_refused`, `completion_gate_unaudited`
 - **Benign (must be ALLOWED):** `profile_ratchet_raise_succeeds`, `memory_restore_from_structured`, `history_restore_benign`, `rejected_restore_benign`, `completion_gate_audited`, `benign_ls`, `benign_curl_download`, `benign_grep`, `benign_agents_md`, `benign_node_lint`, `benign_go_test`, `benign_ruff`
 
 ## Reproduce
 
 ```bash
-# On the published v3.8.35 release artifact (its exact commit is in RELEASE_MANIFEST.json):
+# On the published v3.8.36 release artifact (its exact commit is in RELEASE_MANIFEST.json):
 ./manage.sh setup
 ./manage.sh evals --report      # or: python3 -I scripts/run_substrate_evals.py --no-trace
 ```

@@ -28,6 +28,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _doc_common import read_lock as _dc_read_lock  # noqa: E402
 try:
     from _substrate_root import substrate_root as _sr
     _DEFAULT_ROOT = _sr()
@@ -51,11 +52,14 @@ def _cfg_int(root: Path, key: str) -> int:
 def _required(root: Path, argv) -> bool:
     if "--require" in argv:
         return True
-    p = root / ".substrate" / "required_dep_cooldown"
-    try:
-        return p.is_file() and p.read_text(encoding="utf-8").strip() == "1"
-    except Exception:
-        return False
+    # v3.8.36: canonical fail-closed lock read (Codex round-19) — a present
+    # lock that is malformed (symlink/dir/unreadable/undecodable/garbage)
+    # means the tier IS required; only a genuinely absent lock or a valid
+    # '0' leaves it optional.
+    state, val, _reason = _dc_read_lock(root / ".substrate" / "required_dep_cooldown", {"0", "1"})
+    if state == "bad":
+        return True
+    return state == "ok" and val == "1"
 
 
 # ---- direct-dependency discovery (DIRECT only for v1; transitive is a later mode) ----

@@ -43,11 +43,18 @@ _backup() {
 }
 
 _sync() {
-  # pull the remote branch (merge, keep both sides), then push. Never hard-fail
-  # on a transient network/push race — the next run reconciles.
-  git pull --no-edit --no-rebase origin "$BR" || echo "agentsync: pull had issues (resolve conflicts, re-run)"
-  git push origin "$BR" || echo "agentsync: push deferred (pull first, re-run)"
+  # pull the remote branch (merge, keep both sides), then push. v3.8.36
+  # (Codex round-19): failures are still non-fatal to the WORK (the next run
+  # reconciles) but the return code is HONEST — a caller must never be told
+  # the bus is synced when the push was rejected, or a CLAIM can look
+  # published while it exists only locally.
+  local rc=0
+  git pull --no-edit --no-rebase origin "$BR" \
+    || { echo "agentsync: pull FAILED (resolve conflicts, re-run)"; rc=1; }
+  git push origin "$BR" \
+    || { echo "agentsync: push FAILED — local commits are NOT on the bus remote"; rc=1; }
   _backup
+  return $rc
 }
 
 case "${1:-sync}" in
@@ -63,8 +70,13 @@ case "${1:-sync}" in
       echo "HINT: add 'AGENT_BUS.md merge=union' to .gitattributes and commit it,"
       echo "      or concurrent messages from both agents will conflict."
     fi
-    _sync
-    echo "sent + synced as '$who'."
+    if _sync; then
+      echo "sent + synced as '$who'."
+    else
+      echo "agentsync: message committed LOCALLY as '$who' but NOT synced —"
+      echo "           the other agent cannot see it. Re-run './agentsync.sh sync'."
+      exit 1
+    fi
     ;;
   read)
     git pull --no-edit --no-rebase origin "$BR" >/dev/null 2>&1 || true

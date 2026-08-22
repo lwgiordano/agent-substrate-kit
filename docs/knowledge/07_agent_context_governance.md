@@ -1,6 +1,6 @@
 ---
 purpose: Agent context inventory, harness scanning, budgets, and doc drift.
-last_human_reviewed: 2026-08-21
+last_human_reviewed: 2026-08-22
 covers:
   - manage.sh
   - scripts/_doc_common.py

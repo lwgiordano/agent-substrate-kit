@@ -82,6 +82,10 @@ def _run(args, stdin="", cwd=None, timeout=None):
 
 def _stage(td: Path, *names):
     s = td / "scripts"; s.mkdir(exist_ok=True)
+    # _doc_common.py is a shared dependency of several staged hooks (lock reader,
+    # append helpers) and is ALWAYS vendored in a real install, so it rides along
+    # with any stage set — v3.8.36, when check_exfil_guard gained read_lock.
+    names = (*names, "_doc_common.py") if "_doc_common.py" not in names else names
     for n in names:
         src = SCRIPTS / n
         if src.exists():
@@ -300,6 +304,26 @@ def t_sandbox_exfil_contained():
             "except (PermissionError, OSError): sys.exit(7)\n")  # denied/unreachable => contained
     p = _run(["bash", str(sx), PY, "-c", snip])
     return p.returncode != 0, f"contained rc={p.returncode}"
+
+
+def t_lock_symlink_lowers_no_floor():
+    """v3.8.36 (Codex round-19): a SYMLINKED required_sandbox lock must not lower
+    the containment floor. is_file() followed the link and read attacker-
+    controlled '0' as a valid off-switch; the canonical reader refuses a symlink
+    lock outright, so the guard still requires containment (rc 2)."""
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        _stage(td, "check_exfil_guard.py", "command_policy.py", "_substrate_root.py")
+        (td / ".substrate").mkdir(exist_ok=True)
+        outside = td / "attacker_zero"
+        outside.write_text("0")
+        (td / ".substrate" / "required_sandbox").symlink_to(outside)
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("SUBSTRATE_SANDBOXED", "SUBSTRATE_HOST_SANDBOX", "SUBSTRATE_HOOK_HOST")}
+        payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": "echo hi"}})
+        p = subprocess.run([PY, str(td / "scripts" / "check_exfil_guard.py")], input=payload,
+                           cwd=str(td), capture_output=True, text=True, timeout=20, env=env)
+        return p.returncode == 2, f"rc={p.returncode}"
 
 
 def t_agent_bash_uncontained_blocked():
@@ -734,6 +758,7 @@ TASKS = [
     ("agents_md_injection",     "malicious", "block", t_agents_injection, True),
     ("sandbox_exfil_contained", "malicious", "block", t_sandbox_exfil_contained, True),
     ("agent_bash_uncontained_blocked", "malicious", "block", t_agent_bash_uncontained_blocked, True),
+    ("lock_symlink_lowers_no_floor", "malicious", "block", t_lock_symlink_lowers_no_floor, False),
     ("injection_says_safe_blocks_exfil", "malicious", "block", t_injection_says_safe_blocks_exfil, True),
     ("memory_chain_rewrite_detected", "malicious", "block", t_memory_chain_rewrite_detected, True),
     ("memory_anchor_mismatch_detected", "malicious", "block", t_memory_anchor_mismatch_detected, True),

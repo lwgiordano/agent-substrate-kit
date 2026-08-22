@@ -25,6 +25,8 @@ try:
 except Exception:
     ROOT = Path.cwd()
 import json
+
+from _doc_common import read_lock as _dc_read_lock
 # Detection is owned by command_policy.py. FAIL CLOSED: if it cannot import
 # (broken/neutered policy module), looks_dangerous_command raises and main()
 # converts that to exit 2 — never silently allow a command value.
@@ -118,20 +120,15 @@ def _read_lock(name: str, allowed: set) -> str | None:
     permission bits is not content drift (the freeze/CODEOWNERS see edits, not
     chmod), so an unreadable lock must never be cheaper than a governed edit —
     the v3.8.25 'a trust anchor may not fail open' class."""
-    p = ROOT / ".substrate" / name
-    if not p.is_file():
+    # v3.8.36: delegate to the canonical fail-closed reader (O_NOFOLLOW +
+    # fstat S_ISREG + explicit UTF-8 decode) — a SYMLINKED lock is an error,
+    # never read through, and a DIRECTORY lock is an error, never "absent"
+    # (is_file() got both wrong; Codex round-19).
+    state, val, reason = _dc_read_lock(ROOT / ".substrate" / name, allowed)
+    if state == "bad":
+        _LOCK_ERRORS.append(f".substrate/{name}: {reason} — refusing to treat it as absent")
         return None
-    try:
-        val = p.read_text(encoding="utf-8").strip()
-    except (OSError, UnicodeDecodeError) as e:
-        _LOCK_ERRORS.append(f".substrate/{name} exists but is unreadable "
-                            f"({e.__class__.__name__}) — refusing to treat it as absent")
-        return None
-    if val not in allowed:
-        _LOCK_ERRORS.append(f".substrate/{name} holds invalid value {val[:40]!r} "
-                            f"(allowed: {sorted(allowed)}) — refusing to ignore it")
-        return None
-    return val
+    return val  # "ok" → value; "absent" → None
 
 
 def _required_profile():

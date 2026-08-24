@@ -171,9 +171,15 @@ def parse_claims(text: str, now: datetime) -> tuple[list[dict], list[str]]:
         holds = (cur is not None and cur["state"] == "active"
                  and not _expired_at(cur, ts, ttl))
         if verb == "CLAIM":
-            if holds and cur["agent"] != agent:
+            # v3.8.39 (round-22): a plain CLAIM may only take a FREE/never-owned
+            # key. If ANOTHER agent already owns it — fresh OR expired — the
+            # taker must post an explicit RECLAIM; a plain foreign CLAIM is a
+            # reported no-op. Round-21 fixed HEARTBEAT/EXPANSION/RELEASE but left
+            # this path, so an expired lease still changed hands via CLAIM.
+            if cur is not None and cur["agent"] != agent and cur["state"] != "released":
+                why = "still fresh" if holds else "expired — post an explicit RECLAIM to take it"
                 violations.append(f"v{key}: CLAIM by {agent} at {ts.isoformat()} ignored — "
-                                  f"{cur['agent']}'s lease is still fresh")
+                                  f"{cur['agent']}'s lease is {why}")
                 continue
             keyed[key] = {"key": key, "agent": agent, "since": ts,
                           "text": txt, "state": "active"}
@@ -230,6 +236,13 @@ def main(argv=None) -> int:
                     help="exit 1 when any claim lease is expired")
     a = ap.parse_args(argv)
     bus = repo_root() / "AGENT_BUS.md"
+    # v3.8.39 (round-22): a symlinked (or non-regular) AGENT_BUS.md must not be
+    # read — coordination state would be derived from an outside file. Advisory
+    # reader, so this is a reported no-op, not a hard failure.
+    if bus.is_symlink() or (bus.exists() and not bus.is_file()):
+        print("bus-claims: refusing — AGENT_BUS.md is a symlink or non-regular file; "
+              "not reading coordination state from outside the repo.")
+        return 0
     if not bus.is_file():
         print("bus-claims: no AGENT_BUS.md — nothing to report.")
         return 0

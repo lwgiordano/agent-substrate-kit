@@ -88,7 +88,7 @@ def _required_remote_governance():
     the remote tier as required-but-unproven instead of silently dropping it
     (fail toward requiring; the gate itself refuses in check_substrate_config)."""
     from _doc_common import read_lock as _dc_read_lock
-    state, val, _r = _dc_read_lock(ROOT/'.substrate'/'required_remote_governance', {'0','1'})
+    state, val, _r = _dc_read_lock(ROOT/'.substrate'/'required_remote_governance', {'0','1'}, root=ROOT)
     if state == 'absent': return None
     return val if state == 'ok' else '1'
 def _codeowners_path():

@@ -304,7 +304,27 @@ import stat as _stat
 LOCK_MAX_BYTES = 64
 
 
-def read_lock(path: Path, allowed: set) -> tuple:
+def within_root(target, root) -> bool:
+    """True iff `target`'s PARENT resolves inside `root` (v3.8.39 — round-22).
+
+    Leaf-level O_NOFOLLOW / st_nlink guards protect the final path component,
+    but a symlinked ANCESTOR directory (`docs -> /outside`, `.substrate ->
+    /outside`) redirects the whole path before the leaf check runs. Comparing
+    realpath(parent) against realpath(root) catches an escaping ancestor while
+    still allowing the repo itself to be reached through a symlink (e.g. /tmp is
+    a symlink on macOS) — both sides are resolved, so a legitimately-symlinked
+    root stays contained. The leaf is deliberately NOT resolved here (its own
+    O_NOFOLLOW handles a symlinked leaf); resolving the parent isolates the
+    ancestor gap. Returns False (fail closed) on any resolution error."""
+    try:
+        root_real = os.path.realpath(str(root))
+        parent_real = os.path.realpath(str(Path(target).parent))
+    except OSError:
+        return False
+    return parent_real == root_real or parent_real.startswith(root_real + os.sep)
+
+
+def read_lock(path: Path, allowed: set, root=None) -> tuple:
     """Canonical fail-closed read of a frozen `.substrate/required_*` lock
     (v3.8.36 — the complete class fix after v3.8.33's partial sweep).
 
@@ -327,7 +347,14 @@ def read_lock(path: Path, allowed: set) -> tuple:
       and rejecting on overflow closes that, and the strip+membership check
       rejects any internal non-whitespace (`"0   1"` is not in {"0","1"}).
     - bytes + explicit UTF-8 decode: undecodable content is "bad".
+    - ANCESTOR containment (v3.8.39): a symlinked parent directory
+      (`.substrate -> /outside`) routes the lock outside the repo before
+      O_NOFOLLOW sees the leaf. realpath(parent) must stay within the repo.
     """
+    if root is None:
+        root = repo_root()
+    if not within_root(path, root):
+        return ("bad", None, "lock parent escapes the repo (symlinked ancestor)")
     try:
         fd = os.open(str(path),
                      os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
@@ -359,7 +386,8 @@ def read_lock(path: Path, allowed: set) -> tuple:
     return ("ok", val, None)
 
 
-def locked_atomic_append(target: Path, entry: str, header: str, tmp_prefix: str) -> None:
+def locked_atomic_append(target: Path, entry: str, header: str, tmp_prefix: str,
+                         root=None) -> None:
     """Append `entry` to `target`, SERIALIZED against concurrent appenders.
 
     mkstemp + os.replace alone is atomic for READERS and never writes through a
@@ -391,7 +419,15 @@ def locked_atomic_append(target: Path, entry: str, header: str, tmp_prefix: str)
     both CLIs surface it through their existing rc-2 path. Operational caveat:
     flock is advisory and a no-op on some network filesystems — the logs are
     repo files, expected on a local checkout.
+
+    v3.8.39 (round-22): a symlinked PARENT directory (`docs -> /outside`) would
+    route the append outside the repo before the lock/replace ran. realpath the
+    parent against the repo root and refuse an escaping ancestor.
     """
+    if root is None:
+        root = repo_root()
+    if not within_root(target, root):
+        raise OSError(f"append target parent escapes the repo (symlinked ancestor): {target}")
     target.parent.mkdir(parents=True, exist_ok=True)
     dir_fd = os.open(str(target.parent), os.O_RDONLY)
     try:

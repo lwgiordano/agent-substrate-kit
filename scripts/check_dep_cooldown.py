@@ -56,7 +56,7 @@ def _required(root: Path, argv) -> bool:
     # lock that is malformed (symlink/dir/unreadable/undecodable/garbage)
     # means the tier IS required; only a genuinely absent lock or a valid
     # '0' leaves it optional.
-    state, val, _reason = _dc_read_lock(root / ".substrate" / "required_dep_cooldown", {"0", "1"})
+    state, val, _reason = _dc_read_lock(root / ".substrate" / "required_dep_cooldown", {"0", "1"}, root=root)
     if state == "bad":
         return True
     return state == "ok" and val == "1"

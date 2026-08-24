@@ -208,6 +208,19 @@ def profile() -> str:
     # truncated into a lowering value (round-20 P1/P2) — same contract as
     # _doc_common.read_lock, kept inline because this module is AST-pinned.
     _LOCK_MAX = 64
+    # v3.8.39 (round-22): O_NOFOLLOW guards the leaf; a symlinked `.substrate`
+    # PARENT (`.substrate -> /outside`) routes a lowering lock/config in before
+    # the leaf check. realpath the parent against _ROOT and fail closed if it
+    # escapes — a routed outside lock must not downgrade the live hook policy.
+    try:
+        _root_real = os.path.realpath(str(_ROOT))
+        _parent_real = os.path.realpath(str(req.parent))
+        if not (_parent_real == _root_real or _parent_real.startswith(_root_real + os.sep)):
+            raise CommandPolicyUnavailable(
+                "required_profile parent escapes the repo (symlinked ancestor) — failing closed")
+    except OSError:
+        raise CommandPolicyUnavailable(
+            "required_profile path unresolvable — failing closed")
     try:
         fd = os.open(str(req),
                      os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))

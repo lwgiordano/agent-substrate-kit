@@ -344,6 +344,26 @@ def t_lock_padded_value_no_floor():
         return p.returncode == 2, f"rc={p.returncode}"
 
 
+def t_lock_symlinked_parent_no_floor():
+    """v3.8.39 (round-22): a symlinked `.substrate` PARENT (`.substrate ->
+    /outside` holding required_sandbox=0) routes a lowering lock in before the
+    leaf O_NOFOLLOW check. realpath-containment fails closed, so the guard still
+    requires containment (rc 2)."""
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as outside:
+        td = Path(td); outside = Path(outside)
+        _stage(td, "check_exfil_guard.py", "command_policy.py", "_substrate_root.py")
+        (outside / "required_sandbox").write_text("0")
+        (outside / "config").write_text('SUBSTRATE_SANDBOX="0"\n')
+        (td / ".substrate").symlink_to(outside)  # symlinked ancestor
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("SUBSTRATE_SANDBOXED", "SUBSTRATE_HOST_SANDBOX", "SUBSTRATE_HOOK_HOST")}
+        env["SUBSTRATE_HOOK_HOST"] = "codex"
+        payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": "echo hi"}})
+        p = subprocess.run([PY, str(td / "scripts" / "check_exfil_guard.py")], input=payload,
+                           cwd=str(td), capture_output=True, text=True, timeout=20, env=env)
+        return p.returncode == 2, f"rc={p.returncode}"
+
+
 def t_lock_fifo_no_hang():
     """v3.8.37 (round-20 P2): a FIFO required_sandbox lock must fail closed
     WITHOUT HANGING (O_NONBLOCK) — the guard blocks (rc 2) within the timeout
@@ -844,6 +864,7 @@ TASKS = [
     ("agent_bash_uncontained_blocked", "malicious", "block", t_agent_bash_uncontained_blocked, True),
     ("lock_symlink_lowers_no_floor", "malicious", "block", t_lock_symlink_lowers_no_floor, False),
     ("lock_padded_value_no_floor", "malicious", "block", t_lock_padded_value_no_floor, False),
+    ("lock_symlinked_parent_no_floor", "malicious", "block", t_lock_symlinked_parent_no_floor, False),
     ("lock_fifo_no_hang", "malicious", "block", t_lock_fifo_no_hang, False),
     ("handoff_capture_no_write_through_symlink", "malicious", "block", t_handoff_capture_no_write_through_symlink, False),
     ("agentsync_refuses_hardlinked_bus", "malicious", "block", t_agentsync_refuses_hardlinked_bus, False),

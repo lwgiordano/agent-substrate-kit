@@ -124,7 +124,7 @@ def _read_lock(name: str, allowed: set) -> str | None:
     # fstat S_ISREG + explicit UTF-8 decode) — a SYMLINKED lock is an error,
     # never read through, and a DIRECTORY lock is an error, never "absent"
     # (is_file() got both wrong; Codex round-19).
-    state, val, reason = _dc_read_lock(ROOT / ".substrate" / name, allowed)
+    state, val, reason = _dc_read_lock(ROOT / ".substrate" / name, allowed, root=ROOT)
     if state == "bad":
         _LOCK_ERRORS.append(f".substrate/{name}: {reason} — refusing to treat it as absent")
         return None

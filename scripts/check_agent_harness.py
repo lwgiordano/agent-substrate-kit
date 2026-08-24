@@ -26,7 +26,8 @@ try:
     ROOT = _sr()
 except Exception:
     ROOT = Path.cwd()
-from _substrate_surfaces import CONTEXT_GLOBS, CODE_GLOBS, HARNESS_SKIP_GLOBS, HARNESS_ALLOWLIST
+from _substrate_surfaces import (CONTEXT_GLOBS, CODE_GLOBS, HARNESS_SKIP_GLOBS, HARNESS_ALLOWLIST,
+                                 OWNED_DIRS, OPTIONAL_DIRS, GOVERNED_DIRS, GOVERNED_OPTIONAL_DIRS)
 def _load_patterns():
     p=Path(__file__).resolve().parent/'harness_patterns.json'
     data=json.loads(p.read_text(encoding='utf-8'))
@@ -56,6 +57,13 @@ def main():
         if p in skip: continue
         rel=p.relative_to(ROOT).as_posix()
         findings.append(("governed surface is a symlink (redirects/hides the scan)", rel, 0))
+    # v3.8.39 (round-22): a symlinked governed DIRECTORY (docs/knowledge, .codex,
+    # .agents/skills ...) redirects or shrinks the whole glob under it while the
+    # per-file scan stays green. Flag any governed dir that is a symlink.
+    for d in OWNED_DIRS + OPTIONAL_DIRS + GOVERNED_DIRS + GOVERNED_OPTIONAL_DIRS:
+        dp = ROOT / d
+        if dp.is_symlink():
+            findings.append(("governed directory is a symlink (redirects/shrinks the scan)", d, 0))
     for p in sorted(context|code):
         text=p.read_text(encoding='utf-8', errors='replace'); rel=p.relative_to(ROOT).as_posix()
         if rel in HARNESS_ALLOWLIST:

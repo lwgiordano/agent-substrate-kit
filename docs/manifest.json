@@ -50,7 +50,7 @@
         "scripts/verify_release.py",
         "scripts/write_install_json.py"
       ],
-      "last_human_reviewed": "2026-08-22",
+      "last_human_reviewed": "2026-08-24",
       "path": "docs/knowledge/02_upgrade_integrity.md",
       "purpose": "Upgrade provenance, authority floors, transactions, and postconditions."
     },

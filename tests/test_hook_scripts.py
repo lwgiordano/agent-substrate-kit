@@ -1657,17 +1657,17 @@ def test_read_lock_core_states(tmp_path) -> None:
     lock = tmp_path / "lk"
     outside = tmp_path / "outside"; outside.write_text("0")
     lock.symlink_to(outside)
-    assert dc.read_lock(lock, {"0", "1"})[0] == "bad", "symlink lock must be bad"
+    assert dc.read_lock(lock, {"0", "1"}, root=tmp_path)[0] == "bad", "symlink lock must be bad"
     lock.unlink(); lock.mkdir()
-    assert dc.read_lock(lock, {"0", "1"})[0] == "bad", "directory lock must be bad"
+    assert dc.read_lock(lock, {"0", "1"}, root=tmp_path)[0] == "bad", "directory lock must be bad"
     lock.rmdir(); lock.write_bytes(b"\xff\xfe\x01")
-    assert dc.read_lock(lock, {"0", "1"})[0] == "bad", "undecodable lock must be bad"
+    assert dc.read_lock(lock, {"0", "1"}, root=tmp_path)[0] == "bad", "undecodable lock must be bad"
     lock.write_text("2\n")
-    assert dc.read_lock(lock, {"0", "1"})[0] == "bad", "out-of-domain value must be bad"
+    assert dc.read_lock(lock, {"0", "1"}, root=tmp_path)[0] == "bad", "out-of-domain value must be bad"
     lock.write_text("1\n")
-    assert dc.read_lock(lock, {"0", "1"}) == ("ok", "1", None)
+    assert dc.read_lock(lock, {"0", "1"}, root=tmp_path) == ("ok", "1", None)
     lock.unlink()
-    assert dc.read_lock(lock, {"0", "1"}) == ("absent", None, None)
+    assert dc.read_lock(lock, {"0", "1"}, root=tmp_path) == ("absent", None, None)
 
 
 def test_every_lock_reader_refuses_symlink_and_directory(tmp_path) -> None:
@@ -1810,7 +1810,9 @@ def test_bus_claims_expired_needs_explicit_reclaim(tmp_path) -> None:
     a reported no-op, never a silent takeover/close."""
     if not (SCRIPTS / "bus_claims.py").exists():
         return
-    for verb in ("HEARTBEAT", "RELEASE"):
+    # v3.8.39 (round-22): plain CLAIM added — a foreign CLAIM on an expired
+    # lease must ALSO require RECLAIM (round-21 fixed only HEARTBEAT/RELEASE).
+    for verb in ("HEARTBEAT", "RELEASE", "CLAIM"):
         d = tmp_path / verb
         d.mkdir()
         repo = _bus_repo(d, (
@@ -1822,6 +1824,17 @@ def test_bus_claims_expired_needs_explicit_reclaim(tmp_path) -> None:
         assert re.search(r"(EXPIRED|ACTIVE)\s+v9\.9\.5\s+claude", p.stdout), \
             f"{verb} silently took/closed an expired lease: {p.stdout}"
         assert "PROTOCOL VIOLATION" in p.stdout
+    # positive: an explicit RECLAIM of the same expired lease DOES transfer it
+    d = tmp_path / "RECLAIM_ok"
+    d.mkdir()
+    repo = _bus_repo(d, (
+        "- [2026-01-01T00:00:00Z] **claude**: CLAIM v9.9.5 work\n"
+        "- [2026-01-05T00:00:00Z] **codex**: RECLAIM v9.9.5 taking it\n"))
+    p = subprocess.run([sys.executable, "-I", str(SCRIPTS / "bus_claims.py"), "--all"],
+                       cwd=repo, capture_output=True, text=True, timeout=60,
+                       env=dict(os.environ, SUBSTRATE_CLAIM_TTL_HOURS="72"))  # base expired by Jan 5
+    assert re.search(r"(ACTIVE|EXPIRED)\s+v9\.9\.5\s+codex", p.stdout), p.stdout
+    assert "PROTOCOL VIOLATION" not in p.stdout
 
 
 def test_bus_claims_rejects_future_dated_entries(tmp_path) -> None:
@@ -4770,14 +4783,14 @@ def test_read_lock_fifo_and_truncation_fail_closed(tmp_path) -> None:
     sub.mkdir()
     lock = sub / "required_sandbox"
     lock.write_bytes(b"1\n")
-    assert dc.read_lock(lock, {"0", "1"}) == ("ok", "1", None)
+    assert dc.read_lock(lock, {"0", "1"}, root=tmp_path) == ("ok", "1", None)
     lock.unlink()
     os.mkfifo(lock)  # would block a plain O_NOFOLLOW open
-    state, _v, reason = dc.read_lock(lock, {"0", "1"})  # must return, not hang
+    state, _v, reason = dc.read_lock(lock, {"0", "1"}, root=tmp_path)  # must return, not hang
     assert state == "bad" and "regular file" in reason, (state, reason)
     lock.unlink()
     lock.write_bytes(b"0" + b" " * 4095 + b"1")  # strips to "0" if truncated at 4096
-    state, _v, reason = dc.read_lock(lock, {"0", "1"})
+    state, _v, reason = dc.read_lock(lock, {"0", "1"}, root=tmp_path)
     assert state == "bad", (state, reason)
 
 
@@ -4926,6 +4939,119 @@ def test_harness_blocks_symlinked_root_entrypoint(tmp_path) -> None:
     assert p.returncode == 1, (p.returncode, (p.stdout + p.stderr)[-300:])
     assert "symlink" in (p.stdout + p.stderr)
     assert "package_release.sh" in (p.stdout + p.stderr)
+
+
+def test_harness_blocks_symlinked_governed_directory(tmp_path) -> None:
+    """v3.8.39 (round-22): a symlinked governed DIRECTORY (docs/knowledge) is
+    caught only by the per-file scan following the link — the dir itself must
+    BLOCK so a linked root can't shrink/redirect the scan while staying green."""
+    import shutil
+    repo = tmp_path / "kit"
+    repo.mkdir()
+    (repo / "scripts").mkdir()
+    for f in ("check_agent_harness.py", "_substrate_surfaces.py", "_substrate_root.py",
+              "harness_patterns.json"):
+        shutil.copy(SCRIPTS / f, repo / "scripts" / f)
+    (repo / "manage.sh").write_text("#!/bin/sh\necho ok\n", encoding="utf-8")
+    (repo / "docs").mkdir()
+    outside = tmp_path / "outside_knowledge"
+    outside.mkdir()
+    (outside / "z.md").write_text("# x\n", encoding="utf-8")
+    (repo / "docs" / "knowledge").symlink_to(outside)
+    p = subprocess.run([sys.executable, "scripts/check_agent_harness.py"],
+                       cwd=repo, capture_output=True, text=True, timeout=30, env=_HERMETIC_ENV)
+    assert p.returncode == 1, (p.returncode, (p.stdout + p.stderr)[-300:])
+    assert "directory is a symlink" in (p.stdout + p.stderr)
+    assert "docs/knowledge" in (p.stdout + p.stderr)
+
+
+def test_read_lock_refuses_symlinked_ancestor(tmp_path) -> None:
+    """v3.8.39 (round-22): O_NOFOLLOW guards the leaf; a symlinked PARENT
+    (`.substrate -> /outside`) routes a lowering lock in. realpath(parent) must
+    stay within the repo."""
+    import importlib
+    dc = importlib.import_module("_doc_common")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    outside = tmp_path / "outside_sub"
+    outside.mkdir()
+    (outside / "required_sandbox").write_text("0", encoding="utf-8")
+    (repo / ".substrate").symlink_to(outside)
+    state, _v, reason = dc.read_lock(repo / ".substrate" / "required_sandbox", {"0", "1"}, root=repo)
+    assert state == "bad" and "ancestor" in reason, (state, reason)
+    # a real (non-symlinked) .substrate still reads fine
+    repo2 = tmp_path / "repo2"
+    (repo2 / ".substrate").mkdir(parents=True)
+    (repo2 / ".substrate" / "required_sandbox").write_text("1\n", encoding="utf-8")
+    assert dc.read_lock(repo2 / ".substrate" / "required_sandbox", {"0", "1"}, root=repo2)[0] == "ok"
+
+
+def test_append_refuses_symlinked_ancestor(tmp_path) -> None:
+    """v3.8.39 (round-22): locked_atomic_append must not write through a
+    symlinked parent (`docs -> /outside`) to an outside inode."""
+    import importlib
+    dc = importlib.import_module("_doc_common")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    outside = tmp_path / "outside_docs"
+    outside.mkdir()
+    (repo / "docs").symlink_to(outside)
+    with pytest.raises(OSError, match="ancestor"):
+        dc.locked_atomic_append(repo / "docs" / "HISTORY.md", "- e\n", "# H\n", ".H.", root=repo)
+    assert not (outside / "HISTORY.md").exists(), "wrote through the symlinked parent"
+
+
+def test_handoff_capture_refuses_symlinked_ancestor(tmp_path) -> None:
+    """v3.8.39 (round-22): capture must not write CURRENT_SESSION.md / current.json
+    into a symlinked-parent (`docs -> /outside`, `.substrate -> /outside`)."""
+    if not (SCRIPTS / "session_handoff.py").exists():
+        return
+    import importlib
+    sh = importlib.import_module("session_handoff")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    outside = tmp_path / "outside_docs"
+    outside.mkdir()
+    (repo / "docs").symlink_to(outside)
+    sh.capture_for_root(repo, {"trigger": "test"})  # fails open, must not write outside
+    assert not (outside / "CURRENT_SESSION.md").exists(), "captured through the symlinked parent"
+
+
+def test_handoff_restore_refuses_symlinked_ancestor(tmp_path) -> None:
+    """v3.8.39 (round-22): restore's leaf O_NOFOLLOW is bypassed by a symlinked
+    ANCESTOR (`.substrate/memory/tasks -> /outside`) routing outside state in."""
+    if not (SCRIPTS / "session_handoff.py").exists():
+        return
+    import importlib
+    sh = importlib.import_module("session_handoff")
+    repo = tmp_path / "repo"
+    (repo / "docs").mkdir(parents=True)
+    (repo / ".substrate" / "memory").mkdir(parents=True)
+    outside = tmp_path / "outside_tasks"
+    outside.mkdir()
+    (outside / "current.json").write_text(json.dumps({
+        "version": 1, "captured": "2026-08-24T00:00:00+00:00", "trigger": "auto",
+        "branch": "m", "head": "cafe999", "last_commits": [], "working_tree": [],
+        "todos": ["- [>] leak (in_progress)"]}), encoding="utf-8")
+    (repo / ".substrate" / "memory" / "tasks").symlink_to(outside)
+    ctx = sh.restore_for_root(repo)
+    assert ctx is None or "cafe999" not in ctx, "restored state through a symlinked ancestor"
+
+
+def test_bus_claims_refuses_symlinked_bus(tmp_path) -> None:
+    """v3.8.39 (round-22): the lease reader must not derive coordination state
+    from a symlinked AGENT_BUS.md pointing outside the repo."""
+    if not (SCRIPTS / "bus_claims.py").exists():
+        return
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    outside = tmp_path / "outside_bus.txt"
+    outside.write_text("- [2026-08-24T15:00:00Z] **mallory**: CLAIM v9.9.9 evil\n", encoding="utf-8")
+    (tmp_path / "AGENT_BUS.md").symlink_to(outside)
+    p = subprocess.run([sys.executable, "-I", str(SCRIPTS / "bus_claims.py"), "--all"],
+                       cwd=tmp_path, capture_output=True, text=True, timeout=60)
+    assert p.returncode == 0, p.stderr[-200:]
+    assert "refusing" in p.stdout
+    assert "mallory" not in p.stdout and "v9.9.9" not in p.stdout
 
 
 def test_postmortem_hook_detects_remediation_release_subjects() -> None:

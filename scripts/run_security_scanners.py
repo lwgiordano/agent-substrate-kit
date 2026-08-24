@@ -70,7 +70,7 @@ def _required(root: Path, argv) -> bool:
     # undecodable bytes (UnicodeDecodeError is a ValueError). A malformed
     # present lock now means the tier IS required.
     state, val, _reason = _dc_read_lock(
-        root / ".substrate" / "required_security_scanners", {"0", "1"})
+        root / ".substrate" / "required_security_scanners", {"0", "1"}, root=root)
     if state == "bad":
         return True
     return state == "ok" and val == "1"

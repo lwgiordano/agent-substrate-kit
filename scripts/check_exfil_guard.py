@@ -74,7 +74,7 @@ def _sandbox_required(root: Path) -> bool:
     # and a DIRECTORY lock read as absent (Codex round-19). The canonical
     # reader refuses both: any "bad" state (symlink/dir/unreadable/undecodable/
     # out-of-domain) means containment REQUIRED.
-    state, val, _reason = _dc_read_lock(root / ".substrate" / "required_sandbox", {"0", "1"})
+    state, val, _reason = _dc_read_lock(root / ".substrate" / "required_sandbox", {"0", "1"}, root=root)
     if state == "bad":
         return True
     if state == "ok" and val == "1":

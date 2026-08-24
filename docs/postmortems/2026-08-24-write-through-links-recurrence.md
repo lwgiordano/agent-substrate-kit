@@ -71,12 +71,34 @@ not *mechanized*, so each new writer was free to reintroduce it.
 
 ## Carry-forward rule
 
-When hardening any file **read or write** against a symlinked leaf, in the same
-change also reject `st_nlink > 1` (hard links) or route the write through
-`mkstemp` + `os.replace` — a symlink guard alone is half a fix, and this class
-has recurred twice (v3.8.25, v3.8.38). Before landing a link-safety fix, grep
-the repo for every `write_text`/`open(...O_APPEND...)`/`read_text` on an
-agent-writable path and fix them together.
+A link-safety fix has THREE parts, all required in the same change, or the
+missing one becomes the next audit finding:
+1. **Leaf symlink** — `O_NOFOLLOW` (or `is_symlink()` refusal).
+2. **Leaf hard link** — reject `st_nlink > 1`, or write via `mkstemp` +
+   `os.replace` (which breaks the link and never writes through a symlink).
+3. **ANCESTOR directory** — realpath the parent against the repo root and
+   refuse if it escapes; a symlinked parent (`docs -> /outside`,
+   `.substrate -> /outside`) routes the whole path out before either leaf check
+   runs.
+
+This class has recurred THREE times, each round closing one layer and exposing
+the next: v3.8.25 (leaf symlink/hard link in provenance), v3.8.38 (leaf hard
+link in the capture/bus writers), v3.8.39 (symlinked ANCESTOR across every
+reader/writer). Before landing a link-safety fix, grep the repo for every
+`write_text` / `open(... O_APPEND ...)` / `read_text` / `mkstemp` on an
+agent-writable path and apply all three parts to each — the shared
+`_doc_common.within_root` + the leaf guards are that fix in one place.
+
+## Round 2 — v3.8.39 (round-22): the ancestor layer
+
+v3.8.38 protected the LEAF of each path; every one still routed through a
+symlinked PARENT directory. A shared `_doc_common.within_root(target, root)`
+(realpath the parent, require it inside realpath(root)) now guards
+`read_lock`, `locked_atomic_append`, `session_handoff` capture + restore, and
+the AST-pinned `command_policy` reader; the harness additionally BLOCKs a
+symlinked governed *directory*, and both bus readers refuse a symlinked
+`AGENT_BUS.md`. This round is why part 3 was added to the carry-forward rule
+above — the leaf-only reflex was the exact incompleteness that recurred.
 
 ## (Optional) Reproduction
 
@@ -84,3 +106,5 @@ In a disposable repo: `ln victim.txt AGENT_BUS.md` then
 `AGENT_NAME=x ./agentsync.sh msg "…"` — pre-fix, the line lands in `victim.txt`.
 For capture: `ln -s /outside docs/CURRENT_SESSION.md` then
 `session_handoff.py capture` — pre-fix, `/outside` is overwritten.
+Ancestor (v3.8.39): `ln -s /outside .substrate` then read a `required_*` lock —
+pre-fix, the outside lock lowers the containment floor.

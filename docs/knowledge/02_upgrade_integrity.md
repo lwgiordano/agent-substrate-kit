@@ -3,7 +3,7 @@ purpose: Upgrade provenance, authority floors, transactions, and postconditions.
 asserts:
   - scripts/substrate_upgrade.py::_exec_module_from_source
   - scripts/substrate_upgrade.py::_apply_capability_floor
-last_human_reviewed: 2026-08-22
+last_human_reviewed: 2026-08-24
 covers:
   - bootstrap.sh
   - manage.sh

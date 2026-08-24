@@ -129,6 +129,12 @@ PY
     fi
     ;;
   read)
+    # v3.8.39 (round-22): refuse a symlinked/non-regular bus — else `read`
+    # prints an outside file's contents as if it were the bus.
+    if [ -L "$BUS" ] || { [ -e "$BUS" ] && [ ! -f "$BUS" ]; }; then
+      echo "agentsync: refusing — $BUS is a symlink or non-regular file" >&2
+      exit 2
+    fi
     git pull --no-edit --no-rebase origin "$BR" >/dev/null 2>&1 || true
     tail -n "${2:-20}" "$BUS" 2>/dev/null || echo "(no bus yet — send one with: ./agentsync.sh msg \"hi\")"
     ;;

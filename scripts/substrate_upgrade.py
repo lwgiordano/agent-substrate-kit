@@ -744,7 +744,7 @@ def _read_lock_or_refuse(root: Path, name: str, allowed: set, absent: str) -> st
     v3.8.36: delegates to the canonical reader — is_file() treated a DIRECTORY
     lock as absent (Codex reproduced a --plan run sailing past a
     required_sandbox/ directory) and followed symlinked locks; both now refuse."""
-    state, val, reason = _dc_read_lock(root / ".substrate" / name, allowed)
+    state, val, reason = _dc_read_lock(root / ".substrate" / name, allowed, root=root)
     if state == "absent":
         return absent
     if state == "bad":
@@ -787,7 +787,7 @@ def _authority_snapshot(root: Path) -> dict:
                      "required_remote_governance": {"0", "1"},
                      "required_sandbox": {"0", "1"}}
     for rel, dom in _lock_domains.items():
-        state, _v, reason = _dc_read_lock(root / ".substrate" / rel, dom)
+        state, _v, reason = _dc_read_lock(root / ".substrate" / rel, dom, root=root)
         if state == "bad":
             raise SystemExit(
                 f"substrate-upgrade: refusing — .substrate/{rel}: {reason}; a malformed "

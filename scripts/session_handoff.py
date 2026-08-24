@@ -390,6 +390,20 @@ def _transcript_tail(path_str: str) -> list[str]:
     return snippets[-TRANSCRIPT_TAIL_MESSAGES:]
 
 
+def _within_root(target) -> bool:
+    """True iff `target`'s PARENT resolves inside the current ROOT (v3.8.39 —
+    round-22). The atomic writer / O_NOFOLLOW reader protect the LEAF; a
+    symlinked ANCESTOR directory (`docs -> /outside`) routes the whole path
+    outside the repo first. Both sides realpath'd so a legitimately symlinked
+    repo root stays contained. Fail closed on any resolution error."""
+    try:
+        root_real = os.path.realpath(str(ROOT))
+        parent_real = os.path.realpath(str(Path(target).parent))
+    except OSError:
+        return False
+    return parent_real == root_real or parent_real.startswith(root_real + os.sep)
+
+
 def _atomic_write_text(path, text: str) -> None:
     """Write `text` to `path` atomically, breaking any hard link and following
     no symlink (v3.8.38 — round-21 P1). write_text() opens the existing path,
@@ -398,9 +412,15 @@ def _atomic_write_text(path, text: str) -> None:
     same directory + os.replace swaps the DIRECTORY ENTRY: the temp file is a
     fresh inode, the replace acts on the link name (never the symlink target),
     and the old hard-linked inode is left untouched. Same-dir so os.replace is
-    atomic (no cross-device copy)."""
+    atomic (no cross-device copy).
+
+    v3.8.39 (round-22): refuse a symlinked ANCESTOR — mkstemp(dir=parent) would
+    otherwise create the temp file (and os.replace the target) inside the
+    outside directory the parent symlink points to."""
     import tempfile
     path = Path(path)
+    if not _within_root(path):
+        raise OSError(f"refusing capture write outside repo (symlinked ancestor): {path}")
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=".sh-", dir=str(path.parent))
     try:
@@ -542,6 +562,11 @@ def _restore_from_structured_unsafe() -> str | None:
     # context. O_NOFOLLOW + fstat S_ISREG refuses that; a missing or
     # non-regular path is simply "no state" (None). mtime comes from fstat so
     # the age gate sees the real file, not a link target.
+    # v3.8.39 (round-22): O_NOFOLLOW only guards the LEAF; a symlinked ANCESTOR
+    # (`.substrate/memory/tasks -> /outside`) still routes an outside file in.
+    # Refuse if the parent resolves outside the repo.
+    if not _within_root(TASKS_STATE):
+        return None
     try:
         fd = os.open(str(TASKS_STATE),
                      os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))

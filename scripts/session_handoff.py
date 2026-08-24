@@ -390,6 +390,32 @@ def _transcript_tail(path_str: str) -> list[str]:
     return snippets[-TRANSCRIPT_TAIL_MESSAGES:]
 
 
+def _atomic_write_text(path, text: str) -> None:
+    """Write `text` to `path` atomically, breaking any hard link and following
+    no symlink (v3.8.38 — round-21 P1). write_text() opens the existing path,
+    so it writes THROUGH a symlinked or hard-linked leaf to an outside inode
+    (the v3.8.25 lesson, reintroduced in the capture writers). mkstemp in the
+    same directory + os.replace swaps the DIRECTORY ENTRY: the temp file is a
+    fresh inode, the replace acts on the link name (never the symlink target),
+    and the old hard-linked inode is left untouched. Same-dir so os.replace is
+    atomic (no cross-device copy)."""
+    import tempfile
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".sh-", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.replace(tmp, path)
+        tmp = ""
+    finally:
+        if tmp and os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+
+
 def capture(hook: dict) -> int:
     now = datetime.now(UTC).replace(microsecond=0).isoformat()
     trigger = hook.get("trigger") or hook.get("reason") or hook.get(
@@ -449,7 +475,7 @@ def capture(hook: dict) -> int:
     body = _redact("\n".join(parts))
     try:
         HANDOFF.parent.mkdir(parents=True, exist_ok=True)
-        HANDOFF.write_text(body, encoding="utf-8")
+        _atomic_write_text(HANDOFF, body)
         print(f"session-handoff: wrote {HANDOFF.relative_to(ROOT)}", file=sys.stderr)
     except Exception as e:  # never block compaction
         print(f"session-handoff: capture failed: {e}", file=sys.stderr)
@@ -478,7 +504,7 @@ def _write_structured(now, trigger, todos) -> None:
     }
     try:
         TASKS_STATE.parent.mkdir(parents=True, exist_ok=True)
-        TASKS_STATE.write_text(_redact(json.dumps(state, indent=2)) + "\n", encoding="utf-8")
+        _atomic_write_text(TASKS_STATE, _redact(json.dumps(state, indent=2)) + "\n")
     except Exception as e:
         print(f"session-handoff: structured write failed: {e}", file=sys.stderr)
 
@@ -524,6 +550,11 @@ def _restore_from_structured_unsafe() -> str | None:
     try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
+            return None
+        # v3.8.38 (round-21 P2): O_NOFOLLOW stopped a SYMLINKED state file, but a
+        # HARD LINK (st_nlink > 1) shares an outside inode invisibly — the same
+        # v3.8.25 class. A trusted state file is not hard-linked; refuse if it is.
+        if st.st_nlink > 1:
             return None
         age_days = (datetime.now(UTC).timestamp() - st.st_mtime) / 86400
         if age_days > MAX_AGE_DAYS:
@@ -662,7 +693,7 @@ def _write_session_start() -> None:
             "branch": _git("rev-parse", "--abbrev-ref", "HEAD"),
             "ts": datetime.now(UTC).replace(microsecond=0).isoformat(),
         }
-        SESSION_START.write_text(json.dumps(state) + "\n", encoding="utf-8")
+        _atomic_write_text(SESSION_START, json.dumps(state) + "\n")
     except Exception:
         pass
 

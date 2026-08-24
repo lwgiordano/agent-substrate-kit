@@ -52,7 +52,7 @@ KNOWLEDGE_ASSERTS = {
     "scripts/substrate_upgrade.py::_exec_module_from_source",
 }
 
-ROOT_ENTRYPOINTS = {"bootstrap.sh", "manage.sh", "package_release.sh"}
+ROOT_ENTRYPOINTS = {"bootstrap.sh", "manage.sh", "package_release.sh", "agentsync.sh"}
 KNOWLEDGE_TOKEN_BUDGET = 3000
 
 

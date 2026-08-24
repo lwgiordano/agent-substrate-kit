@@ -96,8 +96,9 @@ Row source of truth: the host hook-config files themselves —
 `.claude/settings.json`, `.codex/hooks.json` (SessionStart, PreToolUse, Stop),
 and `.github/hooks/exfil-guard.json` (sessionStart, sessionEnd, preToolUse).
 Codex and Copilot capture/restore the SAME session_handoff.py state Claude
-does; what Claude alone has is per-edit lint/todo hooks and the opt-in
-completion-gate nudge. This table is drift-checked against those configs.
+does, and Codex's Stop hook also runs the completion-gate nudge
+(`.codex/hooks.json`); what Claude alone has is the per-edit lint/todo hooks.
+This table is drift-checked against those configs.
 
 Consequences the substrate accepts and documents rather than papers over:
 non-Bash tool calls are not command-policy-mediated on any host; Codex and

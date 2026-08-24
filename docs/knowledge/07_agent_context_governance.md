@@ -2,6 +2,7 @@
 purpose: Agent context inventory, harness scanning, budgets, and doc drift.
 last_human_reviewed: 2026-08-24
 covers:
+  - agentsync.sh
   - manage.sh
   - scripts/_doc_common.py
   - scripts/_substrate_root.py
@@ -92,5 +93,16 @@ chronology remains in CHANGES and HISTORY.
 
 Bus claims are leases: `scripts/bus_claims.py` derives ACTIVE/EXPIRED/RELEASED
 deterministically from AGENT_BUS.md entries (default TTL 72h; HEARTBEAT and
-CLAIM EXPANSION refresh; an expired lease is reclaimable by any agent via
-RECLAIM). Advisory only — coordination state is never a gate input.
+CLAIM EXPANSION refresh; an expired lease is reclaimable by any agent, and ONLY
+via an explicit RECLAIM — a foreign CLAIM/HEARTBEAT/RELEASE on a lapsed lease is
+a reported no-op, not a silent takeover). Advisory only — coordination state is
+never a gate input.
+
+`agentsync.sh` is the transport: it appends a one-line entry to the bus and
+pull/pushes the branch so two agent checkouts share work. As a governed root
+execution surface it is content-scanned and review-gated like the other
+entrypoints. Its bus append is defensive — it refuses a symlinked or
+hard-linked `AGENT_BUS.md` (an external-write primitive), fails fast rather than
+hanging on a FIFO, collapses newlines so a multiline message cannot forge extra
+lease lines, and propagates commit/push failure so a message is never reported
+"synced" when it did not land on the remote.

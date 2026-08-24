@@ -147,6 +147,7 @@
     },
     {
       "covers": [
+        "agentsync.sh",
         "manage.sh",
         "scripts/_doc_common.py",
         "scripts/_substrate_root.py",

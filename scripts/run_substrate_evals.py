@@ -364,6 +364,52 @@ def t_lock_fifo_no_hang():
         return p.returncode == 2, f"rc={p.returncode}"
 
 
+def t_handoff_capture_no_write_through_symlink():
+    """v3.8.38 (round-21 P1): capture must not write THROUGH a symlinked
+    CURRENT_SESSION.md to an outside inode — the atomic mkstemp+os.replace
+    writer breaks the link. The outside victim stays intact."""
+    import importlib
+    sh = importlib.import_module("session_handoff")
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        (td / "docs").mkdir()
+        victim = td / "victim.txt"
+        victim.write_text("PRECIOUS")
+        (td / "docs" / "CURRENT_SESSION.md").symlink_to(victim)
+        try:
+            sh.capture_for_root(td, {"trigger": "eval"})
+        except Exception as e:
+            return False, f"capture raised {e.__class__.__name__}"
+        intact = victim.read_text() == "PRECIOUS"
+        return intact, ("intact" if intact else "victim OVERWRITTEN through symlink")
+
+
+def t_agentsync_refuses_hardlinked_bus():
+    """v3.8.38 (round-21 P1): agentsync `msg` must refuse a HARD-LINKED
+    AGENT_BUS.md — writing through it is an external-write primitive. rc != 0
+    and the outside victim is untouched."""
+    ag = ROOT / "agentsync.sh"
+    if not ag.exists():
+        return True, "agentsync.sh not present (skip-equivalent)"
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        _run(["git", "init", "-q", str(td)])
+        _run(["git", "-C", str(td), "config", "user.email", "a@b.c"])
+        _run(["git", "-C", str(td), "config", "user.name", "t"])
+        (td / "agentsync.sh").write_text(ag.read_text(), encoding="utf-8")
+        os.chmod(td / "agentsync.sh", 0o755)
+        _run(["git", "-C", str(td), "add", "-A"])
+        _run(["git", "-C", str(td), "commit", "-qm", "init"])
+        victim = td / "victim.txt"
+        victim.write_text("OUTSIDE")
+        os.link(victim, td / "AGENT_BUS.md")
+        env = dict(os.environ, AGENT_NAME="codex")
+        p = subprocess.run(["bash", "agentsync.sh", "msg", "CLAIM eval hardlink"],
+                           cwd=str(td), capture_output=True, text=True, timeout=30, env=env)
+        ok = p.returncode != 0 and victim.read_text() == "OUTSIDE"
+        return ok, (f"rc={p.returncode}" if ok else "wrote through hard link")
+
+
 def t_agent_bash_uncontained_blocked():
     """When containment is REQUIRED (required_sandbox=1), an UNCONTAINED interactive
     Bash command must be BLOCKED by check_exfil_guard (the v3.5.5/3.5.6 host-aware
@@ -799,6 +845,8 @@ TASKS = [
     ("lock_symlink_lowers_no_floor", "malicious", "block", t_lock_symlink_lowers_no_floor, False),
     ("lock_padded_value_no_floor", "malicious", "block", t_lock_padded_value_no_floor, False),
     ("lock_fifo_no_hang", "malicious", "block", t_lock_fifo_no_hang, False),
+    ("handoff_capture_no_write_through_symlink", "malicious", "block", t_handoff_capture_no_write_through_symlink, False),
+    ("agentsync_refuses_hardlinked_bus", "malicious", "block", t_agentsync_refuses_hardlinked_bus, False),
     ("injection_says_safe_blocks_exfil", "malicious", "block", t_injection_says_safe_blocks_exfil, True),
     ("memory_chain_rewrite_detected", "malicious", "block", t_memory_chain_rewrite_detected, True),
     ("memory_anchor_mismatch_detected", "malicious", "block", t_memory_anchor_mismatch_detected, True),

@@ -74,17 +74,33 @@ import datetime, os, stat, sys
 bus = sys.argv[1]
 who = os.environ["AGENT_BUS_WHO"]
 msg = os.environ["AGENT_BUS_MSG"]
+# v3.8.38 (round-21 P2): the bus is line-oriented, so a message containing a
+# newline could forge additional top-level lease entries. Collapse ALL
+# whitespace/control to single spaces — the entry stays exactly one line.
+msg = " ".join(msg.split())
+who = " ".join(str(who).split()) or "unknown"
 try:
-    fd = os.open(bus, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o644)
+    # O_NOFOLLOW: never open a symlinked bus. O_NONBLOCK: a FIFO bus fails fast
+    # instead of hanging on open (round-21 P2). O_CREAT so first-run still works.
+    fd = os.open(bus, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW
+                 | getattr(os, "O_NONBLOCK", 0), 0o644)
 except OSError as e:
     sys.stderr.write("agentsync: refusing to write %s (%s) — the bus must be a "
                      "regular file, never a symlink\n" % (bus, e.__class__.__name__))
     sys.exit(2)
 try:
-    if not stat.S_ISREG(os.fstat(fd).st_mode):
-        sys.stderr.write("agentsync: refusing — %s is not a regular file\n" % bus)
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode):
+        sys.stderr.write("agentsync: refusing — %s is not a regular file "
+                         "(fifo/directory/special)\n" % bus)
         sys.exit(2)
-    if os.fstat(fd).st_size == 0:
+    # v3.8.38 (round-21 P1): a HARD-LINKED bus (st_nlink > 1) writes through to
+    # an outside inode — invisible to the symlink check, the v3.8.25 lesson.
+    if st.st_nlink > 1:
+        sys.stderr.write("agentsync: refusing — %s has %d hard links; a shared "
+                         "inode is an external-write primitive\n" % (bus, st.st_nlink))
+        sys.exit(2)
+    if st.st_size == 0:
         os.write(fd, b"# Agent bus (append-only, merge=union)\n")
     ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     os.write(fd, ("\n- [%s] **%s**: %s\n" % (ts, who, msg)).encode("utf-8"))

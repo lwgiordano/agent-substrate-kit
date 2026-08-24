@@ -34,17 +34,28 @@ def _load_patterns():
     return comp('secret'), comp('shell_danger'), comp('injection')
 SECRET, SHELL_DANGER, INJECTION = _load_patterns()
 def _glob(pats):
-    out=set()
+    # v3.8.38 (round-21 P2): discover surfaces WITHOUT following symlinks. A
+    # symlinked surface either redirects the scan to outside bytes (a symlinked
+    # package_release.sh scanned a clean outside script) or — when broken —
+    # silently drops out of the inventory (is_file() is False), shrinking the
+    # count. Real regular files go to `out`; any symlink match (broken or not)
+    # goes to `links` so main() can BLOCK it rather than scan/skip it.
+    out=set(); links=set()
     for pat in pats:
-        if '*' in pat: out.update(p for p in ROOT.glob(pat) if p.is_file())
-        else:
-            p=ROOT/pat
-            if p.exists() and p.is_file(): out.add(p)
-    return out
+        cands = ROOT.glob(pat) if '*' in pat else ([ROOT/pat] if (ROOT/pat).is_symlink() or (ROOT/pat).exists() else [])
+        for p in cands:
+            if p.is_symlink(): links.add(p)
+            elif p.is_file(): out.add(p)
+    return out, links
 def main():
-    skip=_glob(HARNESS_SKIP_GLOBS)
-    context=_glob(CONTEXT_GLOBS)-skip; code=_glob(CODE_GLOBS)-skip
+    skip,_=_glob(HARNESS_SKIP_GLOBS)
+    context,ctx_links=_glob(CONTEXT_GLOBS); context-=skip
+    code,code_links=_glob(CODE_GLOBS); code-=skip
     findings=[]
+    for p in sorted((ctx_links|code_links)):
+        if p in skip: continue
+        rel=p.relative_to(ROOT).as_posix()
+        findings.append(("governed surface is a symlink (redirects/hides the scan)", rel, 0))
     for p in sorted(context|code):
         text=p.read_text(encoding='utf-8', errors='replace'); rel=p.relative_to(ROOT).as_posix()
         if rel in HARNESS_ALLOWLIST:

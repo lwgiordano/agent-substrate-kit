@@ -30,16 +30,19 @@ reader of coordination prose, not a trust anchor).
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import re
 import sys
+from collections import deque
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _doc_common import repo_root
 
-_BUS_MAX_READ = 4_000_000  # bounded read; the bus grows unboundedly
+_MAX_ENTRIES = 10_000       # keep the newest N entry lines (filler is skipped, not counted)
+_BUS_HARD_CAP = 64_000_000  # absolute byte ceiling for a pathological bus (then tail-fallback)
 _ENTRY = re.compile(
     r"^- \[(?P<ts>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:Z|\+00:00))\] "
     r"\*\*(?P<agent>[A-Za-z0-9_-]+)\*\*: "
@@ -49,9 +52,15 @@ _DEFAULT_TTL_HOURS = 72.0
 
 
 def _ttl() -> timedelta:
+    # v3.8.37 (round-20 P3): a garbage override must fall back to the default,
+    # never crash or invert the meaning. nan/inf make every comparison nonsense
+    # (nan → nothing ever expires; -1 → everything is instantly expired), so
+    # only a finite POSITIVE value is honored.
     try:
         hours = float(os.environ.get("SUBSTRATE_CLAIM_TTL_HOURS") or _DEFAULT_TTL_HOURS)
     except ValueError:
+        hours = _DEFAULT_TTL_HOURS
+    if not math.isfinite(hours) or hours <= 0:
         hours = _DEFAULT_TTL_HOURS
     return timedelta(hours=hours)
 
@@ -64,22 +73,42 @@ def _parse_ts(raw: str) -> datetime | None:
 
 
 def read_bus_tail(bus: Path) -> str:
-    """Last _BUS_MAX_READ bytes of the bus. v3.8.36 (Codex round-19): the bus
-    is APPEND-ONLY, so the newest — authoritative — state lives at the BOTTOM;
-    the old head-slice (`read_text()[:N]`) kept the OLDEST bytes and reported
-    a long-released lease as ACTIVE once the file outgrew the bound. A partial
-    first line after seeking is dropped."""
-    with bus.open("rb") as fh:
-        fh.seek(0, 2)
-        size = fh.tell()
-        start = max(0, size - _BUS_MAX_READ)
-        fh.seek(start)
-        raw = fh.read()
-    text = raw.decode("utf-8", errors="replace")
-    if start > 0:
-        nl = text.find("\n")
-        text = text[nl + 1:] if nl >= 0 else ""
-    return text
+    """The last _MAX_ENTRIES *entry* lines of the bus, newest-preserving.
+
+    v3.8.36 (round-19) made this keep the file's TAIL so a released lease past
+    the byte bound stopped reading as ACTIVE. But a pure byte tail had the
+    inverse flaw (round-20 P2): a single fresh CLAIM at the TOP followed by
+    megabytes of non-entry filler fell out of the window and the reader saw NO
+    open claims. The fix streams the whole file (bounded by a generous hard
+    byte ceiling) and keeps only ENTRY lines in a bounded deque — filler is
+    free to skip and can never displace a real claim, while the deque still
+    keeps the NEWEST entries when a bus genuinely accumulates that many."""
+    entries: deque = deque(maxlen=_MAX_ENTRIES)
+    read = 0
+    truncated = False
+    with bus.open("r", encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            read += len(line)
+            if read > _BUS_HARD_CAP:
+                truncated = True
+                break
+            if _ENTRY.match(line.rstrip("\n")):
+                entries.append(line.rstrip("\n"))
+    if truncated:
+        # Pathological bus beyond the hard cap: fall back to a byte tail of the
+        # end so we still report the newest state rather than nothing.
+        with bus.open("rb") as fh:
+            fh.seek(0, 2)
+            size = fh.tell()
+            fh.seek(max(0, size - _BUS_HARD_CAP))
+            raw = fh.read()
+        tail = raw.decode("utf-8", errors="replace")
+        nl = tail.find("\n")
+        tail = tail[nl + 1:] if nl >= 0 else tail
+        for line in tail.splitlines():
+            if _ENTRY.match(line):
+                entries.append(line)
+    return "\n".join(entries)
 
 
 def _expired_at(lease: dict, ts: datetime, ttl: timedelta) -> bool:
@@ -103,6 +132,11 @@ def parse_claims(text: str, now: datetime) -> tuple[list[dict], list[str]]:
       protocol does not model TTL changes over time.)
     """
     events = []
+    violations: list[str] = []
+    # v3.8.37 (round-20 P2): a FUTURE-dated entry is malformed — it would never
+    # expire (now - since is negative) and would block a legitimate reclaim
+    # forever. Reject anything past a small clock-skew tolerance.
+    future_cutoff = now + timedelta(minutes=5)
     for seq, line in enumerate(text.splitlines()):
         m = _ENTRY.match(line)
         if not m:
@@ -110,6 +144,12 @@ def parse_claims(text: str, now: datetime) -> tuple[list[dict], list[str]]:
         ts = _parse_ts(m.group("ts"))
         if ts is None:
             continue  # malformed timestamp: not an entry this reader can use
+        if ts > future_cutoff:
+            vm0 = _VERSION_NEAR_VERB.match(m.group("rest"))
+            k0 = vm0.group(1) if vm0 else "(unkeyed)"
+            violations.append(f"v{k0}: {m.group('verb')} by {m.group('agent')} dated "
+                              f"{ts.isoformat()} ignored — timestamp is in the future")
+            continue
         vm = _VERSION_NEAR_VERB.match(m.group("rest"))
         events.append((ts, seq, m.group("agent"), m.group("verb"),
                        vm.group(1) if vm else None, m.group("rest").strip()[:80]))
@@ -117,7 +157,6 @@ def parse_claims(text: str, now: datetime) -> tuple[list[dict], list[str]]:
     ttl = _ttl()
     keyed: dict[str, dict] = {}
     unkeyed: list[dict] = []
-    violations: list[str] = []
     for ts, _seq, agent, verb, key, txt in events:
         if key is None:
             if verb in ("CLAIM", "RECLAIM"):
@@ -147,21 +186,33 @@ def parse_claims(text: str, now: datetime) -> tuple[list[dict], list[str]]:
             keyed[key] = {"key": key, "agent": agent, "since": ts,
                           "text": txt, "state": "active"}
         elif verb in ("CLAIM EXPANSION", "HEARTBEAT"):
+            # v3.8.37 (round-20 P2): a refresh only ever extends a lease that
+            # HOLDS and is owned by the actor. It must NOT silently claim an
+            # EXPIRED or free key — that path let a foreign HEARTBEAT take over
+            # a lapsed lease with no RECLAIM. An expired/free key requires an
+            # explicit CLAIM/RECLAIM; anything else is a reported no-op.
             if holds and cur["agent"] == agent:
                 cur["since"] = ts  # refresh the OWNER's lease
             elif holds:
                 violations.append(f"v{key}: {verb} by {agent} at {ts.isoformat()} ignored — "
                                   f"lease belongs to {cur['agent']}")
-            else:  # expansion onto a free/expired key still claims it
-                keyed[key] = {"key": key, "agent": agent, "since": ts,
-                              "text": txt, "state": "active"}
+            elif cur is not None:
+                violations.append(f"v{key}: {verb} by {agent} at {ts.isoformat()} ignored — "
+                                  "the lease is expired/closed; post an explicit RECLAIM to take it")
+            else:
+                violations.append(f"v{key}: {verb} by {agent} at {ts.isoformat()} ignored — "
+                                  "no lease to refresh; post an explicit CLAIM")
         elif verb == "RELEASE":
+            # v3.8.37 (round-20 P2): only the OWNER may release, and only a lease
+            # that still exists. A foreign RELEASE — fresh OR expired — is a
+            # violation, not a silent close (the expired case must be RECLAIMed,
+            # not released out from under its owner).
             if cur is None:
                 keyed[key] = {"key": key, "agent": agent, "since": ts,
                               "text": txt, "state": "released"}
-            elif holds and cur["agent"] != agent:
+            elif cur["agent"] != agent:
                 violations.append(f"v{key}: RELEASE by {agent} at {ts.isoformat()} ignored — "
-                                  f"only the owner ({cur['agent']}) may release a fresh lease")
+                                  f"only the owner ({cur['agent']}) may release this lease")
             else:
                 cur["state"] = "released"
     out = list(keyed.values()) + unkeyed

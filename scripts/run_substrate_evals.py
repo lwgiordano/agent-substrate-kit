@@ -326,6 +326,44 @@ def t_lock_symlink_lowers_no_floor():
         return p.returncode == 2, f"rc={p.returncode}"
 
 
+def t_lock_padded_value_no_floor():
+    """v3.8.37 (round-20 P1): a required_sandbox lock padded so its value strips
+    to '0' while a malicious tail falls off a fixed-size read must NOT lower the
+    containment floor. The whole-content bounded read rejects it, so the guard
+    still requires containment (rc 2)."""
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        _stage(td, "check_exfil_guard.py", "command_policy.py", "_substrate_root.py")
+        (td / ".substrate").mkdir(exist_ok=True)
+        (td / ".substrate" / "required_sandbox").write_bytes(b"0" + b" " * 4095 + b"1")
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("SUBSTRATE_SANDBOXED", "SUBSTRATE_HOST_SANDBOX", "SUBSTRATE_HOOK_HOST")}
+        payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": "echo hi"}})
+        p = subprocess.run([PY, str(td / "scripts" / "check_exfil_guard.py")], input=payload,
+                           cwd=str(td), capture_output=True, text=True, timeout=20, env=env)
+        return p.returncode == 2, f"rc={p.returncode}"
+
+
+def t_lock_fifo_no_hang():
+    """v3.8.37 (round-20 P2): a FIFO required_sandbox lock must fail closed
+    WITHOUT HANGING (O_NONBLOCK) — the guard blocks (rc 2) within the timeout
+    rather than wedging on an open() waiting for a writer."""
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        _stage(td, "check_exfil_guard.py", "command_policy.py", "_substrate_root.py")
+        (td / ".substrate").mkdir(exist_ok=True)
+        os.mkfifo(td / ".substrate" / "required_sandbox")
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("SUBSTRATE_SANDBOXED", "SUBSTRATE_HOST_SANDBOX", "SUBSTRATE_HOOK_HOST")}
+        payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": "echo hi"}})
+        try:
+            p = subprocess.run([PY, str(td / "scripts" / "check_exfil_guard.py")], input=payload,
+                               cwd=str(td), capture_output=True, text=True, timeout=15, env=env)
+        except subprocess.TimeoutExpired:
+            return False, "guard HUNG on a FIFO lock"
+        return p.returncode == 2, f"rc={p.returncode}"
+
+
 def t_agent_bash_uncontained_blocked():
     """When containment is REQUIRED (required_sandbox=1), an UNCONTAINED interactive
     Bash command must be BLOCKED by check_exfil_guard (the v3.5.5/3.5.6 host-aware
@@ -759,6 +797,8 @@ TASKS = [
     ("sandbox_exfil_contained", "malicious", "block", t_sandbox_exfil_contained, True),
     ("agent_bash_uncontained_blocked", "malicious", "block", t_agent_bash_uncontained_blocked, True),
     ("lock_symlink_lowers_no_floor", "malicious", "block", t_lock_symlink_lowers_no_floor, False),
+    ("lock_padded_value_no_floor", "malicious", "block", t_lock_padded_value_no_floor, False),
+    ("lock_fifo_no_hang", "malicious", "block", t_lock_fifo_no_hang, False),
     ("injection_says_safe_blocks_exfil", "malicious", "block", t_injection_says_safe_blocks_exfil, True),
     ("memory_chain_rewrite_detected", "malicious", "block", t_memory_chain_rewrite_detected, True),
     ("memory_anchor_mismatch_detected", "malicious", "block", t_memory_anchor_mismatch_detected, True),

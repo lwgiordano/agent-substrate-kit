@@ -62,10 +62,44 @@ case "${1:-sync}" in
   msg)
     shift || true
     [ -n "${*:-}" ] || { echo "usage: ./agentsync.sh msg <text>"; exit 2; }
-    [ -f "$BUS" ] || printf '# Agent bus (append-only, merge=union)\n' > "$BUS"
-    printf '\n- [%s] **%s**: %s\n' "$(date -u +%FT%TZ)" "$who" "$*" >> "$BUS"
+    # v3.8.37 (round-20 P1 + audit WARN): append ATOMICALLY through an
+    # O_NOFOLLOW|O_APPEND|O_CREAT open, not a `[ -L ]` test-then-`>>`. A
+    # symlinked AGENT_BUS.md turns `msg` into an arbitrary external-write
+    # primitive; the earlier test-then-act closed the static case but left a
+    # TOCTOU window a concurrent local swap could exploit. The kernel refuses
+    # to follow a symlink on open, so there is no window. python3 is a hard
+    # substrate dependency (every hook is python3), so relying on it here is safe.
+    AGENT_BUS_WHO="$who" AGENT_BUS_MSG="$*" python3 - "$BUS" <<'PY' || exit $?
+import datetime, os, stat, sys
+bus = sys.argv[1]
+who = os.environ["AGENT_BUS_WHO"]
+msg = os.environ["AGENT_BUS_MSG"]
+try:
+    fd = os.open(bus, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o644)
+except OSError as e:
+    sys.stderr.write("agentsync: refusing to write %s (%s) — the bus must be a "
+                     "regular file, never a symlink\n" % (bus, e.__class__.__name__))
+    sys.exit(2)
+try:
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        sys.stderr.write("agentsync: refusing — %s is not a regular file\n" % bus)
+        sys.exit(2)
+    if os.fstat(fd).st_size == 0:
+        os.write(fd, b"# Agent bus (append-only, merge=union)\n")
+    ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    os.write(fd, ("\n- [%s] **%s**: %s\n" % (ts, who, msg)).encode("utf-8"))
+finally:
+    os.close(fd)
+PY
     git add "$BUS"
-    git commit -q -m "bus: $who" || true
+    # v3.8.37 (round-20 P1): commit failure must PROPAGATE — the old `|| true`
+    # let `msg` print success while no bus commit existed (a rejecting
+    # pre-commit hook, an empty diff after a prior identical stage, etc.).
+    if ! git commit -q -m "bus: $who"; then
+      echo "agentsync: git commit FAILED — the message is staged but NOT committed;" >&2
+      echo "           nothing was synced. Resolve the commit failure and re-run." >&2
+      exit 1
+    fi
     if ! git check-attr merge -- "$BUS" | grep -q union; then
       echo "HINT: add 'AGENT_BUS.md merge=union' to .gitattributes and commit it,"
       echo "      or concurrent messages from both agents will conflict."

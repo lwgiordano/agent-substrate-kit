@@ -298,6 +298,11 @@ def repo_root(start: Path | None = None) -> Path:
 
 import stat as _stat
 
+# A required_* lock holds a tiny token ("0"/"1"/"starter"/"standard"/"strict")
+# plus at most trailing whitespace. Anything longer is malformed/padded and
+# must be rejected before it can be truncated into a lowering value (v3.8.37).
+LOCK_MAX_BYTES = 64
+
 
 def read_lock(path: Path, allowed: set) -> tuple:
     """Canonical fail-closed read of a frozen `.substrate/required_*` lock
@@ -310,34 +315,41 @@ def read_lock(path: Path, allowed: set) -> tuple:
                                 file, unreadable, undecodable, or out-of-domain
                                 value. Callers MUST fail closed on "bad".
 
-    Properties every reader must share (Codex round-19 findings):
-    - O_NOFOLLOW open + fstat S_ISREG: a SYMLINKED lock is "bad", never read
-      through (is_file() follows links, so a link to attacker-controlled '0'
-      lowered the containment floor), and a DIRECTORY lock is "bad", never
-      "absent" (is_file() on a dir is False — reading intent from the wrong
-      stat predicate turned malformed into missing).
-    - bytes + explicit UTF-8 decode: undecodable content is "bad" — a
-      UnicodeDecodeError must neither crash the caller nor vanish into a
-      bare `except OSError`.
+    Properties every reader must share (Codex round-19 + round-20 findings):
+    - O_NOFOLLOW | O_NONBLOCK open + fstat S_ISREG: a SYMLINKED lock is "bad",
+      never read through; a DIRECTORY lock is "bad", never "absent"; and a
+      FIFO/special lock is "bad" WITHOUT HANGING (O_NONBLOCK — a plain
+      O_NOFOLLOW open of a FIFO blocks until a writer appears, round-20 P2).
+    - WHOLE-CONTENT read, bounded to LOCK_MAX_BYTES: a lock longer than a
+      handful of bytes is "bad". The old 4096-byte read let `b"0" + 4095
+      spaces + b"1"` strip down to "0" (a valid lowering value) while the
+      trailing "1" fell off the end (round-20 P1). Reading past the tiny cap
+      and rejecting on overflow closes that, and the strip+membership check
+      rejects any internal non-whitespace (`"0   1"` is not in {"0","1"}).
+    - bytes + explicit UTF-8 decode: undecodable content is "bad".
     """
     try:
-        fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        fd = os.open(str(path),
+                     os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
     except OSError as e:
         if e.errno in (errno.ENOENT, errno.ENOTDIR):
             return ("absent", None, None)
         if e.errno == errno.ELOOP:
             return ("bad", None, "lock is a symlink — refusing to follow it")
+        # ENXIO: a write-only FIFO with no reader; still not a real lock.
         return ("bad", None, f"unreadable ({e.__class__.__name__})")
     try:
         st = os.fstat(fd)
         if not _stat.S_ISREG(st.st_mode):
-            return ("bad", None, "lock is not a regular file (directory/special)")
+            return ("bad", None, "lock is not a regular file (directory/fifo/special)")
         try:
-            raw = os.read(fd, 4096)
-        except OSError as e:
+            raw = os.read(fd, LOCK_MAX_BYTES + 1)
+        except (OSError, BlockingIOError) as e:
             return ("bad", None, f"unreadable ({e.__class__.__name__})")
     finally:
         os.close(fd)
+    if len(raw) > LOCK_MAX_BYTES:
+        return ("bad", None, f"lock exceeds {LOCK_MAX_BYTES} bytes — refusing to parse a padded value")
     try:
         val = raw.decode("utf-8").strip()
     except UnicodeDecodeError:

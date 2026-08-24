@@ -63,7 +63,13 @@ CONTEXT_GLOBS = [
 _SKILL_RESOURCE_EXTS = ("sh", "py", "js", "ts", "json", "yml", "yaml", "toml")
 _SKILL_ROOTS = (".claude/skills", ".agents/skills", ".github/skills")
 CODE_GLOBS = [
-    "manage.sh", "pytest.ini", ".pre-commit-config.yaml", ".gitattributes", ".gitignore",
+    # Root EXECUTION surfaces the agent/CI actually runs. manage.sh was scanned,
+    # but bootstrap/agentsync/package_release were NOT (round-20 P1) — a
+    # pipe-to-shell payload dropped into package_release.sh passed the harness
+    # scan clean. All four are shell the substrate executes, so all four are
+    # content-scanned. (v3.8.37)
+    "manage.sh", "bootstrap.sh", "agentsync.sh", "package_release.sh",
+    "pytest.ini", ".pre-commit-config.yaml", ".gitattributes", ".gitignore",
     # .substrate/config is read by manage.sh/CI as gate commands — it is
     # an execution surface and MUST be scanned for shell-danger (it is
     # parsed as data, never sourced, but its command values still run).
@@ -102,7 +108,11 @@ OWNED_DIRS = [
     ".github/hooks", ".github/instructions", ".github/workflows",
 ]
 OWNED_FILES = [
-    "AGENTS.md", "CLAUDE.md", "DESIGN.md", "manage.sh", "pytest.ini", ".pre-commit-config.yaml",
+    # Root execution surfaces are content-scanned (CODE_GLOBS) AND review-gated
+    # (v3.8.37) — a scanned-but-unowned script could be replaced without a
+    # CODEOWNER seeing it. bootstrap/agentsync/package_release join manage.sh.
+    "AGENTS.md", "CLAUDE.md", "DESIGN.md", "manage.sh", "bootstrap.sh",
+    "agentsync.sh", "package_release.sh", "pytest.ini", ".pre-commit-config.yaml",
     ".gitattributes", ".gitignore", ".github/copilot-instructions.md",
     ".github/dependabot.yml", ".substrate/config", ".substrate/required_profile",
     "docs/HISTORY.md", "docs/README.md", "docs/ARCHITECTURE.md", "docs/INTENT.md",

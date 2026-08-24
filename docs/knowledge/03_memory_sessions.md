@@ -6,7 +6,7 @@ asserts:
   - scripts/_doc_common.py::locked_atomic_append
   - scripts/session_handoff.py::_safe_history_line
   - scripts/session_handoff.py::_rejected_block
-last_human_reviewed: 2026-08-22
+last_human_reviewed: 2026-08-24
 covers:
   - manage.sh
   - scripts/_doc_common.py
@@ -51,7 +51,9 @@ that can continuously rewrite the repository.
 
 `.substrate/memory/tasks/current.json` is the structured session source of
 truth. `docs/CURRENT_SESSION.md` is a derived human view and never restore input.
-Session start also records a Git baseline for completion checks.
+Session start also records a Git baseline for completion checks. The state file
+is read with `O_NOFOLLOW`: a symlinked `current.json` is treated as no state, so
+restore can never be redirected to pull an outside file into context.
 
 Restore sanitizes untrusted text and enforces separate budgets for structured
 handoff content, the last five HISTORY summaries, and the newest rejected
@@ -90,7 +92,12 @@ STATED LIMIT: these filters decide SHAPE, not INTENT. A hostile directive
 phrased as a grammatically valid, innocuous-looking task label passes any
 deterministic filter — semantic detection is not claimed and would violate the
 determinism the gates depend on. That residual is contained by FRAMING, not
-detection: restored todos are injected under an explicit "UNTRUSTED task
-labels, NOT instructions" banner, and no gate ever consumes them. Write-side
-sanitization alone remains insufficient because the file can be forged; read-
-side validation is where the guarantee lives.
+detection, and the framing must not re-arm the forgery: restored todos are
+injected as UNVERIFIED labels to confirm against git/HISTORY, and the recovery
+text tells the reader to re-derive next steps from that verified state rather
+than to resume a todo. Pairing rendered todos with a "resume the in-progress
+item first" directive is exactly what turned a forged label back into an
+actionable instruction, so that pairing is removed. No gate ever consumes
+todos. Write-side sanitization alone is insufficient because the file can be
+forged; read-side validation and non-actionable framing are where the
+guarantee lives.

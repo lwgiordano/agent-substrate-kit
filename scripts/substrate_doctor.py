@@ -140,7 +140,7 @@ except Exception:  # pragma: no cover - fall back if inventory unreadable
     # import failure would silently DROP those coverage requirements and overstate
     # remote-governance coverage.)
     _SENSITIVE_DIRS=['scripts','tests','.claude','.codex','.agents','docs/decisions','docs/blind-spot-checklists','docs/templates','.github/hooks','.github/instructions','.github/workflows']
-    _SENSITIVE_FILES=['AGENTS.md','CLAUDE.md','DESIGN.md','manage.sh','pytest.ini','.pre-commit-config.yaml','.gitattributes','.gitignore','.github/copilot-instructions.md','.github/dependabot.yml','.substrate/config','.substrate/required_profile','docs/HISTORY.md','docs/README.md','docs/ARCHITECTURE.md','docs/INTENT.md','docs/knowledge/00_substrate.md','docs/knowledge/_template.md']
+    _SENSITIVE_FILES=['AGENTS.md','CLAUDE.md','DESIGN.md','manage.sh','bootstrap.sh','agentsync.sh','package_release.sh','pytest.ini','.pre-commit-config.yaml','.gitattributes','.gitignore','.github/copilot-instructions.md','.github/dependabot.yml','.substrate/config','.substrate/required_profile','docs/HISTORY.md','docs/README.md','docs/ARCHITECTURE.md','docs/INTENT.md','docs/knowledge/00_substrate.md','docs/knowledge/_template.md']
     _SENSITIVE_OPTIONAL_FILES=['.mcp.json','.substrate/trust/minisign.pub','.substrate/trust/sigstore_identity.json','.substrate/install.json']
     _SENSITIVE_OPTIONAL_DIRS=['.github/skills','docs/postmortems','design-system','templates']
     _SENSITIVE_GOVERNED_DIRS=['docs/knowledge']

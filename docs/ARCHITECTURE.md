@@ -89,7 +89,7 @@ a substrate feature.
 | Lint on every write | yes (PostToolUse Edit/Write) | no (edits arrive as patches; run `./manage.sh check`) | no | no |
 | Todo-state mirror | yes (PostToolUse TodoWrite) | no | no | no |
 | Session capture/restore | yes (SessionStart restore + PreCompact/SessionEnd capture) | yes (SessionStart restore + Stop capture, via hooks.json) | yes (sessionStart restore + sessionEnd capture, via .github/hooks/exfil-guard.json) | no |
-| Completion nudge (Stop) | yes (opt-in gate) | Stop wired to capture (no completion-gate nudge) | no | no |
+| Completion nudge (Stop) | yes (opt-in gate) | yes — Stop runs capture AND completion_gate.py (.codex/hooks.json) | no | no |
 | Non-Bash tools (Read/Edit/MCP/web) | host permission rules, not substrate hooks | host approval model | host approval model | host model |
 
 Row source of truth: the host hook-config files themselves —

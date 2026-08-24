@@ -2,7 +2,7 @@
 purpose: Command policy, hooks, sandboxing, and local or remote governance.
 asserts:
   - scripts/command_policy.py::looks_dangerous_command
-last_human_reviewed: 2026-08-22
+last_human_reviewed: 2026-08-24
 covers:
   - manage.sh
   - scripts/_substrate_config.sh
@@ -83,9 +83,14 @@ backend states report skipped or unavailable instead of false success, and a
 required tier blocks when its evidence cannot be produced.
 
 Frozen `.substrate/required_*` locks fail closed at every reader: an absent
-lock means no lock was pinned, but a present lock that is unreadable or holds
-an out-of-domain value fails the config gate, and the exfil guard treats an
-unreadable sandbox lock as containment-required. Permission flips are not
-content drift, so unreadable must never be cheaper than a governed edit. An
-absent `.substrate/config` does not bypass the locks either — every pinned
-minimum above a default fails the gate rather than vanishing with the file.
+lock means no lock was pinned, but a present lock that is a symlink, a
+directory, a FIFO/special file, unreadable, undecodable, out-of-domain, or
+padded beyond a few bytes fails the config gate, and the exfil guard treats
+such a sandbox lock as containment-required. The reader opens with
+`O_NOFOLLOW | O_NONBLOCK` (a symlinked lock is never followed to an
+attacker-controlled value; a FIFO fails fast instead of hanging the hook) and
+reads the whole small-bounded content (a `0`-then-padding-then-`1` file cannot
+be truncated into a lowering value). Permission flips are not content drift, so
+a malformed lock must never be cheaper than a governed edit. An absent
+`.substrate/config` does not bypass the locks either — every pinned minimum
+above a default fails the gate rather than vanishing with the file.

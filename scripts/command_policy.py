@@ -203,8 +203,14 @@ def profile() -> str:
     # the semantics are the same contract by construction, covered by tests.
     req = _ROOT / ".substrate" / "required_profile"
     order = {"starter": 0, "standard": 1, "strict": 2}
+    # v3.8.37: O_NONBLOCK so a FIFO lock fails fast (not hangs), and a WHOLE
+    # small-bounded read so a padded `b"strict"+spaces+b"starter"` cannot be
+    # truncated into a lowering value (round-20 P1/P2) — same contract as
+    # _doc_common.read_lock, kept inline because this module is AST-pinned.
+    _LOCK_MAX = 64
     try:
-        fd = os.open(str(req), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        fd = os.open(str(req),
+                     os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
     except OSError as e:
         if e.errno in (errno.ENOENT, errno.ENOTDIR):
             return configured  # genuinely absent — no lock was pinned
@@ -215,9 +221,16 @@ def profile() -> str:
         if not stat.S_ISREG(st.st_mode):
             raise CommandPolicyUnavailable(
                 "required_profile lock is not a regular file — failing closed")
-        raw = os.read(fd, 4096)
+        try:
+            raw = os.read(fd, _LOCK_MAX + 1)
+        except (OSError, BlockingIOError) as e:
+            raise CommandPolicyUnavailable(
+                f"required_profile lock unreadable ({e.__class__.__name__}) — failing closed")
     finally:
         os.close(fd)
+    if len(raw) > _LOCK_MAX:
+        raise CommandPolicyUnavailable(
+            "required_profile lock exceeds 64 bytes — refusing a padded value")
     try:
         r = raw.decode("utf-8").strip()
     except UnicodeDecodeError:

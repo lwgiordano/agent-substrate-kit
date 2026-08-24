@@ -208,17 +208,23 @@ def profile() -> str:
     # truncated into a lowering value (round-20 P1/P2) — same contract as
     # _doc_common.read_lock, kept inline because this module is AST-pinned.
     _LOCK_MAX = 64
-    # v3.8.39 (round-22): O_NOFOLLOW guards the leaf; a symlinked `.substrate`
-    # PARENT (`.substrate -> /outside`) routes a lowering lock/config in before
-    # the leaf check. realpath the parent against _ROOT and fail closed if it
-    # escapes — a routed outside lock must not downgrade the live hook policy.
+    # v3.8.39/40 (round-22/23): O_NOFOLLOW guards the leaf; a symlinked
+    # `.substrate` PARENT routes a lowering lock/config in before the leaf
+    # check. STRICT containment (mirrors _doc_common.within_root): the parent
+    # must resolve to its EXACT lexical location under _ROOT — a symlink that
+    # ESCAPES the repo OR aliases in-repo (`.substrate -> docs`, agent-writable)
+    # both diverge and fail closed. Kept inline because this module is AST-pinned.
     try:
         _root_real = os.path.realpath(str(_ROOT))
-        _parent_real = os.path.realpath(str(req.parent))
-        if not (_parent_real == _root_real or _parent_real.startswith(_root_real + os.sep)):
+        _rel = os.path.relpath(str(req.parent), str(_ROOT))
+        if _rel == os.pardir or _rel.startswith(os.pardir + os.sep) or os.path.isabs(_rel):
             raise CommandPolicyUnavailable(
-                "required_profile parent escapes the repo (symlinked ancestor) — failing closed")
-    except OSError:
+                "required_profile parent is outside the repo — failing closed")
+        _expected = os.path.normpath(os.path.join(_root_real, _rel))
+        if os.path.realpath(str(req.parent)) != _expected:
+            raise CommandPolicyUnavailable(
+                "required_profile parent is a symlink-aliased directory — failing closed")
+    except (OSError, ValueError):
         raise CommandPolicyUnavailable(
             "required_profile path unresolvable — failing closed")
     try:

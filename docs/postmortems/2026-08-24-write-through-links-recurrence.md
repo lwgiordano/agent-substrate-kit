@@ -4,10 +4,21 @@ severity: high
 caught_by: external-audit
 related_commits:
   - WORKING (v3.8.38 — round-21 remediation)
+  - WORKING (v3.8.39 — round-22 remediation)
+  - WORKING (v3.8.40 — round-23 remediation)
 gates_added:
   - tests/test_hook_scripts.py::test_agentsync_msg_refuses_hardlinked_bus
   - tests/test_hook_scripts.py::test_handoff_capture_does_not_write_through_links
   - tests/test_hook_scripts.py::test_handoff_restore_refuses_hardlinked_state
+  - tests/test_hook_scripts.py::test_within_root_rejects_in_repo_alias
+  - tests/test_hook_scripts.py::test_config_gate_rejects_aliased_substrate
+  - tests/test_hook_scripts.py::test_append_refuses_symlinked_leaf
+  - tests/test_hook_scripts.py::test_memory_log_refuses_routed_parent
+  - tests/test_hook_scripts.py::test_memory_log_fallback_fails_closed_on_routed_parent
+  - tests/test_hook_scripts.py::test_capture_symlinked_substrate_creates_no_outside_dir
+  - tests/test_hook_scripts.py::test_bus_claims_refuses_hardlinked_bus
+  - tests/test_hook_scripts.py::test_harness_blocks_symlinked_governed_ancestor
+  - scripts/run_substrate_evals.py::t_lock_in_repo_alias_no_floor
 ---
 
 # 2026-08-24 — write-through symlink/hard-link in file I/O (class recurrence)
@@ -71,23 +82,33 @@ not *mechanized*, so each new writer was free to reintroduce it.
 
 ## Carry-forward rule
 
-A link-safety fix has THREE parts, all required in the same change, or the
+A link-safety fix has FOUR parts, all required in the same change, or the
 missing one becomes the next audit finding:
-1. **Leaf symlink** — `O_NOFOLLOW` (or `is_symlink()` refusal).
+1. **Leaf symlink** — `O_NOFOLLOW` (or `is_symlink()` refusal), on WRITES *and*
+   the read-of-existing-content that precedes a replace.
 2. **Leaf hard link** — reject `st_nlink > 1`, or write via `mkstemp` +
    `os.replace` (which breaks the link and never writes through a symlink).
-3. **ANCESTOR directory** — realpath the parent against the repo root and
-   refuse if it escapes; a symlinked parent (`docs -> /outside`,
-   `.substrate -> /outside`) routes the whole path out before either leaf check
-   runs.
+   Apply to READERS too (a hard-linked bus/lock reads outside bytes).
+3. **ANCESTOR directory, STRICTLY** — the parent must resolve to its EXACT
+   lexical location under the repo root. A no-escape check is not enough: a
+   symlinked ancestor that resolves to a *different in-repo* directory
+   (`.substrate -> docs`) aliases a trust anchor to agent-writable content
+   without leaving the tree. `_doc_common.within_root` enforces the exact-parent
+   invariant.
+4. **Guard BEFORE side effects** — run the containment check before any
+   `mkdir`/`open`/lock, so a refused path creates no outside directory and takes
+   no outside lock. Apply the guard to EVERY writer of the class (memory_log was
+   the one missed), not just the newest.
 
-This class has recurred THREE times, each round closing one layer and exposing
+This class has recurred FOUR times, each round closing one layer and exposing
 the next: v3.8.25 (leaf symlink/hard link in provenance), v3.8.38 (leaf hard
-link in the capture/bus writers), v3.8.39 (symlinked ANCESTOR across every
-reader/writer). Before landing a link-safety fix, grep the repo for every
-`write_text` / `open(... O_APPEND ...)` / `read_text` / `mkstemp` on an
-agent-writable path and apply all three parts to each — the shared
-`_doc_common.within_root` + the leaf guards are that fix in one place.
+link in the capture/bus writers), v3.8.39 (symlinked ANCESTOR, no-escape),
+v3.8.40 (STRICT ancestor — in-repo aliasing — + read-through leaf + memory_log
+containment + guard-before-mkdir + hard-linked readers). Before landing a
+link-safety fix, grep the repo for every `write_text` / `open(... O_APPEND ...)`
+/ `read_text` / `mkstemp` / `mkdir` / `.open(` on an agent-writable path and
+apply all four parts to each — the shared `_doc_common.within_root` + the leaf
+guards are that fix in one place, but every writer must call them.
 
 ## Round 2 — v3.8.39 (round-22): the ancestor layer
 
@@ -99,6 +120,21 @@ the AST-pinned `command_policy` reader; the harness additionally BLOCKs a
 symlinked governed *directory*, and both bus readers refuse a symlinked
 `AGENT_BUS.md`. This round is why part 3 was added to the carry-forward rule
 above — the leaf-only reflex was the exact incompleteness that recurred.
+
+## Round 3 — v3.8.40 (round-23): strict ancestor + the missed writers
+
+The v3.8.39 `within_root` checked only NO-ESCAPE (realpath within root), so a
+symlinked ancestor resolving to a *different in-repo* directory
+(`.substrate -> docs`) still redirected the trust anchor to agent-writable
+content. Tightened to the EXACT-lexical-parent invariant. Three more gaps in
+the same class surfaced together: `locked_atomic_append` read the existing
+target through a symlinked leaf before replacing it; `memory_log.append` had no
+containment at all; and the capture writers ran `mkdir` before the guard, so a
+refused write still created an outside directory. Readers gained hard-link
+refusal (bus_claims, agentsync `read`), and `agentsync read` moved its
+validation AFTER the `git pull` (a remote push could swap the bus to a symlink
+between an early check and the read). This round is why parts 1, 2, and 4 of the
+carry-forward rule gained their qualifiers, and why part 3 became STRICT.
 
 ## (Optional) Reproduction
 

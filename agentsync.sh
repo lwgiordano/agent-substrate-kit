@@ -129,13 +129,28 @@ PY
     fi
     ;;
   read)
-    # v3.8.39 (round-22): refuse a symlinked/non-regular bus — else `read`
-    # prints an outside file's contents as if it were the bus.
-    if [ -L "$BUS" ] || { [ -e "$BUS" ] && [ ! -f "$BUS" ]; }; then
-      echo "agentsync: refusing — $BUS is a symlink or non-regular file" >&2
-      exit 2
-    fi
+    # v3.8.40 (round-23): validate AFTER the pull, not before — a remote commit
+    # can replace AGENT_BUS.md with a symlink between an early check and the read
+    # (TOCTOU). Also reject HARD links (nlink>1), which follow no symlink check
+    # but share an outside inode. Refuse before printing anything.
     git pull --no-edit --no-rebase origin "$BR" >/dev/null 2>&1 || true
+    if [ -e "$BUS" ]; then
+      AGENT_BUS_PATH="$BUS" python3 - <<'PY' || exit $?
+import os, stat, sys
+b = os.environ["AGENT_BUS_PATH"]
+try:
+    st = os.lstat(b)
+except OSError:
+    sys.exit(0)  # absent — handled below
+if stat.S_ISLNK(st.st_mode):
+    sys.stderr.write("agentsync: refusing — %s is a symlink\n" % b); sys.exit(2)
+if not stat.S_ISREG(st.st_mode):
+    sys.stderr.write("agentsync: refusing — %s is not a regular file\n" % b); sys.exit(2)
+if st.st_nlink > 1:
+    sys.stderr.write("agentsync: refusing — %s has %d hard links (shared inode)\n"
+                     % (b, st.st_nlink)); sys.exit(2)
+PY
+    fi
     tail -n "${2:-20}" "$BUS" 2>/dev/null || echo "(no bus yet — send one with: ./agentsync.sh msg \"hi\")"
     ;;
   watch)

@@ -305,23 +305,32 @@ LOCK_MAX_BYTES = 64
 
 
 def within_root(target, root) -> bool:
-    """True iff `target`'s PARENT resolves inside `root` (v3.8.39 — round-22).
+    """True iff `target`'s PARENT resolves to its EXACT lexical location under
+    `root` — no aliasing symlink anywhere below root (v3.8.40 — round-23).
 
-    Leaf-level O_NOFOLLOW / st_nlink guards protect the final path component,
-    but a symlinked ANCESTOR directory (`docs -> /outside`, `.substrate ->
-    /outside`) redirects the whole path before the leaf check runs. Comparing
-    realpath(parent) against realpath(root) catches an escaping ancestor while
-    still allowing the repo itself to be reached through a symlink (e.g. /tmp is
-    a symlink on macOS) — both sides are resolved, so a legitimately-symlinked
-    root stays contained. The leaf is deliberately NOT resolved here (its own
-    O_NOFOLLOW handles a symlinked leaf); resolving the parent isolates the
-    ancestor gap. Returns False (fail closed) on any resolution error."""
+    v3.8.39 checked only NO-ESCAPE (realpath(parent) somewhere inside root). But
+    a symlinked ancestor that resolves to a DIFFERENT in-repo directory
+    (`.substrate -> docs`) still redirects the trust anchor to agent-writable
+    content without leaving the tree — an escape of TRUST, not of the filesystem.
+    The correct invariant is stricter: the parent must resolve to exactly where
+    its lexical path says it should be under the REAL root. Computed by taking
+    the parent's path RELATIVE to root (lexically, so a symlinked `root` itself
+    is fine — the repo may sit under /tmp on macOS) and requiring
+    realpath(parent) == realpath(root)/<that-relative-path>. Any symlink below
+    root — escaping OR in-repo-aliasing — makes the two diverge. The leaf is
+    still handled by its own O_NOFOLLOW; this isolates the ancestor gap. Returns
+    False (fail closed) on any resolution error or a parent above root."""
     try:
         root_real = os.path.realpath(str(root))
-        parent_real = os.path.realpath(str(Path(target).parent))
-    except OSError:
+        parent = Path(target).parent
+        rel = os.path.relpath(str(parent), str(root))
+        if rel == os.pardir or rel.startswith(os.pardir + os.sep) or os.path.isabs(rel):
+            return False  # parent is above / outside root lexically
+        expected = os.path.normpath(os.path.join(root_real, rel))
+        actual = os.path.realpath(str(parent))
+    except (OSError, ValueError):
         return False
-    return parent_real == root_real or parent_real.startswith(root_real + os.sep)
+    return actual == expected
 
 
 def read_lock(path: Path, allowed: set, root=None) -> tuple:
@@ -421,13 +430,22 @@ def locked_atomic_append(target: Path, entry: str, header: str, tmp_prefix: str,
     repo files, expected on a local checkout.
 
     v3.8.39 (round-22): a symlinked PARENT directory (`docs -> /outside`) would
-    route the append outside the repo before the lock/replace ran. realpath the
-    parent against the repo root and refuse an escaping ancestor.
+    route the append outside the repo before the lock/replace ran. within_root
+    (now strict — no aliasing ancestor) is checked BEFORE mkdir so a refused
+    target creates no outside directory.
+
+    v3.8.40 (round-23): the LEAF itself must not be a symlink either. os.replace
+    breaks the link on WRITE, but the read of existing content
+    (`target.read_text()`) FOLLOWS a symlinked leaf and would import an outside
+    file's bytes into the new in-repo log. An append-only log leaf is never a
+    symlink; refuse one.
     """
     if root is None:
         root = repo_root()
     if not within_root(target, root):
         raise OSError(f"append target parent escapes the repo (symlinked ancestor): {target}")
+    if target.is_symlink():
+        raise OSError(f"append target is a symlink — refusing to read/replace through it: {target}")
     target.parent.mkdir(parents=True, exist_ok=True)
     dir_fd = os.open(str(target.parent), os.O_RDONLY)
     try:

@@ -135,6 +135,41 @@ def _read_events() -> list[dict]:
 
 def append(etype: str, data) -> int:
     try:
+        # v3.8.40 (round-23 P1): the tamper-evident log must never be routed
+        # outside the repo. A symlinked `.substrate`/`.substrate/memory`
+        # ancestor would send .lock + events.jsonl to an outside inode; the
+        # structured-handoff writer had this guard but memory_log did not.
+        # STRICT containment (no escaping OR in-repo-aliasing ancestor) BEFORE
+        # the mkdir so a refused write creates no outside directory, and refuse
+        # a symlinked leaf so the append never writes through a link.
+        try:
+            from _doc_common import within_root as _within_root
+            contained = _within_root(EVENTS, ROOT)
+        except Exception:
+            # Fallback mirrors _doc_common.within_root STRICTLY and fails
+            # CLOSED: the EVENTS parent (MEM) must resolve to its EXACT lexical
+            # location under realpath(ROOT). A prior version compared
+            # realpath(MEM) to realpath(ROOT/".substrate"/"memory") — the same
+            # expression on both sides, an always-True tautology that fails
+            # OPEN through any symlinked ancestor (round-23 auditor P1).
+            try:
+                _root_real = os.path.realpath(str(ROOT))
+                _rel = os.path.relpath(str(EVENTS.parent), str(ROOT))
+                if _rel == os.pardir or _rel.startswith(os.pardir + os.sep) or os.path.isabs(_rel):
+                    contained = False
+                else:
+                    _expected = os.path.normpath(os.path.join(_root_real, _rel))
+                    contained = os.path.realpath(str(EVENTS.parent)) == _expected
+            except (OSError, ValueError):
+                contained = False
+        if not contained:
+            print("memory-log: refusing append — memory dir escapes the repo "
+                  "(symlinked ancestor)", file=sys.stderr)
+            return 1
+        for _leaf in (EVENTS, MEM / ".lock"):
+            if _leaf.is_symlink():
+                print(f"memory-log: refusing append — {_leaf.name} is a symlink", file=sys.stderr)
+                return 1
         MEM.mkdir(parents=True, exist_ok=True)
         lock = MEM / ".lock"
         with lock.open("w") as lf:

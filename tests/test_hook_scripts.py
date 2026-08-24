@@ -4887,6 +4887,158 @@ def test_handoff_capture_does_not_write_through_links(tmp_path) -> None:
     assert not (tmp_path / "docs" / "CURRENT_SESSION.md").is_symlink(), "left the symlink in place"
 
 
+def test_within_root_rejects_in_repo_alias(tmp_path) -> None:
+    """v3.8.40 (round-23 P1): within_root must reject a symlinked ancestor that
+    resolves to a DIFFERENT in-repo directory (`.substrate -> docs`) — that
+    aliases the trust anchor to agent-writable content without leaving the tree.
+    A real directory and a file directly in root still pass."""
+    import importlib
+    dc = importlib.import_module("_doc_common")
+    (tmp_path / "docs").mkdir()
+    (tmp_path / ".substrate").mkdir()
+    assert dc.within_root(tmp_path / ".substrate" / "required_sandbox", tmp_path)
+    (tmp_path / ".substrate").rmdir()
+    (tmp_path / ".substrate").symlink_to("docs")  # in-repo alias
+    assert not dc.within_root(tmp_path / ".substrate" / "required_sandbox", tmp_path), \
+        "in-repo aliased ancestor accepted"
+    (tmp_path / ".substrate").unlink()
+    outside = tmp_path.parent / (tmp_path.name + "_out")
+    outside.mkdir()
+    (tmp_path / ".substrate").symlink_to(outside)  # escaping
+    assert not dc.within_root(tmp_path / ".substrate" / "x", tmp_path)
+
+
+def test_config_gate_rejects_aliased_substrate(tmp_path) -> None:
+    """v3.8.40: the config gate reads locks through within_root, so a
+    `.substrate -> docs` alias (agent-writable lock/config) must fail the gate,
+    not silently downgrade governance."""
+    if not (SCRIPTS / "check_substrate_config.py").exists():
+        return
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "config").write_text('SUBSTRATE_PROFILE="starter"\n', encoding="utf-8")
+    (tmp_path / "docs" / "required_sandbox").write_text("1\n", encoding="utf-8")
+    (tmp_path / ".substrate").symlink_to("docs")
+    p = _run("check_substrate_config.py", [], "", cwd=tmp_path)
+    # the read_lock guard refuses the aliased parent → LOCK ERROR (rc 2), never
+    # a clean read of the agent-writable docs/required_sandbox.
+    assert p.returncode == 2, (p.returncode, p.stderr[-300:])
+
+
+def test_append_refuses_symlinked_leaf(tmp_path) -> None:
+    """v3.8.40 (round-23 P1): locked_atomic_append reads the existing target
+    before replacing; a symlinked LEAF (docs/HISTORY.md -> /outside) would import
+    outside bytes into the new repo file. The leaf symlink must be refused."""
+    import importlib
+    dc = importlib.import_module("_doc_common")
+    (tmp_path / "docs").mkdir()
+    outside = tmp_path / "outside_data.txt"
+    outside.write_text("OUTSIDE_MARK", encoding="utf-8")
+    (tmp_path / "docs" / "HISTORY.md").symlink_to(outside)
+    try:
+        dc.locked_atomic_append(tmp_path / "docs" / "HISTORY.md", "- e\n", "# H\n",
+                                ".H.", root=tmp_path)
+        assert False, "append through a symlinked leaf was allowed"
+    except OSError as e:
+        assert "symlink" in str(e)
+    assert outside.read_text(encoding="utf-8") == "OUTSIDE_MARK"
+
+
+def test_memory_log_refuses_routed_parent(tmp_path) -> None:
+    """v3.8.40 (round-23 P1): memory_log.append must not write .lock/events.jsonl
+    through a symlinked .substrate/memory ancestor to an outside inode."""
+    if not (SCRIPTS / "memory_log.py").exists():
+        return
+    (tmp_path / ".substrate").mkdir()
+    outmem = tmp_path.parent / (tmp_path.name + "_mem")
+    outmem.mkdir()
+    (tmp_path / ".substrate" / "memory").symlink_to(outmem)
+    p = subprocess.run([sys.executable, "-I", str(SCRIPTS / "memory_log.py"),
+                        "append", "test", "{}"], cwd=tmp_path, capture_output=True,
+                       text=True, timeout=30, env=dict(os.environ, SUBSTRATE_PROJECT_DIR=str(tmp_path)))
+    assert not (outmem / "events.jsonl").exists(), "wrote events through routed parent"
+    assert not (outmem / ".lock").exists(), "wrote lock through routed parent"
+
+
+def test_memory_log_fallback_fails_closed_on_routed_parent(tmp_path, monkeypatch) -> None:
+    """v3.8.40 (round-23 auditor P1): when the _doc_common import fails, the
+    inline fallback must STILL fail CLOSED on a symlinked ancestor. The prior
+    fallback compared realpath(MEM) to realpath(ROOT/".substrate"/"memory") —
+    the same expression on both sides, an always-True tautology that failed
+    OPEN through any routed parent. Exercises the except branch directly."""
+    if not (SCRIPTS / "memory_log.py").exists():
+        return
+    import importlib
+    ml = importlib.import_module("memory_log")
+    (tmp_path / ".substrate").mkdir()
+    outmem = tmp_path.parent / (tmp_path.name + "_flmem")
+    outmem.mkdir()
+    (tmp_path / ".substrate" / "memory").symlink_to(outmem)
+    monkeypatch.setattr(ml, "ROOT", tmp_path)
+    monkeypatch.setattr(ml, "MEM", tmp_path / ".substrate" / "memory")
+    monkeypatch.setattr(ml, "EVENTS", tmp_path / ".substrate" / "memory" / "events.jsonl")
+    # None in sys.modules makes `from _doc_common import within_root` raise,
+    # forcing the inline fallback that the auditor flagged.
+    monkeypatch.setitem(sys.modules, "_doc_common", None)
+    rc = ml.append("test", {})
+    assert rc == 1, "fallback failed open through a routed parent"
+    assert not (outmem / "events.jsonl").exists(), "fallback wrote events outside"
+    assert not (outmem / ".lock").exists(), "fallback wrote lock outside"
+
+
+def test_capture_symlinked_substrate_creates_no_outside_dir(tmp_path) -> None:
+    """v3.8.40 (round-23 P2): the containment guard must run BEFORE any parent
+    mkdir — a symlinked .substrate must not cause an outside directory to be
+    created even though the final write is refused."""
+    if not (SCRIPTS / "session_handoff.py").exists():
+        return
+    import importlib
+    sh = importlib.import_module("session_handoff")
+    (tmp_path / "docs").mkdir()
+    outside = tmp_path.parent / (tmp_path.name + "_out")
+    outside.mkdir()
+    (tmp_path / ".substrate").symlink_to(outside)
+    sh.capture_for_root(tmp_path, {"trigger": "test"})
+    assert not (outside / "memory" / "tasks").exists(), "created an outside directory before refusing"
+
+
+def test_bus_claims_refuses_hardlinked_bus(tmp_path) -> None:
+    """v3.8.40 (round-23 P2): the lease reader refuses symlinked buses but a
+    HARD-LINKED AGENT_BUS.md shares an outside inode invisibly. st_nlink>1 must
+    be refused."""
+    if not (SCRIPTS / "bus_claims.py").exists():
+        return
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    outside = tmp_path / "outbus.txt"
+    outside.write_text("- [2026-08-24T00:00:00Z] **mallory**: CLAIM v9.9.9 evil\n", encoding="utf-8")
+    os.link(outside, tmp_path / "AGENT_BUS.md")
+    p = subprocess.run([sys.executable, "-I", str(SCRIPTS / "bus_claims.py"), "--all"],
+                       cwd=tmp_path, capture_output=True, text=True, timeout=30)
+    assert p.returncode == 0
+    assert "hard link" in p.stdout
+    assert "mallory" not in p.stdout, "derived lease state from a hard-linked bus"
+
+
+def test_harness_blocks_symlinked_governed_ancestor(tmp_path) -> None:
+    """v3.8.40 (round-23 P2): the harness flagged an exact governed dir but not
+    an ANCESTOR of one — `docs -> /outside` (parent of governed docs/knowledge)
+    redirects the scan while green. An ancestor symlink must BLOCK."""
+    import shutil
+    repo = tmp_path / "kit"
+    repo.mkdir()
+    (repo / "scripts").mkdir()
+    for f in ("check_agent_harness.py", "_substrate_surfaces.py", "_substrate_root.py",
+              "harness_patterns.json"):
+        shutil.copy(SCRIPTS / f, repo / "scripts" / f)
+    outdocs = tmp_path / "outside_docs"
+    (outdocs / "knowledge").mkdir(parents=True)
+    (outdocs / "knowledge" / "00_substrate.md").write_text("# x\n", encoding="utf-8")
+    (repo / "docs").symlink_to(outdocs)  # docs is an ancestor of governed docs/knowledge
+    p = subprocess.run([sys.executable, "scripts/check_agent_harness.py"],
+                       cwd=repo, capture_output=True, text=True, timeout=30, env=_HERMETIC_ENV)
+    assert p.returncode == 1, (p.returncode, (p.stdout + p.stderr)[-300:])
+    assert "ancestor" in (p.stdout + p.stderr) or "symlink" in (p.stdout + p.stderr)
+
+
 def test_handoff_todo_framing_is_verify_not_resume(tmp_path) -> None:
     """v3.8.37 (round-20 P2): restore must not pair a rendered (agent-writable,
     forgeable) todo with a 'resume in-progress item first' directive — todos are
@@ -4961,7 +5113,7 @@ def test_harness_blocks_symlinked_governed_directory(tmp_path) -> None:
     p = subprocess.run([sys.executable, "scripts/check_agent_harness.py"],
                        cwd=repo, capture_output=True, text=True, timeout=30, env=_HERMETIC_ENV)
     assert p.returncode == 1, (p.returncode, (p.stdout + p.stderr)[-300:])
-    assert "directory is a symlink" in (p.stdout + p.stderr)
+    assert "is a symlink" in (p.stdout + p.stderr)  # v3.8.40 reworded: "(or an ancestor)"
     assert "docs/knowledge" in (p.stdout + p.stderr)
 
 

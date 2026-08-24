@@ -57,13 +57,23 @@ def main():
         if p in skip: continue
         rel=p.relative_to(ROOT).as_posix()
         findings.append(("governed surface is a symlink (redirects/hides the scan)", rel, 0))
-    # v3.8.39 (round-22): a symlinked governed DIRECTORY (docs/knowledge, .codex,
-    # .agents/skills ...) redirects or shrinks the whole glob under it while the
-    # per-file scan stays green. Flag any governed dir that is a symlink.
+    # v3.8.39/40 (round-22/23): a symlinked governed DIRECTORY — or ANY ancestor
+    # of one — redirects or shrinks the glob under it while the per-file scan
+    # stays green. v3.8.39 checked only the exact listed path; `docs ->
+    # /outside` (an ancestor of governed `docs/knowledge`) slipped through. Walk
+    # every path component of each governed dir and flag the first that is a
+    # symlink. Skill roots are governed dirs, so they are covered by the lists.
+    _seen_link = set()
     for d in OWNED_DIRS + OPTIONAL_DIRS + GOVERNED_DIRS + GOVERNED_OPTIONAL_DIRS:
-        dp = ROOT / d
-        if dp.is_symlink():
-            findings.append(("governed directory is a symlink (redirects/shrinks the scan)", d, 0))
+        parts = d.split("/")
+        for i in range(1, len(parts) + 1):
+            comp = "/".join(parts[:i])
+            cp = ROOT / comp
+            if comp not in _seen_link and cp.is_symlink():
+                _seen_link.add(comp)
+                findings.append(("governed directory (or an ancestor) is a symlink "
+                                 "(redirects/shrinks the scan)", comp, 0))
+                break  # deeper components are under the link; one finding per chain
     for p in sorted(context|code):
         text=p.read_text(encoding='utf-8', errors='replace'); rel=p.relative_to(ROOT).as_posix()
         if rel in HARNESS_ALLOWLIST:

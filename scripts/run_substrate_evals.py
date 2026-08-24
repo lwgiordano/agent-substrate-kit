@@ -364,6 +364,28 @@ def t_lock_symlinked_parent_no_floor():
         return p.returncode == 2, f"rc={p.returncode}"
 
 
+def t_lock_in_repo_alias_no_floor():
+    """v3.8.40 (round-23 P1): a symlinked `.substrate` that aliases an IN-REPO
+    agent-writable directory (`.substrate -> docs`, docs/required_sandbox=0)
+    routes a lowering lock in WITHOUT leaving the tree — the v3.8.39 no-escape
+    check passed it. Strict within_root (exact lexical parent) fails closed, so
+    the guard still requires containment (rc 2)."""
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        _stage(td, "check_exfil_guard.py", "command_policy.py", "_substrate_root.py")
+        (td / "docs").mkdir()
+        (td / "docs" / "required_sandbox").write_text("0")
+        (td / "docs" / "config").write_text('SUBSTRATE_SANDBOX="0"\n')
+        (td / ".substrate").symlink_to("docs")  # in-repo alias
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("SUBSTRATE_SANDBOXED", "SUBSTRATE_HOST_SANDBOX", "SUBSTRATE_HOOK_HOST")}
+        env["SUBSTRATE_HOOK_HOST"] = "codex"
+        payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": "echo hi"}})
+        p = subprocess.run([PY, str(td / "scripts" / "check_exfil_guard.py")], input=payload,
+                           cwd=str(td), capture_output=True, text=True, timeout=20, env=env)
+        return p.returncode == 2, f"rc={p.returncode}"
+
+
 def t_lock_fifo_no_hang():
     """v3.8.37 (round-20 P2): a FIFO required_sandbox lock must fail closed
     WITHOUT HANGING (O_NONBLOCK) — the guard blocks (rc 2) within the timeout
@@ -865,6 +887,7 @@ TASKS = [
     ("lock_symlink_lowers_no_floor", "malicious", "block", t_lock_symlink_lowers_no_floor, False),
     ("lock_padded_value_no_floor", "malicious", "block", t_lock_padded_value_no_floor, False),
     ("lock_symlinked_parent_no_floor", "malicious", "block", t_lock_symlinked_parent_no_floor, False),
+    ("lock_in_repo_alias_no_floor", "malicious", "block", t_lock_in_repo_alias_no_floor, False),
     ("lock_fifo_no_hang", "malicious", "block", t_lock_fifo_no_hang, False),
     ("handoff_capture_no_write_through_symlink", "malicious", "block", t_handoff_capture_no_write_through_symlink, False),
     ("agentsync_refuses_hardlinked_bus", "malicious", "block", t_agentsync_refuses_hardlinked_bus, False),

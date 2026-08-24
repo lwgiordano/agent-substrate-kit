@@ -236,12 +236,21 @@ def main(argv=None) -> int:
                     help="exit 1 when any claim lease is expired")
     a = ap.parse_args(argv)
     bus = repo_root() / "AGENT_BUS.md"
-    # v3.8.39 (round-22): a symlinked (or non-regular) AGENT_BUS.md must not be
-    # read — coordination state would be derived from an outside file. Advisory
-    # reader, so this is a reported no-op, not a hard failure.
+    # v3.8.39/40 (round-22/23): a symlinked, non-regular, OR HARD-LINKED
+    # AGENT_BUS.md must not be read — coordination state would be derived from an
+    # outside inode. A hard link (st_nlink>1) shares the same bytes as an outside
+    # file while passing every is_symlink/is_file check (the v3.8.25 class), so
+    # check it explicitly via lstat. Advisory reader → reported no-op.
     if bus.is_symlink() or (bus.exists() and not bus.is_file()):
         print("bus-claims: refusing — AGENT_BUS.md is a symlink or non-regular file; "
               "not reading coordination state from outside the repo.")
+        return 0
+    try:
+        if bus.exists() and bus.lstat().st_nlink > 1:
+            print("bus-claims: refusing — AGENT_BUS.md has multiple hard links; "
+                  "not reading coordination state from a shared inode.")
+            return 0
+    except OSError:
         return 0
     if not bus.is_file():
         print("bus-claims: no AGENT_BUS.md — nothing to report.")

@@ -5039,6 +5039,111 @@ def test_harness_blocks_symlinked_governed_ancestor(tmp_path) -> None:
     assert "ancestor" in (p.stdout + p.stderr) or "symlink" in (p.stdout + p.stderr)
 
 
+def test_refuse_linked_leaf_symlink_and_hardlink(tmp_path) -> None:
+    """v3.8.41 (round-24): the centralized leaf guard rejects BOTH a symlink and
+    a hard link, and passes a private regular file / absent path."""
+    import importlib
+    dc = importlib.import_module("_doc_common")
+    reg = tmp_path / "reg.txt"
+    reg.write_text("x", encoding="utf-8")
+    assert dc.refuse_linked_leaf(reg) is None
+    assert dc.refuse_linked_leaf(tmp_path / "absent.txt") is None
+    outside = tmp_path.parent / (tmp_path.name + "_ol")
+    outside.write_text("y", encoding="utf-8")
+    sym = tmp_path / "sym.txt"
+    sym.symlink_to(outside)
+    assert "symlink" in (dc.refuse_linked_leaf(sym) or "")
+    hard = tmp_path / "hard.txt"
+    os.link(outside, hard)
+    assert "hard link" in (dc.refuse_linked_leaf(hard) or "")
+
+
+def test_read_lock_refuses_hardlinked_lock(tmp_path) -> None:
+    """v3.8.41 (round-24 P1): read_lock's O_NOFOLLOW+S_ISREG both PASS a hard
+    link, so a lock hard-linked to an outside inode must be 'bad', not read."""
+    import importlib
+    dc = importlib.import_module("_doc_common")
+    (tmp_path / ".substrate").mkdir()
+    outside = tmp_path.parent / (tmp_path.name + "_rlk")
+    outside.write_text("0", encoding="utf-8")
+    lock = tmp_path / ".substrate" / "required_sandbox"
+    os.link(outside, lock)
+    state, val, reason = dc.read_lock(lock, {"0", "1"}, root=tmp_path)
+    assert state == "bad", f"hard-linked lock accepted: {state}/{val}"
+    assert "hard link" in (reason or "")
+
+
+def test_locked_atomic_append_refuses_hardlinked_leaf(tmp_path) -> None:
+    """v3.8.41 (round-24 P1): locked_atomic_append refused a symlinked leaf but
+    read_text() imported outside bytes through a HARD-LINKED leaf before the
+    replace. Refuse st_nlink>1 too, before any read."""
+    import importlib
+    dc = importlib.import_module("_doc_common")
+    (tmp_path / "docs").mkdir()
+    outside = tmp_path.parent / (tmp_path.name + "_hist")
+    outside.write_text("OUTSIDE_MARK\n", encoding="utf-8")
+    target = tmp_path / "docs" / "HISTORY.md"
+    os.link(outside, target)
+    with pytest.raises(OSError):
+        dc.locked_atomic_append(target, "new entry\n", "# H\n", "hist", root=tmp_path)
+    body = outside.read_text(encoding="utf-8")
+    assert "OUTSIDE_MARK" in body and "new entry" not in body, "wrote through hard link"
+
+
+def test_memory_log_refuses_hardlinked_leaf(tmp_path) -> None:
+    """v3.8.41 (round-24 P1): memory_log.append checked is_symlink() only; a
+    hard-linked events.jsonl shares an outside inode and .open('a') appends to it."""
+    if not (SCRIPTS / "memory_log.py").exists():
+        return
+    (tmp_path / ".substrate" / "memory").mkdir(parents=True)
+    outside = tmp_path.parent / (tmp_path.name + "_ev")
+    outside.write_text("", encoding="utf-8")
+    os.link(outside, tmp_path / ".substrate" / "memory" / "events.jsonl")
+    p = subprocess.run([sys.executable, "-I", str(SCRIPTS / "memory_log.py"),
+                        "append", "--type", "test", "--message", "hello hardlink"],
+                       cwd=tmp_path, capture_output=True, text=True, timeout=30,
+                       env=dict(os.environ, SUBSTRATE_PROJECT_DIR=str(tmp_path)))
+    assert "hello hardlink" not in outside.read_text(encoding="utf-8"), "appended through hard link"
+    assert "hard link" in (p.stderr or "")
+
+
+def test_read_session_token_refuses_linked_current_session(tmp_path) -> None:
+    """v3.8.41 (round-24 P2): read_session_token read a symlinked/hard-linked
+    CURRENT_SESSION.md and copied its token into HISTORY. Refuse -> NO_SESSION."""
+    import importlib
+    ah = importlib.import_module("append_history")
+    (tmp_path / "docs").mkdir()
+    outside = tmp_path.parent / (tmp_path.name + "_sess")
+    outside.write_text("**Session token:** OUTSIDE_TOKEN\n", encoding="utf-8")
+    sess = tmp_path / "docs" / "CURRENT_SESSION.md"
+    sess.symlink_to(outside)
+    assert ah.read_session_token(tmp_path) == "NO_SESSION", "imported token via symlink"
+    sess.unlink()
+    os.link(outside, sess)
+    assert ah.read_session_token(tmp_path) == "NO_SESSION", "imported token via hard link"
+
+
+def test_harness_blocks_symlinked_skill_root(tmp_path) -> None:
+    """v3.8.41 (round-24 P2): .agents/skills is a GLOB ROOT in _substrate_surfaces,
+    not in the walked dir lists, so a symlinked skill root was neither scanned
+    (glob does not follow it) nor flagged. The walk now covers _SKILL_ROOTS."""
+    import shutil
+    repo = tmp_path / "kit"
+    repo.mkdir()
+    (repo / "scripts").mkdir()
+    for f in ("check_agent_harness.py", "_substrate_surfaces.py", "_substrate_root.py",
+              "harness_patterns.json"):
+        shutil.copy(SCRIPTS / f, repo / "scripts" / f)
+    (repo / ".agents").mkdir()
+    outside_skills = tmp_path / "outside_skills"
+    outside_skills.mkdir()
+    (repo / ".agents" / "skills").symlink_to(outside_skills)
+    p = subprocess.run([sys.executable, "scripts/check_agent_harness.py"],
+                       cwd=repo, capture_output=True, text=True, timeout=30, env=_HERMETIC_ENV)
+    assert p.returncode == 1, (p.returncode, (p.stdout + p.stderr)[-300:])
+    assert "symlink" in (p.stdout + p.stderr)
+
+
 def test_handoff_todo_framing_is_verify_not_resume(tmp_path) -> None:
     """v3.8.37 (round-20 P2): restore must not pair a rendered (agent-writable,
     forgeable) todo with a 'resume in-progress item first' directive — todos are

@@ -27,7 +27,8 @@ try:
 except Exception:
     ROOT = Path.cwd()
 from _substrate_surfaces import (CONTEXT_GLOBS, CODE_GLOBS, HARNESS_SKIP_GLOBS, HARNESS_ALLOWLIST,
-                                 OWNED_DIRS, OPTIONAL_DIRS, GOVERNED_DIRS, GOVERNED_OPTIONAL_DIRS)
+                                 OWNED_DIRS, OPTIONAL_DIRS, GOVERNED_DIRS, GOVERNED_OPTIONAL_DIRS,
+                                 _SKILL_ROOTS)
 def _load_patterns():
     p=Path(__file__).resolve().parent/'harness_patterns.json'
     data=json.loads(p.read_text(encoding='utf-8'))
@@ -63,8 +64,16 @@ def main():
     # /outside` (an ancestor of governed `docs/knowledge`) slipped through. Walk
     # every path component of each governed dir and flag the first that is a
     # symlink. Skill roots are governed dirs, so they are covered by the lists.
+    # v3.8.41 (round-24 P2): _SKILL_ROOTS (.claude/skills, .agents/skills,
+    # .github/skills) are GLOB ROOTS in _substrate_surfaces (CODE_GLOBS builds
+    # `<root>/**/*.<ext>` from them) but are NOT all in the dir lists above —
+    # only .github/skills is (OPTIONAL_DIRS). A direct symlink AT a skill root
+    # (`.agents/skills -> /outside`) is neither scanned (glob does not follow it)
+    # nor flagged (its parent `.agents` is the only listed component). Walk the
+    # skill roots too so a linked skill root BLOCKs instead of silently shrinking
+    # the scan. list(_SKILL_ROOTS) is deduped against the dir lists by _seen_link.
     _seen_link = set()
-    for d in OWNED_DIRS + OPTIONAL_DIRS + GOVERNED_DIRS + GOVERNED_OPTIONAL_DIRS:
+    for d in OWNED_DIRS + OPTIONAL_DIRS + GOVERNED_DIRS + GOVERNED_OPTIONAL_DIRS + list(_SKILL_ROOTS):
         parts = d.split("/")
         for i in range(1, len(parts) + 1):
             comp = "/".join(parts[:i])

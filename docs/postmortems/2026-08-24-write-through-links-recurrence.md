@@ -6,7 +6,15 @@ related_commits:
   - WORKING (v3.8.38 — round-21 remediation)
   - WORKING (v3.8.39 — round-22 remediation)
   - WORKING (v3.8.40 — round-23 remediation)
+  - WORKING (v3.8.41 — round-24 remediation)
 gates_added:
+  - tests/test_hook_scripts.py::test_refuse_linked_leaf_symlink_and_hardlink
+  - tests/test_hook_scripts.py::test_read_lock_refuses_hardlinked_lock
+  - tests/test_hook_scripts.py::test_locked_atomic_append_refuses_hardlinked_leaf
+  - tests/test_hook_scripts.py::test_memory_log_refuses_hardlinked_leaf
+  - tests/test_hook_scripts.py::test_read_session_token_refuses_linked_current_session
+  - tests/test_hook_scripts.py::test_harness_blocks_symlinked_skill_root
+  - scripts/run_substrate_evals.py::t_lock_hardlink_lowers_no_floor
   - tests/test_hook_scripts.py::test_agentsync_msg_refuses_hardlinked_bus
   - tests/test_hook_scripts.py::test_handoff_capture_does_not_write_through_links
   - tests/test_hook_scripts.py::test_handoff_restore_refuses_hardlinked_state
@@ -100,15 +108,20 @@ missing one becomes the next audit finding:
    no outside lock. Apply the guard to EVERY writer of the class (memory_log was
    the one missed), not just the newest.
 
-This class has recurred FOUR times, each round closing one layer and exposing
+This class has recurred FIVE times, each round closing one layer and exposing
 the next: v3.8.25 (leaf symlink/hard link in provenance), v3.8.38 (leaf hard
 link in the capture/bus writers), v3.8.39 (symlinked ANCESTOR, no-escape),
 v3.8.40 (STRICT ancestor — in-repo aliasing — + read-through leaf + memory_log
-containment + guard-before-mkdir + hard-linked readers). Before landing a
-link-safety fix, grep the repo for every `write_text` / `open(... O_APPEND ...)`
-/ `read_text` / `mkstemp` / `mkdir` / `.open(` on an agent-writable path and
-apply all four parts to each — the shared `_doc_common.within_root` + the leaf
-guards are that fix in one place, but every writer must call them.
+containment + guard-before-mkdir + hard-linked readers), v3.8.41 (the HARD-LINKED
+LEAF, on the lock readers / append log / memory log / session-token reader that
+round-23 had only symlink-guarded, + the missed skill-root symlink). Before
+landing a link-safety fix, grep the repo for every `write_text` /
+`open(... O_APPEND ...)` / `read_text` / `mkstemp` / `mkdir` / `.open(` on an
+agent-writable path and apply all four parts to each — the shared
+`_doc_common.within_root` + `_doc_common.refuse_linked_leaf` (symlink AND
+`st_nlink > 1`) are that fix in one place, but EVERY reader and writer must call
+them. When you add a symlink leaf guard, add the hard-link half IN THE SAME EDIT
+— that omission is the exact shape that recurred from round-23 to round-24.
 
 ## Round 2 — v3.8.39 (round-22): the ancestor layer
 
@@ -135,6 +148,26 @@ refusal (bus_claims, agentsync `read`), and `agentsync read` moved its
 validation AFTER the `git pull` (a remote push could swap the bus to a symlink
 between an early check and the read). This round is why parts 1, 2, and 4 of the
 carry-forward rule gained their qualifiers, and why part 3 became STRICT.
+
+## Round 4 — v3.8.41 (round-24): the hard-linked LEAF
+
+v3.8.40 refused a SYMLINKED leaf (`is_symlink()` / `O_NOFOLLOW`) on the append
+log, the memory log, and the capture writers — but a HARD LINK is a regular
+file: it passes `is_symlink()` AND the fd-based `O_NOFOLLOW`+`S_ISREG` checks,
+so `read_lock`, the AST-pinned `command_policy` lock reader, `locked_atomic_append`
+(before its `read_text`), and `memory_log.append` all still read/wrote a
+hard-linked leaf that shared an OUTSIDE inode — lowering a containment lock or
+importing an outside file's bytes into an in-repo log. `append_history.read_session_token`
+had never been link-guarded at all and copied a hard-/sym-linked
+`CURRENT_SESSION.md`'s token into HISTORY. And the harness ancestor walk (added
+in round-22/23) covered the governed dir LISTS but not the skill-glob ROOTS
+(`.agents/skills`, `.claude/skills`), so a direct symlink AT a skill root was
+neither scanned nor flagged. Centralized fix: `_doc_common.refuse_linked_leaf`
+(symlink OR `st_nlink > 1`, lstat-based) now guards every path-based leaf
+reader/writer; the two fd-based lock readers add the `st_nlink > 1` rule on their
+TOCTOU-free `fstat`; the harness walks `_SKILL_ROOTS` too. This round is why the
+carry-forward rule now says the hard-link half must land in the SAME edit as the
+symlink half — the round-23→24 gap was exactly that split.
 
 ## (Optional) Reproduction
 

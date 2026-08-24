@@ -240,6 +240,13 @@ def profile() -> str:
         if not stat.S_ISREG(st.st_mode):
             raise CommandPolicyUnavailable(
                 "required_profile lock is not a regular file — failing closed")
+        # v3.8.41 (round-24 P1): a HARD LINK is a regular file — O_NOFOLLOW and
+        # S_ISREG both pass it — so a hard-linked required_profile lock lowers the
+        # runtime profile from an outside inode. Mirror read_lock's st_nlink>1
+        # rule; fstat on the open fd is TOCTOU-free. Kept inline (AST-pinned).
+        if st.st_nlink > 1:
+            raise CommandPolicyUnavailable(
+                "required_profile lock is a hard link (shared inode) — failing closed")
         try:
             raw = os.read(fd, _LOCK_MAX + 1)
         except (OSError, BlockingIOError) as e:

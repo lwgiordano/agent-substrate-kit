@@ -84,11 +84,13 @@ required tier blocks when its evidence cannot be produced.
 
 Frozen `.substrate/required_*` locks fail closed at every reader: an absent
 lock means no lock was pinned, but a present lock that is a symlink, a
-directory, a FIFO/special file, unreadable, undecodable, out-of-domain, or
-padded beyond a few bytes fails the config gate, and the exfil guard treats
-such a sandbox lock as containment-required. The reader opens with
-`O_NOFOLLOW | O_NONBLOCK` (a symlinked lock is never followed to an
-attacker-controlled value; a FIFO fails fast instead of hanging the hook) and
+**hard link** (`st_nlink > 1`), a directory, a FIFO/special file, unreadable,
+undecodable, out-of-domain, or padded beyond a few bytes fails the config gate,
+and the exfil guard treats such a sandbox lock as containment-required. The
+reader opens with `O_NOFOLLOW | O_NONBLOCK` (a symlinked lock is never followed
+to an attacker-controlled value; a FIFO fails fast instead of hanging the hook),
+checks `st_nlink > 1` on the fstat result (a hard link IS a regular file, so
+`O_NOFOLLOW`+`S_ISREG` alone would read a shared outside inode's value), and
 reads the whole small-bounded content (a `0`-then-padding-then-`1` file cannot
 be truncated into a lowering value). Permission flips are not content drift, so
 a malformed lock must never be cheaper than a governed edit. An absent

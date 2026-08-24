@@ -35,7 +35,13 @@ from pathlib import Path
 # Explicit local import path so this works under `python -I` (isolated mode
 # does NOT auto-prepend the script dir). Stdlib imports above resolve first.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _doc_common import git_short_sha, locked_atomic_append, repo_root, utc_now_iso
+from _doc_common import (
+    git_short_sha,
+    locked_atomic_append,
+    refuse_linked_leaf,
+    repo_root,
+    utc_now_iso,
+)
 
 
 def _other_files_dirty(root: Path) -> list[str]:
@@ -84,6 +90,12 @@ combine without conflicts.
 def read_session_token(history_root: Path) -> str:
     session_file = history_root / "docs" / "CURRENT_SESSION.md"
     if not session_file.exists():
+        return "NO_SESSION"
+    # v3.8.41 (round-24 P2): CURRENT_SESSION.md is agent-writable, untrusted
+    # state. A symlinked OR hard-linked leaf would read an OUTSIDE file and copy
+    # its `**Session token:**` value verbatim into the append-only HISTORY entry.
+    # Refuse a linked leaf (fail to NO_SESSION) rather than import outside bytes.
+    if refuse_linked_leaf(session_file) is not None:
         return "NO_SESSION"
     text = session_file.read_text(encoding="utf-8")
     m = SESSION_TOKEN_RE.search(text)

@@ -68,9 +68,13 @@ nonblocking exclusive lock on the parent directory, rereads under the lock,
 writes a same-directory temporary file, and replaces the leaf before unlocking.
 Directory locking survives target inode replacement; target-inode locking would
 not. Replacement preserves the no-write-through-symlink-or-hard-link property
-that direct append would lose. Interrupted lock calls retry, invalid timeout
-overrides fall back to the default, and lock or I/O failure maps to each CLI's
-existing nonzero contract.
+that direct append would lose, but the reread of existing content happens BEFORE
+the replace, so the target leaf itself is guarded first: `refuse_linked_leaf`
+(the shared symlink-OR-`st_nlink > 1` check) rejects a linked leaf before any
+read, and `memory_log` and `append_history`'s session-token reader route through
+the same guard so a hard-linked log/state file never shares an outside inode's
+bytes. Interrupted lock calls retry, invalid timeout overrides fall back to the
+default, and lock or I/O failure maps to each CLI's existing nonzero contract.
 
 ## Completion
 

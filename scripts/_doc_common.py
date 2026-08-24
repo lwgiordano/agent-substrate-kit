@@ -333,6 +333,33 @@ def within_root(target, root) -> bool:
     return actual == expected
 
 
+def refuse_linked_leaf(path) -> str | None:
+    """Return a reason string if `path` exists and is an UNSAFE LEAF — a
+    symlink OR a hard link (`st_nlink > 1`) — that a read/write must not go
+    through to a shared or outside inode; else None (absent, or a private
+    regular file). Path-based via `lstat` (never follows), so it is the
+    single guard every path-based leaf reader/writer routes through.
+
+    v3.8.41 (round-24): round-23 refused a symlinked leaf with `is_symlink()`
+    /`O_NOFOLLOW`, but a HARD LINK is a regular file — it passes `is_symlink()`
+    AND the fd-based `O_NOFOLLOW`+`S_ISREG` checks — so `docs/HISTORY.md`,
+    `.substrate/required_*`, or `.substrate/memory/events.jsonl` hard-linked to
+    an outside inode still read/wrote the shared bytes. `st_nlink > 1` is the
+    forgotten half of the class (postmortem carry-forward part 2). fd-based
+    readers (`read_lock`, the `command_policy` inline reader) apply the same
+    `st_nlink > 1` rule on their TOCTOU-free `fstat` result inline; this helper
+    is for the path-based callers that read/replace by name."""
+    try:
+        st = os.lstat(str(path))
+    except (OSError, ValueError):
+        return None  # absent or unstat-able: nothing to refuse here
+    if _stat.S_ISLNK(st.st_mode):
+        return "is a symlink"
+    if st.st_nlink > 1:
+        return "is a hard link (shared inode)"
+    return None
+
+
 def read_lock(path: Path, allowed: set, root=None) -> tuple:
     """Canonical fail-closed read of a frozen `.substrate/required_*` lock
     (v3.8.36 — the complete class fix after v3.8.33's partial sweep).
@@ -378,6 +405,11 @@ def read_lock(path: Path, allowed: set, root=None) -> tuple:
         st = os.fstat(fd)
         if not _stat.S_ISREG(st.st_mode):
             return ("bad", None, "lock is not a regular file (directory/fifo/special)")
+        # v3.8.41 (round-24 P1): a HARD LINK is a regular file — O_NOFOLLOW and
+        # S_ISREG both pass it — so a lock hard-linked to an outside inode reads
+        # attacker-controlled bytes. fstat on the already-open fd is TOCTOU-free.
+        if st.st_nlink > 1:
+            return ("bad", None, "lock is a hard link (shared inode) — refusing a shared-inode value")
         try:
             raw = os.read(fd, LOCK_MAX_BYTES + 1)
         except (OSError, BlockingIOError) as e:
@@ -444,8 +476,14 @@ def locked_atomic_append(target: Path, entry: str, header: str, tmp_prefix: str,
         root = repo_root()
     if not within_root(target, root):
         raise OSError(f"append target parent escapes the repo (symlinked ancestor): {target}")
-    if target.is_symlink():
-        raise OSError(f"append target is a symlink — refusing to read/replace through it: {target}")
+    # v3.8.41 (round-24 P1): symlink OR hard link. os.replace breaks the link on
+    # WRITE, but the read of existing content below FOLLOWS a symlinked leaf and
+    # a hard-linked leaf shares the outside inode's bytes — either imports an
+    # outside file's content into the new in-repo log. An append-only log leaf is
+    # never a link; refuse both (round-23 caught only the symlink half).
+    _leaf_reason = refuse_linked_leaf(target)
+    if _leaf_reason is not None:
+        raise OSError(f"append target {_leaf_reason} — refusing to read/replace through it: {target}")
     target.parent.mkdir(parents=True, exist_ok=True)
     dir_fd = os.open(str(target.parent), os.O_RDONLY)
     try:

@@ -166,9 +166,25 @@ def append(etype: str, data) -> int:
             print("memory-log: refusing append — memory dir escapes the repo "
                   "(symlinked ancestor)", file=sys.stderr)
             return 1
+        # v3.8.41 (round-24 P1): refuse a symlinked OR hard-linked leaf. Round-23
+        # checked only is_symlink(), but a hard-linked events.jsonl/.lock is a
+        # regular file that shares an outside inode, so EVENTS.open("a") appends
+        # and lock.open("w") truncates the shared bytes. Route both leaves through
+        # the centralized _doc_common.refuse_linked_leaf (symlink OR st_nlink>1),
+        # with an inline lstat fallback if the import is unavailable.
         for _leaf in (EVENTS, MEM / ".lock"):
-            if _leaf.is_symlink():
-                print(f"memory-log: refusing append — {_leaf.name} is a symlink", file=sys.stderr)
+            try:
+                from _doc_common import refuse_linked_leaf as _rll
+                _reason = _rll(_leaf)
+            except Exception:
+                try:
+                    _lst = os.lstat(str(_leaf))
+                    _reason = ("is a symlink" if stat.S_ISLNK(_lst.st_mode)
+                               else "is a hard link (shared inode)" if _lst.st_nlink > 1 else None)
+                except (OSError, ValueError):
+                    _reason = None
+            if _reason is not None:
+                print(f"memory-log: refusing append — {_leaf.name} {_reason}", file=sys.stderr)
                 return 1
         MEM.mkdir(parents=True, exist_ok=True)
         lock = MEM / ".lock"

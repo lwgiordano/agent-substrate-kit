@@ -5144,6 +5144,248 @@ def test_harness_blocks_symlinked_skill_root(tmp_path) -> None:
     assert "symlink" in (p.stdout + p.stderr)
 
 
+# --- v3.8.42 (Codex round-25): non-regular leaves, the READ side, and the
+# --- post-lock parent-swap race. One regression per finding.
+
+def test_refuse_linked_leaf_rejects_non_regular(tmp_path) -> None:
+    """round-25 finding 1: v3.8.41 checked symlink + st_nlink but never S_ISREG,
+    so a FIFO read as SAFE and then hung the caller on open()."""
+    import importlib
+    dc = importlib.import_module("_doc_common")
+    fifo = tmp_path / "fifo"
+    os.mkfifo(fifo)
+    assert "not a regular file" in (dc.refuse_linked_leaf(fifo) or "")
+
+
+def test_safe_read_text_guards_every_unsafe_leaf(tmp_path) -> None:
+    """round-25: the shared READ-side guard. Symlink, hard link, FIFO, an
+    escaping parent, and an over-cap file all return None; a real file reads."""
+    import importlib
+    dc = importlib.import_module("_doc_common")
+    (tmp_path / "docs").mkdir()
+    good = tmp_path / "docs" / "ok.md"
+    good.write_text("HELLO\n", encoding="utf-8")
+    assert dc.safe_read_text(good, tmp_path) == "HELLO\n"
+    assert dc.safe_read_text(tmp_path / "docs" / "absent.md", tmp_path) is None
+    outside = tmp_path.parent / (tmp_path.name + "_srt")
+    outside.write_text("OUTSIDE_MARK\n", encoding="utf-8")
+    sym = tmp_path / "docs" / "sym.md"
+    sym.symlink_to(outside)
+    assert dc.safe_read_text(sym, tmp_path) is None, "followed a symlinked leaf"
+    hard = tmp_path / "docs" / "hard.md"
+    os.link(outside, hard)
+    assert dc.safe_read_text(hard, tmp_path) is None, "read a hard-linked leaf"
+    fifo = tmp_path / "docs" / "fifo.md"
+    os.mkfifo(fifo)
+    assert dc.safe_read_text(fifo, tmp_path) is None, "did not refuse a FIFO"
+    assert dc.safe_read_text(good, tmp_path, max_bytes=2) is None, "over-cap not refused"
+    # tail_bytes reads the END, and never returns None for a large file
+    big = tmp_path / "docs" / "big.md"
+    big.write_text("A" * 100 + "TAILMARK", encoding="utf-8")
+    assert (dc.safe_read_text(big, tmp_path, tail_bytes=8) or "").endswith("TAILMARK")
+
+
+def test_locked_atomic_append_refuses_parent_swap_under_lock(tmp_path, monkeypatch) -> None:
+    """round-25 finding 2 (P1): containment was validated BEFORE the directory
+    lock, then the target was re-resolved BY PATH for read/mkstemp/replace — so
+    an appender that blocked on the lock wrote wherever the path pointed when it
+    woke. Swap the parent while it waits: it must refuse, and the outside file
+    must be untouched."""
+    import fcntl as _fcntl
+    import importlib
+    import threading
+    import time as _time
+    dc = importlib.import_module("_doc_common")
+    monkeypatch.setenv("SUBSTRATE_APPEND_LOCK_TIMEOUT", "20")
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    target = docs / "HISTORY.md"
+    target.write_text("# H\n", encoding="utf-8")
+    outside = tmp_path.parent / (tmp_path.name + "_swapdir")
+    outside.mkdir()
+    (outside / "HISTORY.md").write_text("OUTSIDE_MARK\n", encoding="utf-8")
+    holder = os.open(str(docs), os.O_RDONLY)
+    _fcntl.flock(holder, _fcntl.LOCK_EX)
+    box: dict = {}
+    def _run() -> None:
+        try:
+            dc.locked_atomic_append(target, "SWAPPED_ENTRY\n", "# H\n", "hist", root=tmp_path)
+            box["ok"] = True
+        except BaseException as e:  # noqa: BLE001 - the refusal is the assertion
+            box["err"] = e
+    t = threading.Thread(target=_run)
+    t.start()
+    _time.sleep(0.4)                       # let it block in the lock retry loop
+    docs.rename(tmp_path / "docs_real")    # swap the parent out from under it
+    (tmp_path / "docs").symlink_to(outside)
+    _fcntl.flock(holder, _fcntl.LOCK_UN)
+    os.close(holder)
+    t.join(timeout=30)
+    assert not t.is_alive(), "appender wedged after the parent swap"
+    body = (outside / "HISTORY.md").read_text(encoding="utf-8")
+    assert "SWAPPED_ENTRY" not in body, "wrote through the swapped parent to an outside file"
+    assert "OUTSIDE_MARK" in body
+    assert "err" in box, "append did not refuse a parent swapped under the lock"
+
+
+def test_memory_log_read_side_breaks_on_tampered_leaf(tmp_path) -> None:
+    """round-25 finding 4: the READ side had no guard — a linked events.jsonl
+    verified as a clean OUTSIDE chain and tail printed outside content. A
+    tampered leaf must BREAK; an ABSENT log is still a legitimate empty chain."""
+    if not (SCRIPTS / "memory_log.py").exists():
+        return
+    script = str(SCRIPTS / "memory_log.py")
+    outside = tmp_path / "outside_events.jsonl"
+    outside.write_text(
+        json.dumps({"seq": 0, "ts": "2026-01-01T00:00:00+00:00", "type": "x",
+                    "prev": "0" * 64, "hash": "dead", "data": {"m": "OUTSIDE_MARK"}}) + "\n",
+        encoding="utf-8")
+    for kind in ("symlink", "hardlink", "fifo"):
+        repo = tmp_path / kind
+        (repo / ".substrate" / "memory").mkdir(parents=True)
+        ev = repo / ".substrate" / "memory" / "events.jsonl"
+        if kind == "symlink":
+            ev.symlink_to(outside)
+        elif kind == "hardlink":
+            os.link(outside, ev)
+        else:
+            os.mkfifo(ev)
+        p = subprocess.run([sys.executable, "-I", script, "verify"], cwd=repo,
+                           capture_output=True, text=True, timeout=25,
+                           env=dict(os.environ, SUBSTRATE_PROJECT_DIR=str(repo)))
+        out = p.stdout + p.stderr
+        assert p.returncode == 1, f"{kind}: tampered log verified as OK ({out[-160:]})"
+        assert "BREAK" in out, f"{kind}: {out[-160:]}"
+        assert "OUTSIDE_MARK" not in out
+    clean = tmp_path / "clean"
+    (clean / ".substrate" / "memory").mkdir(parents=True)
+    p = subprocess.run([sys.executable, "-I", script, "verify"], cwd=clean,
+                       capture_output=True, text=True, timeout=25,
+                       env=dict(os.environ, SUBSTRATE_PROJECT_DIR=str(clean)))
+    assert p.returncode == 0, "an ABSENT log must stay a legitimate empty chain"
+
+
+def test_read_session_token_degrades_on_fifo_and_bad_utf8(tmp_path) -> None:
+    """round-25 finding 3: the leaf guard ran but the read that followed was a
+    bare read_text — a FIFO hung and undecodable bytes raised out of the CLI."""
+    import importlib
+    ah = importlib.import_module("append_history")
+    (tmp_path / "docs").mkdir()
+    sess = tmp_path / "docs" / "CURRENT_SESSION.md"
+    os.mkfifo(sess)
+    assert ah.read_session_token(tmp_path) == "NO_SESSION", "FIFO not refused"
+    sess.unlink()
+    sess.write_bytes(b"**Session token:** \xff\xfe\n")
+    assert ah.read_session_token(tmp_path) == "NO_SESSION", "undecodable bytes not degraded"
+
+
+def test_handoff_tails_refuse_linked_docs(tmp_path, monkeypatch) -> None:
+    """round-25 finding 6: the SessionStart HISTORY/REJECTED tail readers used a
+    raw stat/open pair, so a linked docs leaf injected OUTSIDE bytes straight
+    into MODEL CONTEXT."""
+    if not (SCRIPTS / "session_handoff.py").exists():
+        return
+    import importlib
+    sh = importlib.import_module("session_handoff")
+    (tmp_path / "docs").mkdir()
+    outside = tmp_path.parent / (tmp_path.name + "_ctx")
+    outside.write_text(
+        "## 2026-01-01T00:00:00Z — NO_SESSION — deadbee\n"
+        "**Summary:** OUTSIDE_CONTEXT_MARK\n\n", encoding="utf-8")
+    hist = tmp_path / "docs" / "HISTORY.md"
+    rej = tmp_path / "docs" / "REJECTED.md"
+    os.link(outside, hist)      # hard-linked
+    rej.symlink_to(outside)     # symlinked
+    monkeypatch.setattr(sh, "ROOT", tmp_path)
+    monkeypatch.setattr(sh, "HISTORY_MD", hist)
+    monkeypatch.setattr(sh, "REJECTED_MD", rej)
+    assert sh._history_tail() == [], "hard-linked HISTORY reached model context"
+    assert sh._rejected_tail() == [], "symlinked REJECTED reached model context"
+
+
+def test_handoff_safe_read_mirror_matches_canonical(tmp_path, monkeypatch) -> None:
+    """v3.8.42 in-release (round-25 security-auditor WARN): session_handoff keeps
+    an INLINE mirror of safe_read_text (it stays stdlib-only), and the mirror
+    truncated on max_bytes overflow where the canonical helper returns None.
+    Latent — both call sites pass tail_bytes — but mirror drift is exactly what
+    caused rounds 23-25, so the contract is pinned against the real helper."""
+    if not (SCRIPTS / "session_handoff.py").exists():
+        return
+    import importlib
+    sh = importlib.import_module("session_handoff")
+    dc = importlib.import_module("_doc_common")
+    (tmp_path / "docs").mkdir()
+    f = tmp_path / "docs" / "x.md"
+    f.write_text("HELLO", encoding="utf-8")
+    monkeypatch.setattr(sh, "ROOT", tmp_path)
+    for kwargs in ({"max_bytes": 10}, {"max_bytes": 2}, {"max_bytes": 5},
+                   {"tail_bytes": 3}, {"tail_bytes": 99}):
+        assert sh._safe_read_text(f, tmp_path, **kwargs) == \
+            dc.safe_read_text(f, tmp_path, **kwargs), f"mirror diverged for {kwargs}"
+    assert sh._safe_read_text(f, tmp_path, max_bytes=2) is None, "truncated instead of refusing"
+
+
+def test_completion_gate_ignores_linked_events(tmp_path, monkeypatch) -> None:
+    """round-25 finding 7: the gate read events.jsonl directly, so a hard-linked
+    outside log holding a forged recent self-audit event SUPPRESSED the Stop
+    nudge. Unsafe evidence must count as NO evidence."""
+    if not (SCRIPTS / "completion_gate.py").exists():
+        return
+    import importlib
+    cg = importlib.import_module("completion_gate")
+    (tmp_path / ".substrate" / "memory").mkdir(parents=True)
+    outside = tmp_path.parent / (tmp_path.name + "_cgev")
+    outside.write_text(
+        json.dumps({"seq": 0, "ts": "2099-01-01T00:00:00+00:00", "type": "skill-run",
+                    "prev": "0" * 64, "hash": "dead",
+                    "data": {"skill": "self-audit", "result": "pass"}}) + "\n",
+        encoding="utf-8")
+    ev = tmp_path / ".substrate" / "memory" / "events.jsonl"
+    os.link(outside, ev)
+    monkeypatch.setattr(cg, "ROOT", tmp_path)
+    monkeypatch.setattr(cg, "EVENTS", ev)
+    assert cg._audit_event_after(None) is False, "forged linked event suppressed the nudge"
+
+
+def test_harness_blocks_non_regular_governed_surface(tmp_path) -> None:
+    """round-25 finding 8: a FIFO governed surface is neither a symlink nor
+    is_file(), so it silently DROPPED from the inventory and the scan reported
+    ok with a quietly lower count."""
+    import shutil
+    repo = tmp_path / "kit"
+    repo.mkdir()
+    (repo / "scripts").mkdir()
+    for f in ("check_agent_harness.py", "_substrate_surfaces.py", "_substrate_root.py",
+              "harness_patterns.json"):
+        shutil.copy(SCRIPTS / f, repo / "scripts" / f)
+    os.mkfifo(repo / "AGENTS.md")
+    p = subprocess.run([sys.executable, "scripts/check_agent_harness.py"],
+                       cwd=repo, capture_output=True, text=True, timeout=30, env=_HERMETIC_ENV)
+    assert p.returncode == 1, (p.returncode, (p.stdout + p.stderr)[-300:])
+    assert "not a regular file" in (p.stdout + p.stderr)
+
+
+def test_harness_blocks_empty_scan_root(tmp_path) -> None:
+    """round-25 finding 9 (P3): the scanner trusts an unpinned _substrate_root
+    it cannot verify, so a poisoned helper pointing at an empty tree printed
+    'ok (0 files scanned)'. Finding NO governed surface is never a clean bill."""
+    import shutil
+    repo = tmp_path / "kit"
+    repo.mkdir()
+    (repo / "scripts").mkdir()
+    for f in ("check_agent_harness.py", "_substrate_surfaces.py", "harness_patterns.json"):
+        shutil.copy(SCRIPTS / f, repo / "scripts" / f)
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    (repo / "scripts" / "_substrate_root.py").write_text(
+        "from pathlib import Path\n"
+        f"def substrate_root():\n    return Path({str(empty)!r})\n", encoding="utf-8")
+    p = subprocess.run([sys.executable, "scripts/check_agent_harness.py"],
+                       cwd=repo, capture_output=True, text=True, timeout=30, env=_HERMETIC_ENV)
+    assert p.returncode == 1, (p.returncode, (p.stdout + p.stderr)[-300:])
+    assert "no governed surfaces" in (p.stdout + p.stderr)
+
+
 def test_handoff_todo_framing_is_verify_not_resume(tmp_path) -> None:
     """v3.8.37 (round-20 P2): restore must not pair a rendered (agent-writable,
     forgeable) todo with a 'resume in-progress item first' directive — todos are

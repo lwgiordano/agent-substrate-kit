@@ -42,22 +42,33 @@ def _glob(pats):
     # silently drops out of the inventory (is_file() is False), shrinking the
     # count. Real regular files go to `out`; any symlink match (broken or not)
     # goes to `links` so main() can BLOCK it rather than scan/skip it.
-    out=set(); links=set()
+    # v3.8.42 (round-25 P2): a NON-REGULAR governed surface (FIFO/socket/device)
+    # is neither a symlink nor is_file(), so it silently DROPPED out of the
+    # inventory — the scan returned ok with a quietly lower count, which is the
+    # same false-green a broken symlink used to produce. Non-regular existing
+    # surfaces go to `bad` so main() BLOCKs them instead of skipping them.
+    out=set(); links=set(); bad=set()
     for pat in pats:
         cands = ROOT.glob(pat) if '*' in pat else ([ROOT/pat] if (ROOT/pat).is_symlink() or (ROOT/pat).exists() else [])
         for p in cands:
             if p.is_symlink(): links.add(p)
             elif p.is_file(): out.add(p)
-    return out, links
+            elif p.exists(): bad.add(p)
+    return out, links, bad
 def main():
-    skip,_=_glob(HARNESS_SKIP_GLOBS)
-    context,ctx_links=_glob(CONTEXT_GLOBS); context-=skip
-    code,code_links=_glob(CODE_GLOBS); code-=skip
+    skip,_,_=_glob(HARNESS_SKIP_GLOBS)
+    context,ctx_links,ctx_bad=_glob(CONTEXT_GLOBS); context-=skip
+    code,code_links,code_bad=_glob(CODE_GLOBS); code-=skip
     findings=[]
     for p in sorted((ctx_links|code_links)):
         if p in skip: continue
         rel=p.relative_to(ROOT).as_posix()
         findings.append(("governed surface is a symlink (redirects/hides the scan)", rel, 0))
+    for p in sorted((ctx_bad|code_bad)):
+        if p in skip: continue
+        rel=p.relative_to(ROOT).as_posix()
+        findings.append(("governed surface is not a regular file (fifo/socket/device) "
+                         "— refusing to skip it", rel, 0))
     # v3.8.39/40 (round-22/23): a symlinked governed DIRECTORY — or ANY ancestor
     # of one — redirects or shrinks the glob under it while the per-file scan
     # stays green. v3.8.39 checked only the exact listed path; `docs ->
@@ -92,6 +103,18 @@ def main():
             if p in context: pats+=list(INJECTION)
         for label,rx in pats:
             for m in rx.finditer(text): findings.append((label,rel,text.count('\n',0,m.start())+1))
+    # v3.8.42 (round-25 P3): this script imports _substrate_root — which it
+    # cannot itself verify — BEFORE discovering surfaces, so a poisoned helper
+    # returning an empty directory made a standalone run print "ok (0 files
+    # scanned)". Pinning the helper would only move the trust; the honest,
+    # self-contained tell is the RESULT: a real install always has governed
+    # surfaces, so finding NONE means the scan root is wrong or the inventory
+    # was redirected — never a clean bill of health. (Asserting that this file
+    # lives under ROOT was rejected: running the scanner from outside the tree
+    # it scans is a legitimate, tested pattern.)
+    if not (context | code):
+        findings.append(("no governed surfaces found — scan root is wrong or the "
+                         "inventory was redirected (refusing to report ok)", '.', 0))
     if findings:
         print('agent-harness: BLOCK findings')
         for label,rel,line in findings: print(f'  - BLOCK: {label}: {rel}:{line}')

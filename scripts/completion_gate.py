@@ -147,16 +147,64 @@ def _last_project_change() -> datetime | None:
     return max(candidates).replace(microsecond=0)
 
 
+def _safe_event_lines() -> list[str] | None:
+    """Tail lines of events.jsonl, or None when absent OR unsafe to read.
+
+    Inline mirror of _doc_common.safe_read_text (v3.8.42 — round-25 P2); this
+    hook stays stdlib-only and self-contained. STRICT containment first (a
+    routed `.substrate` ancestor must not supply the evidence), then the leaf is
+    opened O_NOFOLLOW|O_NONBLOCK and must fstat as a regular file with
+    st_nlink == 1 — a FIFO fails fast instead of hanging the Stop hook."""
+    import stat as _st
+    try:
+        parent = EVENTS.parent
+        rel = os.path.relpath(str(parent), str(ROOT))
+        if rel == os.pardir or rel.startswith(os.pardir + os.sep) or os.path.isabs(rel):
+            return None
+        expected = os.path.normpath(os.path.join(os.path.realpath(str(ROOT)), rel))
+        if os.path.realpath(str(parent)) != expected:
+            return None
+    except (OSError, ValueError):
+        return None
+    try:
+        fd = os.open(str(EVENTS),
+                     os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    except (OSError, ValueError):
+        return None
+    try:
+        st = os.fstat(fd)
+        if not _st.S_ISREG(st.st_mode) or st.st_nlink > 1:
+            return None
+        tail = 64 * 1024
+        if st.st_size > tail:
+            os.lseek(fd, st.st_size - tail, os.SEEK_SET)
+        chunks: list[bytes] = []
+        got = 0
+        while got < tail:
+            b = os.read(fd, min(65536, tail - got))
+            if not b:
+                break
+            chunks.append(b)
+            got += len(b)
+    except (OSError, ValueError):
+        return None
+    finally:
+        os.close(fd)
+    return b"".join(chunks).decode("utf-8", errors="replace").splitlines()
+
+
 def _audit_event_after(cutoff: datetime | None) -> bool:
     """True if a self-audit skill-run event exists at/after `cutoff`
-    (bounded tail read — the log is append-only and can grow large)."""
-    try:
-        with EVENTS.open("rb") as fh:
-            fh.seek(0, 2)
-            size = fh.tell()
-            fh.seek(max(0, size - 64 * 1024))
-            lines = fh.read().decode("utf-8", errors="replace").splitlines()
-    except Exception:
+    (bounded tail read — the log is append-only and can grow large).
+
+    v3.8.42 (round-25 P2): this decides whether the Stop nudge fires, so reading
+    it through a link is a gate BYPASS — a hard-linked events.jsonl pointing at
+    an outside file holding a recent self-audit event silenced the nudge on a
+    dirty tree. The read is guarded (containment + O_NOFOLLOW|O_NONBLOCK +
+    S_ISREG + st_nlink == 1); anything unsafe returns False, i.e. NO evidence of
+    an audit, which nudges rather than staying silent."""
+    lines = _safe_event_lines()
+    if lines is None:
         return False
     for line in lines[-_EVENTS_TAIL_LINES:]:
         try:

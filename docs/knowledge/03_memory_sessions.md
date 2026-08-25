@@ -6,7 +6,7 @@ asserts:
   - scripts/_doc_common.py::locked_atomic_append
   - scripts/session_handoff.py::_safe_history_line
   - scripts/session_handoff.py::_rejected_block
-last_human_reviewed: 2026-08-24
+last_human_reviewed: 2026-08-25
 covers:
   - manage.sh
   - scripts/_doc_common.py
@@ -70,10 +70,28 @@ Directory locking survives target inode replacement; target-inode locking would
 not. Replacement preserves the no-write-through-symlink-or-hard-link property
 that direct append would lose, but the reread of existing content happens BEFORE
 the replace, so the target leaf itself is guarded first: `refuse_linked_leaf`
-(the shared symlink-OR-`st_nlink > 1` check) rejects a linked leaf before any
-read, and `memory_log` and `append_history`'s session-token reader route through
-the same guard so a hard-linked log/state file never shares an outside inode's
-bytes. Interrupted lock calls retry, invalid timeout overrides fall back to the
+rejects an unsafe leaf — symlink, extra links (`st_nlink > 1`), or non-regular
+type (a FIFO would otherwise block the read forever) — before any read.
+
+Guards that run before a blocking wait have not run. Containment is therefore
+re-validated AFTER the directory lock is acquired, and every post-lock operation
+is anchored to the locked directory fd (`dir_fd=` plus basenames) rather than
+re-resolved by path: a parent swapped while an appender waits on the lock now
+fails closed instead of redirecting the write, and the bytes land in the inode
+that was locked or nowhere.
+
+Readers carry the same guarantees as writers. `safe_read_text` is the read-side
+counterpart — containment, `O_NOFOLLOW | O_NONBLOCK`, `S_ISREG`, single link,
+bounded read, lossy decode — and `memory_log`, `append_history`'s session-token
+read, the session-handoff HISTORY/REJECTED tails, and the completion gate all
+route through it. Size policy is per-caller because truncation is not uniformly
+safe: the memory chain reads unbounded (a short read would verify as a clean
+chain), tail consumers pass `tail_bytes`, and small bounded files treat
+oversize as malformed. A refused read must stay distinguishable from an absent
+one: an absent memory log is a legitimately empty chain, while a present but
+linked or non-regular one BREAKs. Lossy decoding is not sanitization either —
+the session token is charset-validated before it can enter a HISTORY header.
+Interrupted lock calls retry, invalid timeout overrides fall back to the
 default, and lock or I/O failure maps to each CLI's existing nonzero contract.
 
 ## Completion
@@ -82,6 +100,10 @@ The completion gate is opt-in. It compares the current repository state with the
 session-start baseline and checks whether a verified self-audit event occurred
 after the last project change. It warns by default; it does not turn an
 agent-authored note into proof or silently claim that unfinished work is done.
+Its evidence read is guarded like every other reader, because evidence sourced
+through a link is a gate bypass: a hard-linked `events.jsonl` pointing at an
+outside log with a forged recent self-audit would silence the nudge. Unsafe
+evidence counts as no evidence, so the gate nudges rather than going quiet.
 
 The structured handoff snapshot is untracked, agent-writable state whose
 writer is not authenticated, so restore validates and sanitizes every field at

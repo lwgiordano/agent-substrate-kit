@@ -1,6 +1,6 @@
 ---
 purpose: Behavioral evals, deterministic validators, audits, and assurance limits.
-last_human_reviewed: 2026-08-24
+last_human_reviewed: 2026-08-25
 covers:
   - manage.sh
   - extras/calibrate_diy_ultrareview.py
@@ -48,6 +48,13 @@ into failure. The single-task diagnostic uses the same semantics.
 The benign corpus tests false positives in real kit and consumer layouts.
 Staged fixtures resolve both source assets and their installed `.substrate`
 locations. A missing required fixture is an error, not a vacuous pass.
+
+A hang is a failure, not a pending result. Tasks that exercise a blocking shape
+(a FIFO in place of a lock, a log, or a governed surface) assert that the tool
+fails fast inside the per-subprocess cap, and a `TimeoutExpired` is reported as
+a failed block rather than allowed to wedge the run. Evidence-suppression
+attacks are in the malicious corpus for the same reason a bypass is: an eval
+covers the gate that reads forged evidence, not only the gate that writes it.
 
 `evals --report` regenerates `BENCHMARK.md` with version, counts, surfaced skips,
 and a reproduction command. Exact commit, source-tree, and artifact provenance

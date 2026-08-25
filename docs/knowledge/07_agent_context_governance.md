@@ -1,6 +1,6 @@
 ---
 purpose: Agent context inventory, harness scanning, budgets, and doc drift.
-last_human_reviewed: 2026-08-24
+last_human_reviewed: 2026-08-25
 covers:
   - agentsync.sh
   - manage.sh
@@ -58,13 +58,25 @@ The behavioral smoke runs the real scanner independently for root instructions,
 HISTORY, the stable knowledge entry point, a randomized knowledge sibling, and a
 randomized Superpowers plan. One blocked surface cannot hide an ignored one.
 
-A symlinked governed surface never shrinks or redirects the scan while returning
+A tampered governed surface never shrinks or redirects the scan while returning
 green: the harness BLOCKs a symlinked governed FILE, a symlinked governed
 DIRECTORY or any ANCESTOR of one, and — since a skill root is a glob root in the
 canonical inventory rather than a walked directory list — a direct symlink at a
 skill root (`.agents/skills`, `.claude/skills`, `.github/skills`) too. The walk
 covers `_SKILL_ROOTS` explicitly so a linked skill root cannot slip the
-per-file scan by being neither followed nor flagged.
+per-file scan by being neither followed nor flagged. A NON-REGULAR surface
+(FIFO, socket, device) is blocked for the same reason: being neither a symlink
+nor a regular file, it used to drop silently out of the inventory and lower the
+count while the run still reported ok.
+
+The scan result is itself a trust signal. The scanner resolves its root through
+a helper it cannot verify before it has scanned anything, so a poisoned helper
+pointing at an empty tree once produced a clean `ok (0 files scanned)`. Finding
+NO governed surface is therefore a BLOCK: a real install always has some, so an
+empty inventory means the root is wrong or the inventory was redirected.
+Asserting instead that the scanner's own file sits under the discovered root was
+rejected — running the scanner from outside the tree it scans is a legitimate,
+tested pattern, so that check would fail valid runs.
 
 ## Documentation drift
 

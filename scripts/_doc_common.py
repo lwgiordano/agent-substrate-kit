@@ -17,7 +17,6 @@ import fcntl
 import os
 import re
 import subprocess
-import tempfile
 import time
 from collections.abc import Iterator
 from datetime import UTC, date, datetime
@@ -303,6 +302,10 @@ import stat as _stat
 # must be rejected before it can be truncated into a lowering value (v3.8.37).
 LOCK_MAX_BYTES = 64
 
+# Default whole-file cap for `safe_read_text`. Callers that must not truncate
+# (the memory chain) pass max_bytes=None; tail readers pass tail_bytes.
+SAFE_READ_MAX_BYTES = 1 << 20
+
 
 def within_root(target, root) -> bool:
     """True iff `target`'s PARENT resolves to its EXACT lexical location under
@@ -348,16 +351,102 @@ def refuse_linked_leaf(path) -> str | None:
     forgotten half of the class (postmortem carry-forward part 2). fd-based
     readers (`read_lock`, the `command_policy` inline reader) apply the same
     `st_nlink > 1` rule on their TOCTOU-free `fstat` result inline; this helper
-    is for the path-based callers that read/replace by name."""
+    is for the path-based callers that read/replace by name.
+
+    v3.8.42 (round-25): also refuse a NON-REGULAR leaf. v3.8.41 checked only
+    "is it linked?" and treated a FIFO/socket/device as safe — so a FIFO in
+    place of an append log or a lock did not fail closed, it HUNG the caller on
+    open() (a denial of service against the gate, and the third instance of the
+    same partial-class-fix pattern). S_ISREG is checked before st_nlink so a
+    directory reports its real type rather than a confusing hard-link message."""
     try:
         st = os.lstat(str(path))
     except (OSError, ValueError):
         return None  # absent or unstat-able: nothing to refuse here
     if _stat.S_ISLNK(st.st_mode):
         return "is a symlink"
+    if not _stat.S_ISREG(st.st_mode):
+        return "is not a regular file (fifo/socket/device/directory)"
     if st.st_nlink > 1:
         return "is a hard link (shared inode)"
     return None
+
+
+def _read_fd_bytes(fd: int, limit: int | None = None) -> bytes:
+    """Read up to `limit` bytes (to EOF when None) from an already-open fd.
+    os.read may return short reads, so loop until EOF or the cap."""
+    chunks: list[bytes] = []
+    got = 0
+    while True:
+        want = 65536 if limit is None else min(65536, limit - got)
+        if want <= 0:
+            break
+        b = os.read(fd, want)
+        if not b:
+            break
+        chunks.append(b)
+        got += len(b)
+    return b"".join(chunks)
+
+
+def safe_read_text(path, root=None, max_bytes: int | None = SAFE_READ_MAX_BYTES,
+                   tail_bytes: int | None = None) -> str | None:
+    """Containment- and leaf-type-checked text read. Returns the decoded text,
+    or None when the file is absent OR unsafe to read.
+
+    v3.8.42 (round-25): rounds 21-24 hardened every WRITER of an agent-writable
+    file and never swept the READERS, so `memory_log._read_events`, the
+    session-handoff HISTORY/REJECTED tails, `completion_gate`'s event scan, and
+    `append_history`'s session-token read all used a bare `open()`. Each one
+    would follow a symlinked or hard-linked leaf to OUTSIDE bytes (the handoff
+    pair puts those bytes into MODEL CONTEXT; a forged completion-gate event
+    suppresses the Stop nudge) and each would HANG on a FIFO. This is the one
+    read-side counterpart to `refuse_linked_leaf`, and every reader routes
+    through it.
+
+    Guarantees, in order: STRICT ancestor containment when `root` is given;
+    `O_NOFOLLOW` (a symlinked leaf is never followed) + `O_NONBLOCK` (a FIFO
+    fails fast instead of hanging); `S_ISREG` and `st_nlink == 1` on the
+    TOCTOU-free fstat; and a bounded read.
+
+    Size handling is per-caller because truncation is not always safe:
+      tail_bytes=N  — read at most the LAST N bytes (append-only logs whose
+                      consumers only want the tail).
+      max_bytes=N   — whole-file read; LONGER THAN N returns None (a small
+                      bounded file that is oversized is malformed, not valid).
+      max_bytes=None— unbounded whole-file read. Required where silently
+                      returning "no content" would FAIL OPEN (the memory chain:
+                      an empty read would verify as a clean empty chain).
+
+    Decoding is `errors="replace"`: undecodable bytes must degrade to
+    non-matching text, never to a traceback out of a hook (round-25 finding 3).
+    """
+    if root is not None and not within_root(path, root):
+        return None
+    try:
+        fd = os.open(str(path),
+                     os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    except (OSError, ValueError):
+        return None  # absent, symlinked (ELOOP), or unreadable
+    try:
+        st = os.fstat(fd)
+        if not _stat.S_ISREG(st.st_mode) or st.st_nlink > 1:
+            return None
+        if tail_bytes is not None:
+            if st.st_size > tail_bytes:
+                os.lseek(fd, st.st_size - tail_bytes, os.SEEK_SET)
+            raw = _read_fd_bytes(fd, tail_bytes)
+        elif max_bytes is None:
+            raw = _read_fd_bytes(fd, None)
+        else:
+            raw = _read_fd_bytes(fd, max_bytes + 1)
+            if len(raw) > max_bytes:
+                return None
+    except (OSError, ValueError):
+        return None
+    finally:
+        os.close(fd)
+    return raw.decode("utf-8", errors="replace")
 
 
 def read_lock(path: Path, allowed: set, root=None) -> tuple:
@@ -485,7 +574,12 @@ def locked_atomic_append(target: Path, entry: str, header: str, tmp_prefix: str,
     if _leaf_reason is not None:
         raise OSError(f"append target {_leaf_reason} — refusing to read/replace through it: {target}")
     target.parent.mkdir(parents=True, exist_ok=True)
-    dir_fd = os.open(str(target.parent), os.O_RDONLY)
+    parent = target.parent
+    name = target.name
+    # v3.8.42 (round-25 P1): O_DIRECTORY|O_NOFOLLOW — the parent must be a real
+    # directory, not a symlink swapped in after within_root ran.
+    dir_fd = os.open(str(parent),
+                     os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
     try:
         try:
             timeout_s = float(os.environ.get("SUBSTRATE_APPEND_LOCK_TIMEOUT") or 10.0)
@@ -502,21 +596,70 @@ def locked_atomic_append(target: Path, entry: str, header: str, tmp_prefix: str,
                     raise  # real failure (EBADF, ...), not contention
                 if time.monotonic() >= deadline:
                     raise TimeoutError(
-                        f"append lock on {target.parent} not acquired within "
+                        f"append lock on {parent} not acquired within "
                         f"{timeout_s:g}s — another appender is wedged") from e
                 time.sleep(0.02)
-        existing = target.read_text(encoding="utf-8") if target.exists() else header
-        fd, tmp_path = tempfile.mkstemp(
-            prefix=tmp_prefix, suffix=".tmp", dir=str(target.parent))
+        # v3.8.42 (round-25 P1): every check above RACED the lock. A concurrent
+        # rename can swap `parent` while we block in the loop, and the old code
+        # then re-resolved the target BY PATH for read_text/mkstemp/os.replace —
+        # so an appender that waited on the lock wrote wherever the path pointed
+        # when it woke, which a hostile swap makes an outside directory. Two-part
+        # fix: RE-VALIDATE under the lock that the path still names the inode we
+        # locked, then anchor EVERY remaining operation to that dir fd (dir_fd=
+        # plus basenames) so the bytes land in the locked inode or nowhere.
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            path_st = os.lstat(str(parent))
+        except OSError as e:
+            raise OSError(f"append parent vanished while locking: {parent}") from e
+        fd_st = os.fstat(dir_fd)
+        if (path_st.st_dev, path_st.st_ino) != (fd_st.st_dev, fd_st.st_ino):
+            raise OSError(
+                f"append parent was swapped while waiting for the lock — refusing: {parent}")
+        if not within_root(target, root):
+            raise OSError(f"append target parent escapes the repo (re-checked post-lock): {target}")
+        existing = header
+        try:
+            leaf_st = os.lstat(name, dir_fd=dir_fd)
+        except FileNotFoundError:
+            leaf_st = None
+        if leaf_st is not None:
+            if (_stat.S_ISLNK(leaf_st.st_mode) or not _stat.S_ISREG(leaf_st.st_mode)
+                    or leaf_st.st_nlink > 1):
+                raise OSError(f"append target is an unsafe leaf — refusing: {target}")
+            rfd = os.open(name,
+                          os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+                          dir_fd=dir_fd)
+            try:
+                # STRICT decode: an append-only log holding undecodable bytes must
+                # surface through each CLI's existing nonzero contract, never be
+                # silently rewritten with replacement characters.
+                existing = _read_fd_bytes(rfd, None).decode("utf-8")
+            finally:
+                os.close(rfd)
+        tmp_name = None
+        tfd = None
+        for _ in range(16):
+            cand = f"{tmp_prefix}{os.getpid()}-{os.urandom(6).hex()}.tmp"
+            try:
+                tfd = os.open(cand, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=dir_fd)
+                tmp_name = cand
+                break
+            except FileExistsError:
+                continue
+        if tfd is None:
+            raise OSError(f"could not create a temporary file for the append in {parent}")
+        try:
+            with os.fdopen(tfd, "w", encoding="utf-8") as fh:
+                tfd = None  # the file object owns the fd now
                 fh.write(existing + entry)
-            os.replace(tmp_path, target)
-            tmp_path = ""
+            os.replace(tmp_name, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+            tmp_name = None
         finally:
-            if tmp_path and os.path.exists(tmp_path):
+            if tfd is not None:
+                os.close(tfd)
+            if tmp_name is not None:
                 try:
-                    os.remove(tmp_path)
+                    os.unlink(tmp_name, dir_fd=dir_fd)
                 except OSError:
                     pass
     finally:

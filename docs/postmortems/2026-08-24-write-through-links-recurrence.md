@@ -7,7 +7,20 @@ related_commits:
   - WORKING (v3.8.39 — round-22 remediation)
   - WORKING (v3.8.40 — round-23 remediation)
   - WORKING (v3.8.41 — round-24 remediation)
+  - WORKING (v3.8.42 — round-25 remediation)
 gates_added:
+  - tests/test_hook_scripts.py::test_refuse_linked_leaf_rejects_non_regular
+  - tests/test_hook_scripts.py::test_safe_read_text_guards_every_unsafe_leaf
+  - tests/test_hook_scripts.py::test_locked_atomic_append_refuses_parent_swap_under_lock
+  - tests/test_hook_scripts.py::test_memory_log_read_side_breaks_on_tampered_leaf
+  - tests/test_hook_scripts.py::test_read_session_token_degrades_on_fifo_and_bad_utf8
+  - tests/test_hook_scripts.py::test_handoff_tails_refuse_linked_docs
+  - tests/test_hook_scripts.py::test_completion_gate_ignores_linked_events
+  - tests/test_hook_scripts.py::test_harness_blocks_non_regular_governed_surface
+  - tests/test_hook_scripts.py::test_harness_blocks_empty_scan_root
+  - scripts/run_substrate_evals.py::t_completion_gate_forged_linked_events
+  - scripts/run_substrate_evals.py::t_memory_linked_events_break
+  - scripts/run_substrate_evals.py::t_history_fifo_no_hang
   - tests/test_hook_scripts.py::test_refuse_linked_leaf_symlink_and_hardlink
   - tests/test_hook_scripts.py::test_read_lock_refuses_hardlinked_lock
   - tests/test_hook_scripts.py::test_locked_atomic_append_refuses_hardlinked_leaf
@@ -94,9 +107,13 @@ A link-safety fix has FOUR parts, all required in the same change, or the
 missing one becomes the next audit finding:
 1. **Leaf symlink** — `O_NOFOLLOW` (or `is_symlink()` refusal), on WRITES *and*
    the read-of-existing-content that precedes a replace.
-2. **Leaf hard link** — reject `st_nlink > 1`, or write via `mkstemp` +
-   `os.replace` (which breaks the link and never writes through a symlink).
-   Apply to READERS too (a hard-linked bus/lock reads outside bytes).
+2. **Leaf TYPE, all three properties** — a leaf is unsafe if it is a symlink, if
+   it has extra links (`st_nlink > 1`), OR if it is not a regular file (FIFO,
+   socket, device, directory). Enumerating two of the three is not a class fix:
+   v3.8.41's helper checked links only, so a FIFO passed as safe and HUNG the
+   caller. Writing via `mkstemp` + `os.replace` breaks a hard link and follows
+   no symlink, but it does not save a reader — apply all three to READERS too
+   (a hard-linked bus/lock/log reads outside bytes; a FIFO one blocks forever).
 3. **ANCESTOR directory, STRICTLY** — the parent must resolve to its EXACT
    lexical location under the repo root. A no-escape check is not enough: a
    symlinked ancestor that resolves to a *different in-repo* directory
@@ -168,6 +185,59 @@ reader/writer; the two fd-based lock readers add the `st_nlink > 1` rule on thei
 TOCTOU-free `fstat`; the harness walks `_SKILL_ROOTS` too. This round is why the
 carry-forward rule now says the hard-link half must land in the SAME edit as the
 symlink half — the round-23→24 gap was exactly that split.
+
+## Round 5 — v3.8.42 (round-25): leaf TYPE, the read side, and a real TOCTOU
+
+Three things, only the first of which is this class continuing:
+
+1. **The leaf-type axis was still incomplete.** `refuse_linked_leaf` (shipped
+   the day before, as *the* centralized fix) asked "is it linked?" and never
+   "is it a regular file?" — so a FIFO passed as SAFE and then **hung** the
+   caller on `open()`. That is the same partial-class-fix shape for the THIRD
+   time, now inside the very helper written to end it. The lesson is sharper
+   than "remember hard links": an unsafe leaf has THREE independent properties
+   (symlink, extra links, non-regular type), and a guard that enumerates two of
+   them is not a class fix. Carry-forward part 2 is amended accordingly.
+
+2. **Rounds 21-24 hardened every WRITER and never swept the READERS.** The
+   readers had no guard at all — not a partial one, none. `memory_log._read_events`
+   trusted an outside chain (and `verify` reported it OK), the SessionStart
+   HISTORY/REJECTED tails piped outside bytes into **model context**, and
+   `completion_gate` let a hard-linked forged self-audit event **suppress the
+   Stop nudge**. Fixed with a read-side counterpart, `safe_read_text`, that every
+   reader routes through. Two sub-lessons worth keeping: a tampered read must be
+   distinguishable from an ABSENT one (returning "empty" for a symlinked
+   events.jsonl traded a hang for a fail-open, so a present-but-unsafe log now
+   BREAKs); and lossy decoding is not sanitization (the replacement characters
+   still matched `(\S+)` and would have been written verbatim into the
+   append-only HISTORY header, so the token now has a charset guard).
+
+3. **The P1 was not a link bug at all** — it was check-then-use.
+   `locked_atomic_append` validated containment, THEN opened and locked the
+   parent, then re-resolved the target **by path** for `read_text`/`mkstemp`/
+   `os.replace`. An appender that blocked on the lock wrote wherever the path
+   pointed when it woke, so swapping the parent during the wait redirected it
+   outside the repo. Every guard in rounds 22-24 was correct and none of them
+   helped, because they all ran before the wait. Fixed by anchoring every
+   post-lock operation to the locked directory fd (`dir_fd=` plus basenames) and
+   re-validating under the lock that the path still names the locked inode.
+
+## Carry-forward rule, part 5 — ordering and symmetry
+
+The four parts above are about WHAT to check. These are about WHEN and WHERE:
+
+5a. **A guard that runs before a wait has not run.** If any blocking operation
+    (a lock, a subprocess, a network call) sits between the check and the use,
+    the check must be REPEATED after the wait, and the use must be anchored to a
+    handle captured before it — an fd, not a path. Path-based operations after a
+    lock are check-then-use by construction.
+5b. **Readers and writers are symmetric.** Every guard added to a writer of an
+    agent-writable file must be added to that file's readers in the same change.
+    Ask "who READS this?" for each hardened writer; four readers survived four
+    rounds of writer hardening because nobody asked.
+5c. **Unsafe must not look like empty.** When a guard refuses, the caller must
+    distinguish "absent" from "present but refused". Collapsing them makes the
+    refusal a fail-open wherever emptiness is the benign case.
 
 ## (Optional) Reproduction
 

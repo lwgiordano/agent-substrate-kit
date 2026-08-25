@@ -840,6 +840,74 @@ def t_completion_gate_audited():
         return silent, ("silent" if silent else f"FALSE POSITIVE: {p.stdout[:80]}")
 
 
+def t_completion_gate_forged_linked_events():
+    """v3.8.42 (round-25 P2): the gate read events.jsonl directly, so HARD-LINKING
+    it to an outside log holding a forged recent self-audit SUPPRESSED the Stop
+    nudge on un-audited work — a gate bypass. Unsafe evidence must count as NO
+    evidence, so the nudge still fires."""
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        _gate_repo(td)
+        mem = td / ".substrate" / "memory"
+        mem.mkdir(parents=True, exist_ok=True)
+        outside = td / "outside_events.jsonl"
+        outside.write_text(json.dumps({
+            "seq": 0, "ts": "2099-01-01T00:00:00+00:00", "type": "skill-run",
+            "prev": "0" * 64, "hash": "dead",
+            "data": {"skill": "self-audit", "result": "pass"}}) + "\n", encoding="utf-8")
+        ev = mem / "events.jsonl"
+        if ev.exists():
+            ev.unlink()
+        os.link(outside, ev)  # forged evidence via a shared outside inode
+        p = _run_gate(td)
+        warned = p.returncode == 0 and "systemMessage" in p.stdout
+        return warned, ("nudged" if warned else "FORGED AUDIT SUPPRESSED THE NUDGE")
+
+
+def t_memory_linked_events_break():
+    """v3.8.42 (round-25 P2): rounds 23/24 hardened the memory WRITER while the
+    reader had no guard, so a hard-linked events.jsonl let `verify` report an
+    OUTSIDE chain as OK. A present-but-tampered leaf must BREAK (rc 1), not
+    degrade to a clean empty chain."""
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        _stage(td, "memory_log.py", "_substrate_root.py", "_doc_common.py")
+        mem = td / ".substrate" / "memory"
+        mem.mkdir(parents=True)
+        outside = td / "outside_events.jsonl"
+        outside.write_text(json.dumps({
+            "seq": 0, "ts": "2026-01-01T00:00:00+00:00", "type": "note",
+            "prev": "0" * 64, "hash": "dead", "data": {"m": "OUTSIDE"}}) + "\n",
+            encoding="utf-8")
+        os.link(outside, mem / "events.jsonl")
+        p = subprocess.run([PY, "-I", "scripts/memory_log.py", "verify"], cwd=str(td),
+                           capture_output=True, text=True, timeout=20,
+                           env=dict(os.environ, SUBSTRATE_PROJECT_DIR=str(td)))
+        broke = p.returncode == 1 and "BREAK" in (p.stdout + p.stderr)
+        return broke, ("broke" if broke else f"rc={p.returncode} (outside chain trusted)")
+
+
+def t_history_fifo_no_hang():
+    """v3.8.42 (round-25 P2): refuse_linked_leaf treated a NON-REGULAR leaf as
+    safe, so a FIFO docs/HISTORY.md hung the append in its existing-content read
+    instead of failing closed. It must fail fast within the timeout."""
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        _stage(td, "append_history.py", "_doc_common.py", "_substrate_root.py")
+        (td / "docs").mkdir()
+        os.mkfifo(td / "docs" / "HISTORY.md")
+        try:
+            p = subprocess.run(
+                [PY, "-I", "scripts/append_history.py", "--commit-hash", "deadbee",
+                 "--summary", "eval summary line", "--files", "scripts/_doc_common.py",
+                 "--intent", "eval intent line", "--knowledge", "eval knowledge line"],
+                cwd=str(td), capture_output=True, text=True, timeout=15,
+                env=dict(os.environ, SUBSTRATE_PROJECT_DIR=str(td)))
+        except subprocess.TimeoutExpired:
+            return False, "append HUNG on a FIFO HISTORY.md"
+        return p.returncode != 0, f"rc={p.returncode}"
+
+
 def _agents_harness(content: str):
     with tempfile.TemporaryDirectory() as td:
         td = Path(td); _stage(td, "check_agent_harness.py", "_substrate_root.py",
@@ -922,6 +990,10 @@ TASKS = [
     ("profile_ratchet_lower_refused", "malicious", "block", t_profile_ratchet_lower_refused, True),
     ("profile_ratchet_raise_succeeds", "benign", "allow", t_profile_ratchet_raise_succeeds, True),
     ("completion_gate_unaudited", "malicious", "block", t_completion_gate_unaudited, True),
+    ("completion_gate_forged_linked_events", "malicious", "block",
+     t_completion_gate_forged_linked_events, True),
+    ("memory_linked_events_break", "malicious", "block", t_memory_linked_events_break, False),
+    ("history_fifo_no_hang", "malicious", "block", t_history_fifo_no_hang, False),
     # benign — MUST be allowed (false-positive guard)
     ("memory_restore_from_structured", "benign", "allow", t_memory_restore_from_structured, False),
     ("history_restore_benign",  "benign", "allow", t_history_restore_benign, False),

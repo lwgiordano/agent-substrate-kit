@@ -38,8 +38,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _doc_common import (
     git_short_sha,
     locked_atomic_append,
-    refuse_linked_leaf,
     repo_root,
+    safe_read_text,
     utc_now_iso,
 )
 
@@ -77,6 +77,11 @@ def _other_files_dirty(root: Path) -> list[str]:
     return dirty
 
 SESSION_TOKEN_RE = re.compile(r"^\*\*Session token:\*\*\s+(\S+)\s*$", re.MULTILINE)
+# v3.8.42 (round-25 P2): the token is copied verbatim into an append-only HISTORY
+# header, so it must be a machine-token shape and nothing else. `(\S+)` alone
+# accepts anything non-space — including the U+FFFD run that lossy-decoding
+# undecodable bytes produces — which would embed garbage in the log permanently.
+_SAFE_SESSION_TOKEN_RE = re.compile(r"\A[A-Za-z0-9._:@+-]{1,128}\Z")
 HISTORY_HEADER = """\
 # HISTORY.md — Append-only project changelog
 
@@ -94,12 +99,18 @@ def read_session_token(history_root: Path) -> str:
     # v3.8.41 (round-24 P2): CURRENT_SESSION.md is agent-writable, untrusted
     # state. A symlinked OR hard-linked leaf would read an OUTSIDE file and copy
     # its `**Session token:**` value verbatim into the append-only HISTORY entry.
-    # Refuse a linked leaf (fail to NO_SESSION) rather than import outside bytes.
-    if refuse_linked_leaf(session_file) is not None:
+    # v3.8.42 (round-25 P2): the leaf guard ran but the read that FOLLOWED it was
+    # still a bare read_text — so a FIFO hung and undecodable bytes raised
+    # UnicodeDecodeError out of the CLI. safe_read_text does the guard AND the
+    # read as one operation (O_NOFOLLOW|O_NONBLOCK, S_ISREG, bounded, lossy
+    # decode), so every unsafe shape degrades to NO_SESSION instead.
+    text = safe_read_text(session_file, history_root, max_bytes=256 * 1024)
+    if text is None:
         return "NO_SESSION"
-    text = session_file.read_text(encoding="utf-8")
     m = SESSION_TOKEN_RE.search(text)
-    return m.group(1) if m else "NO_SESSION"
+    if not m or not _SAFE_SESSION_TOKEN_RE.match(m.group(1)):
+        return "NO_SESSION"
+    return m.group(1)
 
 
 def compose_entry(

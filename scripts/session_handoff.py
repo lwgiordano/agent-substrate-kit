@@ -237,14 +237,14 @@ def _safe_history_line(text: str) -> str:
 
 def _history_tail(n: int = _HISTORY_ENTRIES) -> list[str]:
     """Last n docs/HISTORY.md entries as sanitized 'header — summary' lines.
-    Tail-reads at most _HISTORY_TAIL_BYTES; empty/missing HISTORY -> []."""
-    try:
-        size = HISTORY_MD.stat().st_size
-        with HISTORY_MD.open("rb") as fh:
-            if size > _HISTORY_TAIL_BYTES:
-                fh.seek(size - _HISTORY_TAIL_BYTES)
-            raw = fh.read().decode("utf-8", errors="replace")
-    except Exception:
+    Tail-reads at most _HISTORY_TAIL_BYTES; empty/missing HISTORY -> [].
+
+    v3.8.42 (round-25 P2): this read feeds MODEL CONTEXT at SessionStart, so a
+    symlinked or hard-linked docs/HISTORY.md injected an outside file's bytes
+    straight into the prompt, and a FIFO hung the hook. The raw stat/open pair
+    is replaced by the shared guarded reader."""
+    raw = _safe_read_text(HISTORY_MD, ROOT, tail_bytes=_HISTORY_TAIL_BYTES)
+    if raw is None:
         return []
     entries: list[tuple[str, str]] = []
     header: str | None = None
@@ -292,14 +292,11 @@ def _rejected_tail(n: int = _REJECTED_ENTRIES) -> list[str]:
     operator/agent-authored, so every emitted line goes through
     _safe_history_line() — the SAME sanitizer, deliberately not a copy, so the
     injection defenses can never drift apart between the two blocks.
-    Tail-reads at most _HISTORY_TAIL_BYTES; missing/empty file -> []."""
-    try:
-        size = REJECTED_MD.stat().st_size
-        with REJECTED_MD.open("rb") as fh:
-            if size > _HISTORY_TAIL_BYTES:
-                fh.seek(size - _HISTORY_TAIL_BYTES)
-            raw = fh.read().decode("utf-8", errors="replace")
-    except Exception:
+    Tail-reads at most _HISTORY_TAIL_BYTES; missing/empty file -> [].
+    Guarded by the same shared reader as HISTORY (v3.8.42, round-25 P2) — a
+    linked or special REJECTED.md must not reach model context either."""
+    raw = _safe_read_text(REJECTED_MD, ROOT, tail_bytes=_HISTORY_TAIL_BYTES)
+    if raw is None:
         return []
     entries = [ln.strip()[2:].strip() for ln in raw.splitlines()
                if ln.strip().startswith("- ")]
@@ -407,6 +404,59 @@ def _within_root(target) -> bool:
         return os.path.realpath(str(parent)) == expected
     except (OSError, ValueError):
         return False
+
+
+def _safe_read_text(path, root=None, max_bytes: int | None = None,
+                    tail_bytes: int | None = None) -> str | None:
+    """Containment- and leaf-type-checked text read; None when absent OR unsafe.
+
+    Mirrors _doc_common.safe_read_text (v3.8.42 — round-25 P2), inline for the
+    same reason _within_root is: this hook script stays stdlib-only and
+    self-contained. The readers it guards feed SessionStart MODEL CONTEXT, so a
+    symlinked/hard-linked docs/HISTORY.md or REJECTED.md would inject outside
+    bytes into the prompt and a FIFO would hang the hook. `root` is checked with
+    _within_root; the leaf is opened O_NOFOLLOW|O_NONBLOCK and must fstat as a
+    regular file with st_nlink == 1."""
+    if root is not None and not _within_root(path):
+        return None
+    try:
+        fd = os.open(str(path),
+                     os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    except (OSError, ValueError):
+        return None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink > 1:
+            return None
+        if tail_bytes is not None and st.st_size > tail_bytes:
+            os.lseek(fd, st.st_size - tail_bytes, os.SEEK_SET)
+        # A tail read is DELIBERATELY partial; a max_bytes read is not. Reading
+        # one extra byte distinguishes "fits" from "oversize" so the latter can
+        # return None instead of silently truncating — the canonical
+        # _doc_common.safe_read_text contract this mirrors. Getting that wrong
+        # here would be exactly the mirror-drift that caused rounds 23-25, even
+        # though today's only call sites pass tail_bytes.
+        limit = tail_bytes if tail_bytes is not None else (
+            None if max_bytes is None else max_bytes + 1)
+        chunks: list[bytes] = []
+        got = 0
+        while True:
+            want = 65536 if limit is None else min(65536, limit - got)
+            if want <= 0:
+                break
+            b = os.read(fd, want)
+            if not b:
+                break
+            chunks.append(b)
+            got += len(b)
+    except (OSError, ValueError):
+        return None
+    finally:
+        os.close(fd)
+    raw = b"".join(chunks)
+    if tail_bytes is None and max_bytes is not None and len(raw) > max_bytes:
+        return None  # oversize bounded file is malformed, never truncated content
+    return raw.decode("utf-8", errors="replace")
 
 
 def _atomic_write_text(path, text: str) -> None:
@@ -552,8 +602,15 @@ def _append_memory_event(trigger, todos) -> None:
                 "todos": todos,
             },
         )
-    except Exception:
-        pass  # durable log is additive; failure must not break capture
+    except Exception as e:
+        # The durable log is additive: a failure here must not break capture, so
+        # this stays non-fatal. But it must not be SILENT either — memory_log
+        # raises MemoryLogUnsafe when events.jsonl is present-but-tampered
+        # (linked/non-regular/routed), and swallowing that turned real tamper
+        # evidence into nothing at all on this in-process path, while the CLI
+        # path BREAKs (v3.8.42 round-25 auditor WARN). Report and continue.
+        print(f"session-handoff: memory append skipped ({e.__class__.__name__}: {e})",
+              file=sys.stderr)
 
 
 # The exact todo-line grammar _todo_lines() writes: `- [<mark>] <label> (<status>)`.

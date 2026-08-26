@@ -5608,6 +5608,331 @@ def test_raw_io_gate_catches_dynamic_dispatch(tmp_path) -> None:
     assert "write_text" in (p2.stdout + p2.stderr)
 
 
+def _swap_after_first_path_open(monkeypatch, doing, stash, live, victim):
+    """Fire ONE ancestor swap at the first by-PATH os.open, then behave normally.
+
+    This is the round-27 P1 race made deterministic: the swap lands exactly in
+    the window between a containment check and the open that acts on it.
+    """
+    real_open = os.open
+    state = {"fired": False}
+
+    def swapping(*a, **k):
+        if not state["fired"] and not k.get("dir_fd"):
+            state["fired"] = True
+            os.rename(victim, stash)
+            victim.symlink_to(live)
+        return real_open(*a, **k)
+
+    monkeypatch.setattr(doing.os, "open", swapping)
+    return state
+
+
+def test_guarded_write_refuses_intermediate_ancestor_swap(tmp_path, monkeypatch) -> None:
+    """round-27 P1 (_doc_common.py:608) — the best finding of the series.
+
+    safe_atomic_write called itself fd-anchored, but it anchored to the PARENT
+    and still resolved that parent as a MULTI-COMPONENT path. O_NOFOLLOW
+    protects only the FINAL component, so swapping any INTERMEDIATE ancestor
+    between within_root() and the open rerouted the whole subtree — and the
+    dev/ino re-validation then compared the already-rerouted directory to
+    itself and approved it. A check cannot close this window; only never
+    handing the kernel a re-resolvable path can. Descent is now one component
+    at a time from the root with O_NOFOLLOW|O_DIRECTORY and dir_fd=.
+    """
+    import importlib
+    dc = importlib.import_module("_doc_common")
+    repo = tmp_path / "repo"
+    (repo / "state" / "tasks").mkdir(parents=True)
+    outside = tmp_path / "outside_state"
+    (outside / "tasks").mkdir(parents=True)
+    _swap_after_first_path_open(monkeypatch, dc, tmp_path / "stash", outside,
+                                repo / "state")
+    with pytest.raises(OSError):
+        dc.safe_atomic_write(repo / "state" / "tasks" / "out.txt", "X", root=repo)
+    assert not (outside / "tasks" / "out.txt").exists(), \
+        "an intermediate-ancestor swap redirected the write outside the repo"
+
+
+def test_guarded_read_refuses_intermediate_ancestor_swap(tmp_path, monkeypatch) -> None:
+    """round-27 P1 (_doc_common.py:445): the same window on the READ side
+    returned OUTSIDE bytes while every leaf fstat check passed — the guards
+    were all correct about a leaf that was no longer the one asked for."""
+    import importlib
+    dc = importlib.import_module("_doc_common")
+    repo = tmp_path / "repo"
+    (repo / "state" / "tasks").mkdir(parents=True)
+    (repo / "state" / "tasks" / "note.txt").write_text("INSIDE\n", encoding="utf-8")
+    outside = tmp_path / "outside_state"
+    (outside / "tasks").mkdir(parents=True)
+    (outside / "tasks" / "note.txt").write_text("OUTSIDE_READ\n", encoding="utf-8")
+    _swap_after_first_path_open(monkeypatch, dc, tmp_path / "stash", outside,
+                                repo / "state")
+    got = dc.safe_read_text(repo / "state" / "tasks" / "note.txt", root=repo)
+    assert got != "OUTSIDE_READ\n", "read followed a swapped intermediate ancestor"
+    assert got is None, got
+
+
+def test_append_refuses_intermediate_ancestor_swap(tmp_path, monkeypatch) -> None:
+    """Round-27 reported the ancestor-swap window on safe_atomic_write only.
+    locked_atomic_append opened `str(parent)` the identical way, so it is the
+    same defect in a second writer — fixed together rather than waiting for a
+    round 28 to report it (the whole lesson of rounds 21-26)."""
+    import importlib
+    dc = importlib.import_module("_doc_common")
+    repo = tmp_path / "repo"
+    (repo / "docs" / "sub").mkdir(parents=True)
+    (repo / "docs" / "sub" / "log.md").write_text("# H\n", encoding="utf-8")
+    outside = tmp_path / "outside_docs"
+    (outside / "sub").mkdir(parents=True)
+    (outside / "sub" / "log.md").write_text("# H\n", encoding="utf-8")
+    _swap_after_first_path_open(monkeypatch, dc, tmp_path / "stash", outside,
+                                repo / "docs")
+    with pytest.raises(OSError, match="ancestor"):
+        dc.locked_atomic_append(repo / "docs" / "sub" / "log.md", "- x\n", "# H\n",
+                                ".t.", root=repo)
+    assert (outside / "sub" / "log.md").read_text(encoding="utf-8") == "# H\n"
+
+
+def test_guarded_writes_preserve_the_target_mode(tmp_path) -> None:
+    """round-27 P3 (_doc_common.py:623 / :795): a functional bug the hardening
+    introduced, not just missing polish. The temp file is created 0600 (so the
+    replacement is never briefly world-readable) and the mode was never
+    restored, so EVERY guarded rewrite destroyed permissions — scripts/tool.sh
+    0755 -> 0600 (executable bit gone), docs/HISTORY.md 0644 -> 0600. A safety
+    fix must not break the file it protects. New files keep the 0600 default,
+    and a symlinked predecessor must not widen the mode to its 0777 lstat."""
+    import importlib
+    import stat as _stat
+    dc = importlib.import_module("_doc_common")
+    repo = tmp_path / "repo"
+    (repo / "scripts").mkdir(parents=True)
+    (repo / "docs").mkdir()
+
+    def mode_of(p):
+        return _stat.S_IMODE(os.stat(p).st_mode)
+
+    sh = repo / "scripts" / "tool.sh"
+    sh.write_text("#!/bin/sh\n", encoding="utf-8")
+    os.chmod(sh, 0o755)
+    dc.safe_atomic_write(sh, "#!/bin/sh\necho hi\n", root=repo)
+    assert mode_of(sh) == 0o755, f"executable bit destroyed: {oct(mode_of(sh))}"
+
+    hist = repo / "docs" / "HISTORY.md"
+    hist.write_text("# H\n", encoding="utf-8")
+    os.chmod(hist, 0o644)
+    dc.locked_atomic_append(hist, "- e\n", "# H\n", ".H.", root=repo)
+    assert mode_of(hist) == 0o644, f"append changed the mode: {oct(mode_of(hist))}"
+    assert hist.read_text(encoding="utf-8") == "# H\n- e\n"
+
+    fresh = repo / "docs" / "new.txt"
+    dc.safe_atomic_write(fresh, "n", root=repo)
+    assert mode_of(fresh) == 0o600, "a NEW file must keep the private default"
+
+    # An explicit mode still wins, and a symlinked leaf does not donate 0777.
+    (repo / "docs" / "linked.txt").symlink_to(tmp_path / "elsewhere.txt")
+    (tmp_path / "elsewhere.txt").write_text("out\n", encoding="utf-8")
+    dc.safe_atomic_write(repo / "docs" / "linked.txt", "in\n", root=repo)
+    assert mode_of(repo / "docs" / "linked.txt") == 0o600
+    assert (tmp_path / "elsewhere.txt").read_text(encoding="utf-8") == "out\n"
+
+    # v3.8.44 in-release (security-auditor BLOCK): inheriting the predecessor's
+    # mode VERBATIM meant a target an attacker could chmod kept setuid/setgid/
+    # sticky and world-write through every later "safe" rewrite — 0o4777 stayed
+    # 0o4777. A permission-preserving fix that preserves DANGEROUS permissions
+    # is a widening. Inheritance is masked; an explicit mode= is not.
+    for planted, expect in ((0o4777, 0o775), (0o6777, 0o775), (0o2755, 0o755),
+                            (0o777, 0o775), (0o666, 0o664)):
+        f = repo / "docs" / f"m{planted:o}.txt"
+        f.write_text("a", encoding="utf-8")
+        os.chmod(f, planted)
+        dc.safe_atomic_write(f, "b", root=repo)
+        assert mode_of(f) == expect, f"{oct(planted)} -> {oct(mode_of(f))}"
+        g = repo / "docs" / f"a{planted:o}.md"
+        g.write_text("# H\n", encoding="utf-8")
+        os.chmod(g, planted)
+        dc.locked_atomic_append(g, "- e\n", "# H\n", ".m.", root=repo)
+        assert mode_of(g) == expect, f"append {oct(planted)} -> {oct(mode_of(g))}"
+    explicit = repo / "docs" / "explicit.sh"
+    explicit.write_text("x", encoding="utf-8")
+    os.chmod(explicit, 0o600)
+    dc.safe_atomic_write(explicit, "y", root=repo, mode=0o755)
+    assert mode_of(explicit) == 0o755, "an explicit mode= must not be masked"
+
+
+def _gate_probe(tmp_path, name, body):
+    """Copy scripts/ into a disposable root, plant a probe module, run the gate."""
+    import shutil
+    root = tmp_path / name
+    root.mkdir()
+    shutil.copytree(SCRIPTS, root / "scripts",
+                    ignore=shutil.ignore_patterns("__pycache__"))
+    (root / "scripts" / "round27_probe.py").write_text(
+        'from pathlib import Path\n'
+        'import os, shutil\n'
+        'ROOT = Path(__file__).resolve().parent.parent\n' + body,
+        encoding="utf-8")
+    p = subprocess.run([sys.executable, "-I", str(SCRIPTS / "check_raw_file_io.py"),
+                        "--root", str(root), "--list-unresolved"],
+                       capture_output=True, text=True, timeout=120)
+    return p, root
+
+
+def test_raw_io_gate_catches_every_round27_evasion(tmp_path) -> None:
+    """round-27 found SEVEN ways to put an unguarded governed write past the
+    gate. Each is asserted separately: a gate that BLOCKs for the wrong reason
+    is not evidence that a given evasion is closed."""
+    if not (SCRIPTS / "check_raw_file_io.py").exists():
+        return
+    cases = {
+        # P1 :340/:345 — a call can touch MORE THAN ONE path. Inspecting only
+        # argument 0 made the governed DESTINATION invisible: no finding AND no
+        # unresolved line, for os.replace, shutil.copy and (src).replace(dst).
+        "multipath_os": 'def a(tmp_path):\n    os.replace(tmp_path / "s", ROOT / "docs" / "d")\n',
+        "multipath_shutil": 'def a(tmp_path):\n    shutil.copy(tmp_path / "s", ROOT / "docs" / "d")\n',
+        "multipath_method": 'def a(tmp_path):\n    (tmp_path / "s").replace(ROOT / "docs" / "d")\n',
+        # P2 :290 — the callee is a bare Name that is not literally `open`, so
+        # all three alias shapes were dropped in SILENCE. Third time for this
+        # defect in this file; the fix is identity, not spelling.
+        "import_alias": ('from os import unlink as remove_file\n\n'
+                         'def a():\n    remove_file(ROOT / "docs" / "d")\n'),
+        "builtin_alias": 'def a():\n    op = open\n    op(ROOT / "docs" / "d", "w")\n',
+        "bound_method": ('def a():\n    fn = (ROOT / "docs" / "d").write_text\n'
+                         '    fn("x")\n'),
+        # P1 :296 — the analysis is path-INSENSITIVE, so an unreachable fixture
+        # rebind erased a governed origin. `if False:` was enough to hide a
+        # write. Governed is now STICKY: over-reporting is the safe direction.
+        "dead_rebind": ('def a(tmp_path):\n    p = ROOT / "docs" / "d"\n'
+                        '    if False:\n        p = tmp_path / "d"\n'
+                        '    p.write_text("x")\n'),
+        # P2 :111 — metadata ops follow links and mutate governed files too.
+        "metadata": ('def a():\n    os.chmod(ROOT / "docs" / "d", 0o600)\n'
+                     '    (ROOT / "docs" / "d2").chmod(0o600)\n'),
+        # P2 :440 — a one-line wrapper demoted a governed write to `unresolved`,
+        # which does NOT fail the build, so "a new governed write fails the
+        # build" was overstated. Governed now propagates into module-local
+        # callees to a bounded fixpoint.
+        "wrapper": ('def raw_write(p):\n    p.write_text("x")\n\n'
+                    'def a():\n    raw_write(ROOT / "docs" / "d")\n'),
+        "wrapper_nested": ('def inner(p):\n    p.write_text("x")\n\n'
+                           'def outer(q):\n    inner(q)\n\n'
+                           'def a():\n    outer(ROOT / "docs" / "d")\n'),
+    }
+    for label, body in cases.items():
+        p, _ = _gate_probe(tmp_path, label, body)
+        out = p.stdout + p.stderr
+        assert p.returncode == 1, f"{label} evaded the gate (rc={p.returncode}): {out}"
+        assert "round27_probe.py" in out, f"{label} blocked for an unrelated reason: {out}"
+    # ...and the fixture equivalents of the same shapes stay silent, so the
+    # fixes above did not buy detection with false positives.
+    clean = {
+        "fx_multipath": 'def a(tmp_path):\n    os.replace(tmp_path / "s", tmp_path / "d")\n',
+        "fx_wrapper": ('def raw_write(p):\n    p.write_text("x")\n\n'
+                       'def a(tmp_path):\n    raw_write(tmp_path / "d")\n'),
+        "fx_metadata": 'def a(tmp_path):\n    (tmp_path / "d").chmod(0o600)\n',
+    }
+    for label, body in clean.items():
+        p, _ = _gate_probe(tmp_path, label, body)
+        assert p.returncode == 0, \
+            f"{label} false-positived on a fixture path: {p.stdout + p.stderr}"
+
+
+def test_raw_io_gate_propagation_resolves_the_right_definition(tmp_path) -> None:
+    """v3.8.44 in-release (security-auditor BLOCK + ast-parsing checklist item
+    9): the first cut of the interprocedural pass keyed definitions by bare
+    NAME via `ast.walk` + `setdefault`, and mapped positional arguments onto
+    `args.args` only. Both are wrong in BOTH directions.
+
+    A nested `def helper(q)` shadowing a module-level `def helper(x)` seeded
+    the OUTER function's parameter: a finding on a definition the call never
+    reached, while the write that actually received the governed path stayed
+    merely `unresolved` — which does not fail the build. And positional-only
+    parameters are absent from `args.args`, so `helper(ROOT, 1, 2)` against
+    `def helper(a, b, /, c)` shifted the index and marked `c` — which received
+    the literal 2 — governed.
+    """
+    if not (SCRIPTS / "check_raw_file_io.py").exists():
+        return
+    shadow, _ = _gate_probe(tmp_path, "shadow", (
+        'def helper(x):\n    pass\n\n'
+        'def evil():\n'
+        '    def helper(q):\n'
+        '        q.write_text("pwned")\n'
+        '    helper(ROOT / "docs" / "d")\n'))
+    out = shadow.stdout + shadow.stderr
+    assert shadow.returncode == 1, f"shadowed nested def evaded the gate: {out}"
+    assert "q.write_text" in out, f"blamed the wrong definition: {out}"
+    assert "x.write_text" not in out
+
+    posonly, _ = _gate_probe(tmp_path, "posonly", (
+        'def h1(a, b, /, c):\n    c.write_text("x")\n\n'
+        'def c1():\n    h1(ROOT, 1, 2)\n\n'
+        'def h2(a, b, /, c):\n    a.write_text("y")\n\n'
+        'def c2():\n    h2(ROOT, 1, 2)\n'))
+    out2 = posonly.stdout + posonly.stderr
+    assert posonly.returncode == 1, f"positional-only mapping missed h2: {out2}"
+    assert "a.write_text" in out2, out2
+    assert "c.write_text" not in out2.split("BLOCK", 1)[-1].split("\n\n")[0], \
+        f"seeded a parameter that received a literal: {out2}"
+
+
+def test_raw_io_gate_refuses_a_scan_surface_it_cannot_trust(tmp_path) -> None:
+    """round-27 P2 :389 / P2 :411 / P3 :96 — the gate had the defect class it
+    polices, for the fourth time: it read every candidate with a blocking
+    read_text() before any non-regular guard (a FIFO in scripts/ HUNG it), it
+    followed a symlinked scripts/ under --root and reported ok about bytes
+    outside the requested root, and when root resolution failed it silently
+    scanned cwd — which can be a different, clean checkout than the script the
+    operator actually invoked."""
+    if not (SCRIPTS / "check_raw_file_io.py").exists():
+        return
+    import shutil
+    gate = str(SCRIPTS / "check_raw_file_io.py")
+
+    fifo_root = tmp_path / "fifo"
+    fifo_root.mkdir()
+    shutil.copytree(SCRIPTS, fifo_root / "scripts",
+                    ignore=shutil.ignore_patterns("__pycache__"))
+    os.mkfifo(fifo_root / "scripts" / "round27_fifo.py")
+    try:
+        p = subprocess.run([sys.executable, "-I", gate, "--root", str(fifo_root)],
+                           capture_output=True, text=True, timeout=60)
+    except subprocess.TimeoutExpired:
+        raise AssertionError("a FIFO in scripts/ HUNG the raw-IO gate") from None
+    assert p.returncode == 1, "a non-regular candidate was not a violation"
+    assert "regular file" in (p.stdout + p.stderr)
+
+    sl_root = tmp_path / "slroot"
+    sl_root.mkdir()
+    (sl_root / "scripts").symlink_to(SCRIPTS)
+    p2 = subprocess.run([sys.executable, "-I", gate, "--root", str(sl_root)],
+                        capture_output=True, text=True, timeout=60)
+    assert p2.returncode == 2, "the gate audited a redirected scan surface"
+    assert "symlink" in (p2.stdout + p2.stderr)
+
+    # Root resolution fails -> fall back to THIS SCRIPT's tree (the one thing
+    # the invocation pins), announce the degradation, and still find the bug.
+    tgt = tmp_path / "tgt"
+    tgt.mkdir()
+    shutil.copytree(SCRIPTS, tgt / "scripts",
+                    ignore=shutil.ignore_patterns("__pycache__"))
+    (tgt / "scripts" / "_substrate_root.py").write_text(
+        'raise RuntimeError("boom")\n', encoding="utf-8")
+    (tgt / "scripts" / "round27_probe.py").write_text(
+        'from pathlib import Path\n'
+        'ROOT = Path(__file__).resolve().parent.parent\n'
+        'def a():\n    (ROOT / "docs" / "d").write_text("x")\n', encoding="utf-8")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    shutil.copytree(SCRIPTS, elsewhere / "scripts",
+                    ignore=shutil.ignore_patterns("__pycache__"))
+    p3 = subprocess.run([sys.executable, "-I", str(tgt / "scripts" / "check_raw_file_io.py")],
+                        capture_output=True, text=True, timeout=60, cwd=elsewhere)
+    assert "could not be resolved" in (p3.stdout + p3.stderr), "degraded silently"
+    assert p3.returncode == 1 and "round27_probe.py" in (p3.stdout + p3.stderr), \
+        f"scanned the wrong tree: {p3.stdout + p3.stderr}"
+
+
 def test_context_report_root_arg_is_honoured(tmp_path) -> None:
     """v3.8.43 in-release (round-26 auditor BLOCK #2): the guarded read was given
     the PROCESS's own root instead of the caller-supplied --root, so containment
@@ -5790,6 +6115,31 @@ def test_read_lock_refuses_symlinked_ancestor(tmp_path) -> None:
     (repo2 / ".substrate").mkdir(parents=True)
     (repo2 / ".substrate" / "required_sandbox").write_text("1\n", encoding="utf-8")
     assert dc.read_lock(repo2 / ".substrate" / "required_sandbox", {"0", "1"}, root=repo2)[0] == "ok"
+
+
+def test_read_lock_missing_ancestor_is_absent_not_tampered(tmp_path) -> None:
+    """v3.8.44 in-release: routing read_lock onto the component walk collapsed
+    'a component does not exist' into 'an ancestor is unsafe', so a repo with no
+    `.substrate/` at all reported the lock as BAD — and a bad lock means the
+    tier IS required. Fail-closed is right for an ancestor that exists and is a
+    symlink; it is wrong for one that was never created, which is simply an
+    unconfigured repo (two security-scanner tests caught this)."""
+    import importlib
+    dc = importlib.import_module("_doc_common")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    assert dc.read_lock(repo / ".substrate" / "required_x", {"0", "1"}, root=repo)[0] == "absent"
+    (repo / ".substrate").mkdir()
+    assert dc.read_lock(repo / ".substrate" / "required_x", {"0", "1"}, root=repo)[0] == "absent"
+    # ...but an ancestor that EXISTS and is a symlink is still tampering.
+    repo2 = tmp_path / "repo2"
+    repo2.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "required_x").write_text("1\n", encoding="utf-8")
+    (repo2 / ".substrate").symlink_to(outside)
+    state, _v, reason = dc.read_lock(repo2 / ".substrate" / "required_x", {"0", "1"}, root=repo2)
+    assert state == "bad" and "ancestor" in reason, (state, reason)
 
 
 def test_append_refuses_symlinked_ancestor(tmp_path) -> None:

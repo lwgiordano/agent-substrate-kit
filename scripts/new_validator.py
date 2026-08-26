@@ -225,9 +225,11 @@ def main(argv: list[str] | None = None) -> int:
 
     validator.parent.mkdir(parents=True, exist_ok=True)
     test.parent.mkdir(parents=True, exist_ok=True)
+    # mode set inside the guarded write: a follow-up path chmod re-resolves the
+    # name and can follow a link swapped in after the replace (round-27 P2).
     _safe_atomic_write(validator,
-                       _VALIDATOR_TEMPLATE.format(name=name, desc=desc), root=ROOT)
-    validator.chmod(validator.stat().st_mode | 0o755)
+                       _VALIDATOR_TEMPLATE.format(name=name, desc=desc),
+                       root=ROOT, mode=0o755)
     _safe_atomic_write(test, _TEST_TEMPLATE.format(name=name), root=ROOT)
 
     dashed = name.replace("_", "-")

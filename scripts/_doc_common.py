@@ -324,6 +324,15 @@ LOCK_MAX_BYTES = 64
 # (the memory chain) pass max_bytes=None; tail readers pass tail_bytes.
 SAFE_READ_MAX_BYTES = 1 << 20
 
+# Modes an INHERITED permission set may keep when a guarded write replaces an
+# existing file (v3.8.44, in-release auditor BLOCK). Carrying the predecessor's
+# mode verbatim meant a target an attacker could chmod kept those bits through
+# every later "safe" rewrite: 0o4777 stayed 0o4777. setuid/setgid/sticky and
+# world-write are dropped; owner/group rwx and the read bits that make 0644 and
+# 0755 work survive. An EXPLICIT `mode=` argument is a deliberate choice by the
+# caller and is not masked.
+INHERIT_MODE_MASK = 0o775
+
 
 def within_root(target, root) -> bool:
     """True iff `target`'s PARENT resolves to its EXACT lexical location under
@@ -407,6 +416,51 @@ def _read_fd_bytes(fd: int, limit: int | None = None) -> bytes:
     return b"".join(chunks)
 
 
+def safe_read_bytes(path, root=None, max_bytes: int | None = SAFE_READ_MAX_BYTES,
+                    tail_bytes: int | None = None) -> bytes | None:
+    """The guarded read, returning RAW BYTES; `safe_read_text` decodes on top.
+
+    v3.8.44: hashing callers (`substrate_profile._sha256`,
+    `substrate_upgrade._sha256`, `write_install_json`) need bytes, and each had
+    re-derived its own `p.read_bytes()` — the third independent re-derivation of
+    a primitive, which is how this class kept coming back. One implementation,
+    two return types.
+
+    See `safe_read_text` for the guarantees; they are made here.
+    """
+    _dir_fd = None
+    try:
+        if root is not None:
+            _dir_fd = open_dir_chain(root, Path(path).parent, create=False)
+            fd = os.open(Path(path).name,
+                         os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+                         dir_fd=_dir_fd)
+        else:
+            fd = os.open(str(path),
+                         os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    except (OSError, ValueError):
+        return None  # absent, symlinked (ELOOP), escaping, or unreadable
+    finally:
+        if _dir_fd is not None:
+            os.close(_dir_fd)
+    try:
+        st = os.fstat(fd)
+        if not _stat.S_ISREG(st.st_mode) or st.st_nlink > 1:
+            return None
+        if tail_bytes is not None:
+            if st.st_size > tail_bytes:
+                os.lseek(fd, st.st_size - tail_bytes, os.SEEK_SET)
+            return _read_fd_bytes(fd, tail_bytes)
+        if max_bytes is None:
+            return _read_fd_bytes(fd, None)
+        raw = _read_fd_bytes(fd, max_bytes + 1)
+        return None if len(raw) > max_bytes else raw
+    except (OSError, ValueError):
+        return None
+    finally:
+        os.close(fd)
+
+
 def safe_read_text(path, root=None, max_bytes: int | None = SAFE_READ_MAX_BYTES,
                    tail_bytes: int | None = None) -> str | None:
     """Containment- and leaf-type-checked text read. Returns the decoded text,
@@ -439,31 +493,16 @@ def safe_read_text(path, root=None, max_bytes: int | None = SAFE_READ_MAX_BYTES,
     Decoding is `errors="replace"`: undecodable bytes must degrade to
     non-matching text, never to a traceback out of a hook (round-25 finding 3).
     """
-    if root is not None and not within_root(path, root):
+    # v3.8.44 (round-27 P1): the read side had the same post-guard window as the
+    # write side — within_root() then a MULTI-COMPONENT os.open(str(path)), so a
+    # swapped intermediate ancestor returned OUTSIDE bytes while the leaf fstat
+    # checks all passed. Descend to the parent one component at a time, then open
+    # the leaf by BASENAME relative to that pinned fd. When no root is supplied
+    # the caller has opted out of containment and only the leaf guards apply.
+    # (That descent now lives in safe_read_bytes; this is the decoding wrapper.)
+    raw = safe_read_bytes(path, root, max_bytes=max_bytes, tail_bytes=tail_bytes)
+    if raw is None:
         return None
-    try:
-        fd = os.open(str(path),
-                     os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
-    except (OSError, ValueError):
-        return None  # absent, symlinked (ELOOP), or unreadable
-    try:
-        st = os.fstat(fd)
-        if not _stat.S_ISREG(st.st_mode) or st.st_nlink > 1:
-            return None
-        if tail_bytes is not None:
-            if st.st_size > tail_bytes:
-                os.lseek(fd, st.st_size - tail_bytes, os.SEEK_SET)
-            raw = _read_fd_bytes(fd, tail_bytes)
-        elif max_bytes is None:
-            raw = _read_fd_bytes(fd, None)
-        else:
-            raw = _read_fd_bytes(fd, max_bytes + 1)
-            if len(raw) > max_bytes:
-                return None
-    except (OSError, ValueError):
-        return None
-    finally:
-        os.close(fd)
     return raw.decode("utf-8", errors="replace")
 
 
@@ -496,18 +535,39 @@ def read_lock(path: Path, allowed: set, root=None) -> tuple:
     """
     if root is None:
         root = repo_root()
-    if not within_root(path, root):
-        return ("bad", None, "lock parent escapes the repo (symlinked ancestor)")
+    # v3.8.44 (round-27 P1): same component-walk descent as the other readers —
+    # a lock is the highest-value target in the tree, so it must not be the one
+    # place still resolving a multi-component path after its containment check.
+    _lock_dir_fd = None
     try:
-        fd = os.open(str(path),
-                     os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
-    except OSError as e:
-        if e.errno in (errno.ENOENT, errno.ENOTDIR):
-            return ("absent", None, None)
-        if e.errno == errno.ELOOP:
-            return ("bad", None, "lock is a symlink — refusing to follow it")
-        # ENXIO: a write-only FIFO with no reader; still not a real lock.
-        return ("bad", None, f"unreadable ({e.__class__.__name__})")
+        _lock_dir_fd = open_dir_chain(root, Path(path).parent, create=False)
+    except FileNotFoundError:
+        # A component that simply DOES NOT EXIST means there is no lock — the
+        # same answer the leaf open used to give. Collapsing this into "bad"
+        # made an unconfigured repo look tampered with, and a tier whose lock
+        # is absent then reads as REQUIRED (two security-scanner tests caught
+        # it). Only FileNotFoundError: an existing-but-unsafe ancestor raises
+        # ELOOP/ENOTDIR (O_DIRECTORY|O_NOFOLLOW on a symlink reports ENOTDIR on
+        # Linux, not ELOOP — errno alone cannot separate the two cases), and an
+        # escaping path raises a plain OSError. Both stay "bad".
+        return ("absent", None, None)
+    except OSError:
+        return ("bad", None, "lock parent escapes the repo, or an ancestor is a "
+                             "symlink/non-directory — refusing to resolve it")
+    try:
+        try:
+            fd = os.open(Path(path).name,
+                         os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+                         dir_fd=_lock_dir_fd)
+        except OSError as e:
+            if e.errno in (errno.ENOENT, errno.ENOTDIR):
+                return ("absent", None, None)
+            if e.errno == errno.ELOOP:
+                return ("bad", None, "lock is a symlink — refusing to follow it")
+            # ENXIO: a write-only FIFO with no reader; still not a real lock.
+            return ("bad", None, f"unreadable ({e.__class__.__name__})")
+    finally:
+        os.close(_lock_dir_fd)
     try:
         st = os.fstat(fd)
         if not _stat.S_ISREG(st.st_mode):
@@ -568,8 +628,69 @@ def redact_secrets(obj):
     return obj
 
 
+def open_dir_chain(root, parent, create: bool = False) -> int:
+    """Open `parent` as a directory fd WITHOUT ever resolving a multi-component
+    path. Caller owns the returned fd and must close it.
+
+    v3.8.44 (round-27 P1) — the deepest instance of this series' defect, and it
+    was in the primitive every other fix now depends on. `safe_atomic_write` was
+    described as "fd-anchored", but it anchored to the parent while still doing
+    `os.open(str(parent))` — a MULTI-COMPONENT path. `O_NOFOLLOW` constrains only
+    the FINAL component, so swapping any INTERMEDIATE ancestor between the
+    containment check and that open rerouted the whole descent, and the dev/ino
+    re-validation that was supposed to catch it compared the already-rerouted
+    directory against itself and approved it. Reproduced: a write landed outside
+    the repo with the in-repo parent untouched.
+
+    A dev/ino comparison cannot close that window, because by the time it runs
+    the kernel has already followed the swapped ancestor. The only fix is to
+    never hand the kernel a path it can re-resolve: open the ROOT once, then
+    descend ONE component at a time with `O_NOFOLLOW | O_DIRECTORY` and
+    `dir_fd=`. Each step is a single-component lookup relative to a fd that is
+    already pinned to an inode, so there is no multi-component resolution left
+    to race. This subsumes `within_root` for callers that use it — containment
+    stops being a check performed before the work and becomes a property of how
+    the work is done.
+
+    `root` itself IS resolved by path: it may legitimately be reached through a
+    symlink (a repo under /tmp on macOS), and it is the trust anchor the caller
+    supplied rather than something an attacker introduces mid-call.
+
+    `create=True` makes missing components with `os.mkdir(..., dir_fd=)`, which
+    is likewise single-component and cannot create a directory through a
+    swapped ancestor.
+    """
+    root = Path(root)
+    rel = os.path.relpath(str(Path(parent)), str(root))
+    if rel == os.curdir:
+        parts: list[str] = []
+    elif rel == os.pardir or rel.startswith(os.pardir + os.sep) or os.path.isabs(rel):
+        raise OSError(f"path escapes the root: {parent}")
+    else:
+        parts = [c for c in rel.split(os.sep) if c and c != os.curdir]
+    if any(c == os.pardir for c in parts):
+        raise OSError(f"parent traversal is not allowed in a guarded path: {parent}")
+    fd = os.open(str(root), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        for comp in parts:
+            flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+            try:
+                nfd = os.open(comp, flags, dir_fd=fd)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                os.mkdir(comp, 0o755, dir_fd=fd)
+                nfd = os.open(comp, flags, dir_fd=fd)
+            os.close(fd)
+            fd = nfd
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
 def safe_atomic_write(target, text, root=None, tmp_prefix: str = ".saw-",
-                      make_parents: bool = False) -> None:
+                      make_parents: bool = False, mode: int | None = None) -> None:
     """Atomically write `text` to `target`, anchored to the parent DIRECTORY FD.
 
     v3.8.43 (round-26 P1 x3): the write-side counterpart to `safe_read_text`, and
@@ -596,25 +717,19 @@ def safe_atomic_write(target, text, root=None, tmp_prefix: str = ".saw-",
         root = repo_root()
     parent = target.parent
     name = target.name
-    if make_parents:
-        # mkdir BEFORE the containment check would create an outside directory on
-        # a refused write (the round-23 lesson), so check first, then create, then
-        # check again below against the fd we actually open.
-        if not within_root(target, root):
-            raise OSError(f"write target parent escapes the repo: {target}")
-        parent.mkdir(parents=True, exist_ok=True)
-    if not within_root(target, root):
-        raise OSError(f"write target parent escapes the repo: {target}")
-    dir_fd = os.open(str(parent),
-                     os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
+    # v3.8.44 (round-27 P1): descend to the parent one component at a time from
+    # the root instead of resolving `parent` as a path and then re-validating.
+    # The old order (check containment -> open the multi-component path -> compare
+    # dev/ino) could not work: the comparison ran AFTER the kernel had already
+    # followed a swapped intermediate ancestor, so it compared the rerouted
+    # directory to itself. `make_parents` creates missing components through the
+    # same single-component descent, so a refused path still creates nothing
+    # outside (the round-23 lesson, now structural rather than ordered).
     try:
-        try:
-            path_st = os.lstat(str(parent))
-        except OSError as e:
-            raise OSError(f"write parent vanished: {parent}") from e
-        fd_st = os.fstat(dir_fd)
-        if (path_st.st_dev, path_st.st_ino) != (fd_st.st_dev, fd_st.st_ino):
-            raise OSError(f"write parent was swapped after the guard — refusing: {parent}")
+        dir_fd = open_dir_chain(root, parent, create=make_parents)
+    except OSError as e:
+        raise OSError(f"write target parent escapes the repo or is unusable: {target} ({e})") from e
+    try:
         tmp_name = None
         tfd = None
         for _ in range(16):
@@ -634,6 +749,31 @@ def safe_atomic_write(target, text, root=None, tmp_prefix: str = ".saw-",
             _binary = isinstance(text, (bytes, bytearray))
             _mode = "wb" if _binary else "w"
             _kw = {} if _binary else {"encoding": "utf-8"}
+            # v3.8.44 (round-27 P3): carry the EXISTING target mode onto the
+            # replacement. The temp file is created 0600 so it is never briefly
+            # world-readable, but replacing without restoring the mode silently
+            # destroyed permissions on every guarded rewrite — scripts/tool.sh
+            # went 0755 -> 0600 (executable bit gone) and docs/HISTORY.md
+            # 0644 -> 0600. A safety fix must not break the file it protects.
+            # An explicit `mode` wins; otherwise inherit the existing target's
+            # mode. Setting it on the TEMP FD before the replace means the final
+            # file never exists with the wrong permissions, and callers no longer
+            # need a follow-up path-based chmod — which was itself a link-followable
+            # operation on a governed path (round-27 P2).
+            # Inherit only from a REGULAR existing target: lstat on a symlinked
+            # leaf reports 0777, which would widen the replacement's mode from
+            # the safe default. `os.replace` breaks the link either way, so a
+            # non-regular predecessor simply gets the 0600 default.
+            _want_mode = mode
+            if _want_mode is None:
+                try:
+                    _st_prev = os.lstat(name, dir_fd=dir_fd)
+                    if _stat.S_ISREG(_st_prev.st_mode):
+                        _want_mode = _stat.S_IMODE(_st_prev.st_mode) & INHERIT_MODE_MASK
+                except (OSError, ValueError):
+                    _want_mode = None
+            if _want_mode is not None:
+                os.fchmod(tfd, _want_mode)
             with os.fdopen(tfd, _mode, **_kw) as fh:
                 tfd = None  # the file object owns the fd now
                 fh.write(text)
@@ -708,13 +848,22 @@ def locked_atomic_append(target: Path, entry: str, header: str, tmp_prefix: str,
     _leaf_reason = refuse_linked_leaf(target)
     if _leaf_reason is not None:
         raise OSError(f"append target {_leaf_reason} — refusing to read/replace through it: {target}")
-    target.parent.mkdir(parents=True, exist_ok=True)
     parent = target.parent
     name = target.name
     # v3.8.42 (round-25 P1): O_DIRECTORY|O_NOFOLLOW — the parent must be a real
     # directory, not a symlink swapped in after within_root ran.
-    dir_fd = os.open(str(parent),
-                     os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
+    # v3.8.44 (round-27 P1, the same window safe_atomic_write had): O_NOFOLLOW
+    # protects only the FINAL component, so resolving `str(parent)` as a
+    # multi-component path left every INTERMEDIATE ancestor swappable after
+    # within_root ran. Round-27 reported this on safe_atomic_write only; it is
+    # one defect in two writers, so both descend component-by-component from the
+    # root. `create=True` replaces the path-based parents mkdir above, which had
+    # the same flaw and ran BEFORE the fd existed.
+    try:
+        dir_fd = open_dir_chain(root, parent, create=True)
+    except OSError as e:
+        raise OSError(f"append target parent escapes the repo or has an unsafe "
+                      f"ancestor: {target} ({e})") from e
     try:
         try:
             timeout_s = float(os.environ.get("SUBSTRATE_APPEND_LOCK_TIMEOUT") or 10.0)
@@ -753,6 +902,7 @@ def locked_atomic_append(target: Path, entry: str, header: str, tmp_prefix: str,
         if not within_root(target, root):
             raise OSError(f"append target parent escapes the repo (re-checked post-lock): {target}")
         existing = header
+        keep_mode = None
         try:
             leaf_st = os.lstat(name, dir_fd=dir_fd)
         except FileNotFoundError:
@@ -761,6 +911,10 @@ def locked_atomic_append(target: Path, entry: str, header: str, tmp_prefix: str,
             if (_stat.S_ISLNK(leaf_st.st_mode) or not _stat.S_ISREG(leaf_st.st_mode)
                     or leaf_st.st_nlink > 1):
                 raise OSError(f"append target is an unsafe leaf — refusing: {target}")
+            # v3.8.44 (round-27 P3): the replacement inherited the temp file's
+            # 0600 instead of the log's own mode, so appending to docs/HISTORY.md
+            # silently took it from 0644 to 0600 on every entry.
+            keep_mode = _stat.S_IMODE(leaf_st.st_mode) & INHERIT_MODE_MASK
             rfd = os.open(name,
                           os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
                           dir_fd=dir_fd)
@@ -800,6 +954,8 @@ def locked_atomic_append(target: Path, entry: str, header: str, tmp_prefix: str,
         if tfd is None:
             raise OSError(f"could not create a temporary file for the append in {parent}")
         try:
+            if keep_mode is not None:
+                os.fchmod(tfd, keep_mode)
             with os.fdopen(tfd, "w", encoding="utf-8") as fh:
                 tfd = None  # the file object owns the fd now
                 fh.write(existing + entry)

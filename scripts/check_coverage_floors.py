@@ -33,6 +33,16 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+# v3.8.44 (round-27, surfaced by the gate's new interprocedural pass): the
+# coverage report is a repo file this gate's PASS/FAIL verdict depends on, and
+# it was read raw. The fallback fails closed — no usable content.
+try:
+    from _doc_common import safe_read_text as _safe_read_text
+except Exception:  # pragma: no cover - stripped install
+    def _safe_read_text(path, root=None, max_bytes=None, tail_bytes=None):
+        return None
 
 
 # Per-file floors (% line coverage). tightened these from
@@ -67,7 +77,13 @@ def _load_coverage_json(path: Path) -> dict:  # type: ignore[type-arg]
             file=sys.stderr,
         )
         sys.exit(2)
-    return json.loads(path.read_text(encoding="utf-8"))
+    raw = _safe_read_text(path, REPO, max_bytes=64 << 20)
+    if raw is None:
+        print(f"check-coverage-floors: {path} is unreadable or an unsafe leaf "
+              "(symlink/hard link/FIFO) — refusing to enforce floors from it.",
+              file=sys.stderr)
+        sys.exit(2)
+    return json.loads(raw)
 
 
 def main(argv: list[str] | None = None) -> int:

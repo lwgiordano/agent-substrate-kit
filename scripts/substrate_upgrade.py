@@ -56,6 +56,12 @@ try:
 except Exception:  # pragma: no cover - stripped install
     def _refuse_linked_leaf(path):
         return "guard unavailable"
+
+try:
+    from _doc_common import safe_read_bytes as _safe_read_bytes
+except Exception:  # pragma: no cover - stripped install
+    def _safe_read_bytes(path, root=None, max_bytes=None, tail_bytes=None):
+        return None
 from _doc_common import read_lock as _dc_read_lock  # noqa: E402
 
 
@@ -106,6 +112,11 @@ def _load_verify(root: Path | None = None):
                 except Exception as e:
                     raise SystemExit(f"upgrade: refusing — cannot hash {_rel} to check it against "
                                      f"the drift baseline: {e}")
+                if _got is None:
+                    raise SystemExit(
+                        f"upgrade: refusing — {_rel} is missing or is an unsafe leaf "
+                        "(symlink/hard link/FIFO), so it cannot be checked against the "
+                        "drift baseline.")
                 if _got != _want:
                     raise SystemExit(
                         f"upgrade: refusing — {_rel} does not match the drift baseline, so source "
@@ -295,9 +306,19 @@ def _profile_alias(ans: dict) -> str:
     return base
 
 
-def _sha256(p: Path) -> str:
+def _sha256(p: Path, root: Path | None = None) -> str | None:
+    """Guarded hash: None when the leaf is absent or unsafe (link/FIFO/escape).
+
+    v3.8.44 (round-27, surfaced by the gate's new interprocedural pass): this
+    was a raw read_bytes() on whatever path it was handed, and every caller
+    compares the result to a baseline hash. Hashing OUTSIDE bytes through a
+    planted link makes a tampered file compare clean, which is the one thing a
+    drift check must not do. None is never equal to a recorded hash, so an
+    unreadable leaf now reads as DRIFT rather than as a match.
+    """
     import hashlib
-    return hashlib.sha256(p.read_bytes()).hexdigest()
+    raw = _safe_read_bytes(p, root, max_bytes=None)
+    return None if raw is None else hashlib.sha256(raw).hexdigest()
 
 
 def _resolve_kit(src: Path, root: Path, allow_unverified: bool, tmp: Path) -> tuple[Path, str, str | None]:
@@ -363,7 +384,7 @@ def _drifted(root: Path, baseline: dict | None, kit: Path,
         # is_file()/_sha256 follow symlinks — but a symlinked owned dest is a hard tamper
         # condition handled by _unsafe_owned_dests (abort), so here we only compare regular
         # files' content.
-        if p.is_file() and not p.is_symlink() and _sha256(p) != want:
+        if p.is_file() and not p.is_symlink() and _sha256(p, root) != want:
             out.append(rel)
     # Completeness cross-check (v3.8.15 / P2): the owned map is agent-writable, so an attacker
     # can EDIT an owned file AND DELETE its entry so the hash loop above never sees it. Scan the

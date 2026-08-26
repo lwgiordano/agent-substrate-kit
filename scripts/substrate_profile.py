@@ -57,6 +57,15 @@ except Exception:  # pragma: no cover - stripped install
     def _safe_read_text(path, root=None, max_bytes=None, tail_bytes=None):
         return None
 
+# v3.8.44 (round-27, found by the gate's new interprocedural pass): _sha256()
+# read its argument with a raw read_bytes(), so a governed path handed to it
+# was hashed through whatever the leaf happened to be.
+try:
+    from _doc_common import safe_read_bytes as _safe_read_bytes
+except Exception:  # pragma: no cover - stripped install
+    def _safe_read_bytes(path, root=None, max_bytes=None, tail_bytes=None):
+        return None
+
 try:
     from _substrate_root import substrate_root as _sr
     ROOT = _sr()
@@ -129,8 +138,15 @@ def render_precommit(template_text: str, profile: str, lang: str, run_prefix: st
     return "\n".join(out) + "\n"
 
 
-def _sha256(p: Path) -> str:
-    return hashlib.sha256(p.read_bytes()).hexdigest()
+def _sha256(p: Path, root: Path | None = None) -> str | None:
+    """Guarded hash: None when the leaf is absent or unsafe (link/FIFO/escape).
+
+    A drift check that hashes through a symlinked or hard-linked
+    .pre-commit-config.yaml compares OUTSIDE bytes to the baseline, so a
+    planted link could make a tampered config read as clean.
+    """
+    raw = _safe_read_bytes(p, root, max_bytes=None)
+    return None if raw is None else hashlib.sha256(raw).hexdigest()
 
 
 def _install_json(root: Path) -> dict | None:
@@ -150,7 +166,10 @@ def _precommit_drifted(root: Path, baseline: dict | None) -> bool:
     recorded = ((baseline or {}).get("owned_file_sha256") or {}).get(".pre-commit-config.yaml")
     if recorded is None:
         return baseline is None  # no baseline at all -> treat as unknown/drifted
-    return recorded != _sha256(pc)
+    got = _sha256(pc, root)
+    # An unhashable leaf is not "unchanged": treat it as drift so the overwrite
+    # requires --force rather than silently proceeding.
+    return got is None or recorded != got
 
 
 def _plan(target: str, cfg: dict[str, str]) -> None:
@@ -259,8 +278,8 @@ def _write(root: Path, target: str, cfg: dict[str, str], force: bool) -> int:
             # v3.8.43: dest.exists() is FALSE for a BROKEN symlink, so the
             # skip above did not protect this write — it followed the link
             # and created the outside file. Anchored write instead.
-            _safe_atomic_write(dest, f.read_bytes(), root=root)
-            dest.chmod(dest.stat().st_mode | 0o755)
+            _safe_atomic_write(dest, f.read_bytes(), root=root,
+                               mode=(f.stat().st_mode & 0o777) | 0o755)
             print(f"substrate-profile: + scripts/{f.name}")
         if not staged:
             print("substrate-profile: WARNING no staged extras (.substrate/extras/) — "

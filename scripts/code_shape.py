@@ -37,6 +37,15 @@ import argparse, ast, json, subprocess, sys
 sys.dont_write_bytecode = True
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+# v3.8.44 (round-27, surfaced by the gate's new interprocedural pass): the
+# line counter opened whatever leaf it was handed, so a FIFO under the repo
+# would BLOCK this tool forever. Unreadable now counts as zero lines.
+try:
+    from _doc_common import safe_read_bytes as _safe_read_bytes
+except Exception:  # pragma: no cover - stripped install
+    def _safe_read_bytes(path, root=None, max_bytes=None, tail_bytes=None):
+        return None
 try:
     from _substrate_root import substrate_root as _sr
     _DEFAULT_ROOT = _sr()
@@ -129,10 +138,8 @@ def _skip(rel: str) -> bool:
 
 
 def _line_count(p: Path) -> int:
-    try:
-        return sum(1 for _ in p.open("rb"))
-    except Exception:
-        return 0
+    raw = _safe_read_bytes(p, max_bytes=None)
+    return 0 if raw is None else raw.count(b"\n") + (0 if raw.endswith(b"\n") or not raw else 1)
 
 
 def _repo_shape(root: Path, file_lines: int, func_lines: int, include_substrate: bool) -> dict:

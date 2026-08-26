@@ -301,6 +301,123 @@ N+1; if the answer is "reviewer diligence", the class will recur. Shared helpers
 are necessary but insufficient — nothing forces a new call site through them
 except a gate that fails the build.
 
+## Round 7 — v3.8.44 (round-27): the primitive itself had the window
+
+Round 27 found twelve, six P1, and the headline one is the best finding of the
+series: `safe_atomic_write` — the shared helper every other fix now routes
+through — had the defect in its own foundation.
+
+It was described as fd-anchored. It anchored to the **parent**, and resolved
+that parent as a **multi-component path**:
+
+```python
+if not within_root(target, root): refuse()
+dir_fd = os.open(str(parent), O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+if (lstat(parent).st_dev, .st_ino) != (fstat(dir_fd)...): refuse()   # useless
+```
+
+`O_NOFOLLOW` constrains only the **final** component. Swap any *intermediate*
+ancestor between `within_root()` and that `os.open` — `repo/state` renamed
+aside and replaced with a symlink to `outside_state` — and the kernel resolves
+the whole subtree through the swapped link. The dev/ino re-validation then
+compares the already-rerouted directory **to itself** and approves it. Codex
+reproduced it end to end: the write landed in `outside_state/tasks/out.txt` and
+the in-repo parent was never touched. `safe_read_text` had the identical window
+and returned OUTSIDE bytes while every leaf `fstat` check passed.
+
+No check can close that window, because by the time any check runs the kernel
+has already followed the swapped ancestor. The fix is to never hand the kernel
+a re-resolvable path at all: `open_dir_chain()` opens the root once and walks
+**one component at a time** with `O_NOFOLLOW|O_DIRECTORY` and `dir_fd=`, so no
+intermediate component is ever name-resolved and there is nothing to swap. That
+subsumes `within_root` for these callers — containment stops being a check
+performed before the work and becomes a property of **how the work is done**.
+`safe_read_text`, `read_lock` and `locked_atomic_append` all descend the same
+way now; round 27 reported the window on the writer only, and fixing just that
+one would have been round 26's mistake for the seventh time.
+
+Round 27 also caught a bug the *hardening itself* introduced: the guarded
+writers always created their temp file `0600` and never restored the target's
+mode, so every guarded rewrite destroyed permissions — `scripts/tool.sh` went
+`0755 -> 0600` (executable bit gone), `docs/HISTORY.md` `0644 -> 0600`. A safety
+fix that breaks the file it protects is not a safety fix.
+
+### The gate had six holes, and finding them was the point
+
+Six of the twelve were in `check_raw_file_io.py`, the gate shipped the day
+before — asked for explicitly, because it is new and load-bearing and had
+already been wrong three times in its own release. It missed governed
+**destinations** in multi-path calls (`os.replace(tmp, ROOT/dst)` inspected
+argument 0 only), dropped three alias shapes in **silence** (`from os import
+unlink as remove_file`, `op = open`, `fn = p.write_text`), let an unreachable
+`if False: p = tmp/...` rebind erase a governed origin, read every candidate
+with a blocking `read_text()` before any non-regular guard (a FIFO in
+`scripts/` **hung** it — the fourth time a component of this system carried the
+defect it polices), followed a symlinked `scripts/` under `--root`, and fell
+back to `cwd` when root resolution failed.
+
+The seventh matters most for the honesty of the whole exercise: a one-line
+wrapper — `def raw_write(p): p.write_text(...)` called with a governed path —
+demoted a violation to an `unresolved` line, and `unresolved` does not fail the
+build. So the claim "a new unguarded governed write now fails the build" was
+overstated as written. The gate now propagates GOVERNED into module-local
+callees to a bounded fixpoint, and that single change immediately found **ten
+more real governed sites** nobody had reported, including `update_manifest`'s
+`write_atomic` (the round-26 parent-swap defect verbatim, invisible only
+because the governed path arrived as a parameter), both `_sha256` drift-check
+readers (hashing through a planted link makes a tampered file compare *clean*),
+the postmortem-gate test-file reader, and the bus lease reader.
+
+### Three in-release auditor findings, all in the new code
+
+A read-only security auditor and the ast-parsing checklist auditor were run on
+the finished v3.8.44 diff before commit, and both returned BLOCK-level findings
+**in this release's own work** — the third release running where that has been
+true, which is the argument for running them at all:
+
+- **The mode-preservation fix widened permissions.** It copied the predecessor's
+  `S_IMODE` verbatim, so a target an attacker could `chmod` kept setuid, setgid,
+  sticky and world-write through every subsequent guarded rewrite: `0o4777`
+  stayed `0o4777`. A permission-preserving fix that preserves *dangerous*
+  permissions is a widening. Inheritance is now masked to `0o775`; an explicit
+  `mode=` from the caller is a deliberate choice and is not masked.
+- **The interprocedural pass resolved the wrong function.** It keyed definitions
+  by bare name via `ast.walk` + `setdefault`, so a nested `def helper(q)` and a
+  module-level `def helper(x)` collapsed into one entry — a finding on the
+  definition the call never reached, and only an `unresolved` line for the write
+  that did receive the governed path. Wrong in both directions simultaneously.
+- **Positional-only parameters shifted the argument mapping.** `args.args`
+  excludes `posonlyargs`, so `helper(ROOT, 1, 2)` against `def helper(a, b, /,
+  c)` seeded `c`, which had received the literal `2`.
+
+- **The descent made "not configured" look like "tampered with."** Routing
+  `read_lock` onto the component walk collapsed *a component that does not
+  exist* into *an ancestor that is unsafe*, so a repo with no `.substrate/` at
+  all reported its locks BAD — and a bad lock means the tier IS required. Two
+  security-scanner tests caught it. Worth stating precisely because the errno is
+  not enough to tell the cases apart: on Linux, `O_DIRECTORY|O_NOFOLLOW` on a
+  symlinked ancestor reports `ENOTDIR`, not `ELOOP`, so an errno allowlist that
+  looks correct silently reclassifies real tampering as "absent". Only
+  `FileNotFoundError` means absent; everything else stays "bad". Fail-closed is
+  right for an ancestor that exists and is a symlink, and wrong for one that was
+  never created.
+
+Definitions and seeds are now keyed by SCOPE PATH and resolved innermost-first,
+argument mapping uses `posonlyargs + args` for positions and skips a leading
+`self`/`cls`, and `*args` collection is handled. Each has a regression that was
+verified to fail before the fix.
+
+**Carry-forward rule, part 7 — a guard that re-resolves a path is not a guard.**
+Check-then-use is not fixed by making the check better; it is fixed by making
+the check and the use the same operation. Anchor to a handle obtained one
+component at a time, or accept that every ancestor is attacker-controlled.
+
+**Carry-forward rule, part 8 — measure the gate against its own claim.** Each
+time this gate was extended it found real bugs the previous version had passed
+in silence, and each extension was prompted by someone attacking the gate
+rather than the code. State its limits explicitly, then treat every stated
+limit as a lead rather than a boundary.
+
 ## (Optional) Reproduction
 
 In a disposable repo: `ln victim.txt AGENT_BUS.md` then

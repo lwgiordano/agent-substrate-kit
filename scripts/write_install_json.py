@@ -14,12 +14,9 @@ Read-only w.r.t. everything except .substrate/install.json. Stdlib only.
 from __future__ import annotations
 
 import argparse
-import contextlib
 import hashlib
 import json
-import os
 import sys
-import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -30,9 +27,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 try:
     from _doc_common import refuse_linked_leaf as _refuse_linked_leaf
+    from _doc_common import safe_atomic_write as _safe_atomic_write
 except Exception:  # pragma: no cover - stripped install
     def _refuse_linked_leaf(path):
         return "guard unavailable"
+
+    def _safe_atomic_write(*a, **k):
+        raise OSError("safe_atomic_write unavailable — refusing an unguarded write")
 try:
     from _substrate_surfaces import (
         COVERAGE_SKIP_PARTS, OPTIONAL_DIRS, OPTIONAL_FILES, OWNED_DIRS, OWNED_FILES,
@@ -120,24 +121,16 @@ def main(argv=None) -> int:
     }
     data = build(root, a.version, a.commit, a.source, answers, a.installed_at)
     dest = root / ".substrate" / "install.json"
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    # Write via a same-dir temp + os.replace (v3.8.25 / write_install_json:105): a plain
-    # write_text() writes THROUGH the existing inode, so a HARD-LINKED install.json (nlink>1,
-    # which no symlink check catches) had its outside same-inode twin overwritten with provenance
-    # while the install reported success. Replacing the directory entry breaks any hard link and
-    # never follows a symlink, and is atomic for readers.
-    tmp_path = None
-    try:
-        fd, tmp_path = tempfile.mkstemp(prefix=".install.", suffix=".json.tmp", dir=str(dest.parent))
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(json.dumps(data, indent=2, sort_keys=True) + "\n")
-        os.chmod(tmp_path, 0o644)
-        os.replace(tmp_path, dest)
-        tmp_path = None
-    finally:
-        if tmp_path and os.path.exists(tmp_path):
-            with contextlib.suppress(OSError):
-                os.remove(tmp_path)
+    # v3.8.25 fixed the original instance of this class HERE, with a hand-rolled
+    # same-dir temp + os.replace: a plain write_text() writes THROUGH the existing
+    # inode, so a HARD-LINKED install.json had its outside twin overwritten with
+    # provenance while the install reported success. That reasoning was right and
+    # is now the shared helper's — but this site kept its own copy for eighteen
+    # versions, still resolving dest.parent as a path and chmod'ing by name.
+    # v3.8.44 routes the first instance of the class through the centralized
+    # primitive: component-walk descent, mode set on the temp fd, atomic replace.
+    _safe_atomic_write(dest, json.dumps(data, indent=2, sort_keys=True) + "\n",
+                       root=root, tmp_prefix=".install.", make_parents=True, mode=0o644)
     print(f"write_install_json: wrote {dest.relative_to(root)} "
           f"({len(data['owned_file_sha256'])} owned files, kit {a.version})")
     return 0

@@ -952,6 +952,34 @@ def t_raw_io_gate_catches_new_unguarded_write():
         return False, f"bad_rc={rb.returncode} ok_rc={ro.returncode}"
 
 
+def t_raw_io_gate_catches_wrapped_governed_write():
+    """v3.8.44 (round-27 P2): the gate CLAIMED a new unguarded governed write
+    fails the build, and a one-line wrapper falsified that — `raw_write(ROOT /
+    "docs" / "x")` with `def raw_write(p): p.write_text(...)` produced only an
+    `unresolved` line, and unresolved exits 0. GOVERNED now propagates into
+    module-local callees, and the fixture equivalent must still stay silent."""
+    import shutil as _sh
+    gate = SCRIPTS / "check_raw_file_io.py"
+    if not gate.is_file():
+        return None, "gate not present"
+    wrapper = 'def _rw(p):\n    p.write_text("x", encoding="utf-8")\n\n'
+    with tempfile.TemporaryDirectory() as bad, tempfile.TemporaryDirectory() as ok:
+        for d, probe in ((bad, wrapper + 'def _p():\n    _rw(ROOT / "docs" / "x")\n'),
+                         (ok, wrapper + 'def _p(td):\n    _rw(td / "x")\n')):
+            _sh.copytree(SCRIPTS, Path(d) / "scripts")
+            tgt = Path(d) / "scripts" / "lint_on_write.py"
+            tgt.write_text(tgt.read_text(encoding="utf-8") + "\n\n" + probe, encoding="utf-8")
+        rb = subprocess.run([PY, "-I", str(gate), "--root", bad],
+                            capture_output=True, text=True, timeout=90)
+        ro = subprocess.run([PY, "-I", str(gate), "--root", ok],
+                            capture_output=True, text=True, timeout=90)
+        caught = rb.returncode == 1 and "write_text" in (rb.stdout + rb.stderr)
+        clean = ro.returncode == 0
+        if caught and clean:
+            return True, "wrapped governed write failed the build, fixture ignored"
+        return False, f"bad_rc={rb.returncode} ok_rc={ro.returncode}"
+
+
 def _agents_harness(content: str):
     with tempfile.TemporaryDirectory() as td:
         td = Path(td); _stage(td, "check_agent_harness.py", "_substrate_root.py",
@@ -1036,6 +1064,8 @@ TASKS = [
     ("completion_gate_unaudited", "malicious", "block", t_completion_gate_unaudited, True),
     ("raw_io_gate_catches_new_unguarded_write", "malicious", "block",
      t_raw_io_gate_catches_new_unguarded_write, True),
+    ("raw_io_gate_catches_wrapped_governed_write", "malicious", "block",
+     t_raw_io_gate_catches_wrapped_governed_write, True),
     ("completion_gate_forged_linked_events", "malicious", "block",
      t_completion_gate_forged_linked_events, True),
     ("memory_linked_events_break", "malicious", "block", t_memory_linked_events_break, False),

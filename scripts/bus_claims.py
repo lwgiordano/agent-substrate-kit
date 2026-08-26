@@ -41,6 +41,16 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _doc_common import repo_root
 
+# v3.8.44 (round-27, surfaced by the gate's new interprocedural pass): the bus
+# is agent-writable and this reader opened it raw, so a symlinked/hard-linked
+# AGENT_BUS.md fed OUTSIDE claim prose to every agent reading lease state, and
+# a FIFO would hang the reader. Advisory output is still input to agents.
+try:
+    from _doc_common import safe_read_bytes as _safe_read_bytes
+except Exception:  # pragma: no cover - stripped install
+    def _safe_read_bytes(path, root=None, max_bytes=None, tail_bytes=None):
+        return None
+
 _MAX_ENTRIES = 10_000       # keep the newest N entry lines (filler is skipped, not counted)
 _BUS_HARD_CAP = 64_000_000  # absolute byte ceiling for a pathological bus (then tail-fallback)
 _ENTRY = re.compile(
@@ -72,7 +82,7 @@ def _parse_ts(raw: str) -> datetime | None:
         return None
 
 
-def read_bus_tail(bus: Path) -> str:
+def read_bus_tail(bus: Path, root: Path | None = None) -> str:
     """The last _MAX_ENTRIES *entry* lines of the bus, newest-preserving.
 
     v3.8.36 (round-19) made this keep the file's TAIL so a released lease past
@@ -84,30 +94,26 @@ def read_bus_tail(bus: Path) -> str:
     free to skip and can never displace a real claim, while the deque still
     keeps the NEWEST entries when a bus genuinely accumulates that many."""
     entries: deque = deque(maxlen=_MAX_ENTRIES)
-    read = 0
-    truncated = False
-    with bus.open("r", encoding="utf-8", errors="replace") as fh:
-        for line in fh:
-            read += len(line)
-            if read > _BUS_HARD_CAP:
-                truncated = True
-                break
-            if _ENTRY.match(line.rstrip("\n")):
-                entries.append(line.rstrip("\n"))
+    # v3.8.44 (round-27): both reads went through bus.open(), which follows a
+    # symlinked leaf and BLOCKS on a FIFO. The guarded reader enforces
+    # O_NOFOLLOW|O_NONBLOCK + S_ISREG + st_nlink==1, and its max_bytes/tail_bytes
+    # split maps exactly onto the two branches this function already had:
+    # whole file under the hard cap, else a byte tail of the end.
+    raw = _safe_read_bytes(bus, root, max_bytes=_BUS_HARD_CAP)
+    truncated = raw is None
     if truncated:
         # Pathological bus beyond the hard cap: fall back to a byte tail of the
         # end so we still report the newest state rather than nothing.
-        with bus.open("rb") as fh:
-            fh.seek(0, 2)
-            size = fh.tell()
-            fh.seek(max(0, size - _BUS_HARD_CAP))
-            raw = fh.read()
-        tail = raw.decode("utf-8", errors="replace")
-        nl = tail.find("\n")
-        tail = tail[nl + 1:] if nl >= 0 else tail
-        for line in tail.splitlines():
-            if _ENTRY.match(line):
-                entries.append(line)
+        raw = _safe_read_bytes(bus, root, tail_bytes=_BUS_HARD_CAP)
+    if raw is None:
+        return ""      # absent or an unsafe leaf — advisory reader, no state
+    text = raw.decode("utf-8", errors="replace")
+    if truncated:
+        nl = text.find("\n")
+        text = text[nl + 1:] if nl >= 0 else text
+    for line in text.splitlines():
+        if _ENTRY.match(line):
+            entries.append(line)
     return "\n".join(entries)
 
 
@@ -256,7 +262,7 @@ def main(argv=None) -> int:
         print("bus-claims: no AGENT_BUS.md — nothing to report.")
         return 0
     try:
-        text = read_bus_tail(bus)
+        text = read_bus_tail(bus, repo_root())
     except OSError as e:
         print(f"bus-claims: cannot read AGENT_BUS.md ({e}) — advisory reader, not failing.")
         return 0

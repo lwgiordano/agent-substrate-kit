@@ -35,6 +35,24 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+# v3.8.45 (round-28 follow-on): this file is a STRICT-PROFILE EXTRA — it is
+# staged into a strict install's scripts/ and is a governed script there, but it
+# lives in extras/ in the kit, so the kit's own raw-IO gate never scanned it and
+# its raw read/write survived every sweep. A strict consumer's own gate caught
+# it on the first run after v3.8.45 wired the gate into the templates, which is
+# the point of wiring it. Fallbacks fail CLOSED: the reader yields None and the
+# writer raises, never an unguarded operation.
+try:
+    from _doc_common import safe_atomic_write as _safe_atomic_write
+    from _doc_common import safe_read_text as _safe_read_text
+except Exception:  # pragma: no cover - stripped install
+    def _safe_read_text(path, root=None, max_bytes=None, tail_bytes=None):
+        return None
+
+    def _safe_atomic_write(*a, **k):
+        raise OSError("safe_atomic_write unavailable — refusing an unguarded write")
 
 
 # Path-prefixes (relative to repo root) where license headers are
@@ -97,10 +115,10 @@ def _under_required(rel: Path) -> bool:
 def _has_header(path: Path, head_lines: int = 10) -> bool:
     """Check the first `head_lines` for an SPDX identifier."""
     try:
-        with path.open("r", encoding="utf-8") as f:
-            head = []
-            for _, line in zip(range(head_lines), f, strict=False):
-                head.append(line)
+        text = _safe_read_text(path, REPO, max_bytes=16 << 20)
+        if text is None:
+            return False   # absent or an unsafe leaf: not a header we can vouch for
+        head = text.splitlines(keepends=True)[:head_lines]
         return any(_HEADER_RE.search(line) for line in head)
     except (OSError, UnicodeDecodeError):
         return False
@@ -108,7 +126,9 @@ def _has_header(path: Path, head_lines: int = 10) -> bool:
 
 def _add_header(path: Path, license_id: str, comment: str) -> None:
     """Prepend an SPDX header to `path`. Preserves shebang lines."""
-    text = path.read_text(encoding="utf-8")
+    text = _safe_read_text(path, REPO, max_bytes=16 << 20)
+    if text is None:
+        raise OSError(f"refusing to rewrite an unreadable or unsafe leaf: {path}")
     header = f"{comment}SPDX-License-Identifier: {license_id}\n"
     if text.startswith("#!"):
         # Preserve shebang on line 1; insert header on line 2.
@@ -119,7 +139,7 @@ def _add_header(path: Path, license_id: str, comment: str) -> None:
             new_text = text[: first_nl + 1] + header + text[first_nl + 1 :]
     else:
         new_text = header + text
-    path.write_text(new_text, encoding="utf-8")
+    _safe_atomic_write(path, new_text, root=REPO, tmp_prefix=".spdx-")
 
 
 def main(argv: list[str] | None = None) -> int:

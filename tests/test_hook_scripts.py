@@ -6007,6 +6007,44 @@ def test_raw_io_gate_catches_every_round28_evasion(tmp_path) -> None:
     assert "Traceback" not in out
 
 
+def test_raw_io_gate_scans_trees_that_become_scripts(tmp_path) -> None:
+    """v3.8.45 follow-on, caught by a STRICT CONSUMER'S OWN GATE the first CI run
+    after the templates were wired — which is the entire argument for wiring
+    them. `extras/*.py` are copied into scripts/ on a strict install, so they
+    are governed scripts THERE, but they live outside scripts/ in the kit and
+    the gate never scanned them: check_license_headers.py kept a raw read and a
+    raw write through every sweep in this series. Auditing only the directory a
+    file currently sits in misses every file that moves into the surface later.
+
+    Also pins the prefix: a staging tree's allowlist keys must be namespaced, or
+    a same-named file in scripts/ would share its exemption — the basename
+    collision this same release fixed, one layer further out.
+    """
+    if not (SCRIPTS / "check_raw_file_io.py").exists():
+        return
+    import shutil as _sh
+    root = tmp_path / "staged"
+    root.mkdir()
+    _sh.copytree(SCRIPTS, root / "scripts", ignore=_sh.ignore_patterns("__pycache__"))
+    (root / "extras").mkdir()
+    (root / "extras" / "planted.py").write_text(
+        'from pathlib import Path\n'
+        'ROOT = Path(__file__).resolve().parent.parent\n'
+        'def a():\n    (ROOT / "docs" / "x").write_text("y")\n', encoding="utf-8")
+    p = subprocess.run([sys.executable, "-I", str(SCRIPTS / "check_raw_file_io.py"),
+                        "--root", str(root)], capture_output=True, text=True, timeout=120)
+    out = p.stdout + p.stderr
+    assert p.returncode == 1, f"a staging tree was not scanned: {out}"
+    assert "extras/planted.py" in out, f"finding not namespaced by its tree: {out}"
+
+    # The kit's own extras/ must be clean — that is what the strict CI job checks.
+    kit = subprocess.run([sys.executable, "-I", str(SCRIPTS / "check_raw_file_io.py")],
+                         capture_output=True, text=True, timeout=120,
+                         cwd=str(SCRIPTS.parent))
+    assert kit.returncode == 0, \
+        f"the kit's own staged extras carry raw governed IO: {kit.stdout + kit.stderr}"
+
+
 def test_raw_io_gate_never_drops_a_call_in_silence(tmp_path) -> None:
     """v3.8.45 in-release (ast-parsing checklist BLOCK): the refactor that fixed
     keyword operands REINTRODUCED the silent drop it was written to remove. A

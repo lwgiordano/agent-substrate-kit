@@ -729,13 +729,21 @@ def _walk_sources(scripts_dir: Path):
                 yield (rel, child, None)
 
 
-def scan(scripts_dir: Path) -> tuple[list[str], set[str], list[str]]:
-    """Return (violations, matched allowlist keys, unresolved notes)."""
+def scan(scripts_dir: Path, label: str = "") -> tuple[list[str], set[str], list[str]]:
+    """Return (violations, matched allowlist keys, unresolved notes).
+
+    `label` prefixes every reported path AND every allowlist key, so a file in a
+    staging tree can never share an exemption with a same-named file in
+    scripts/. Adding a second scan surface without that prefix would have
+    reintroduced the basename-collision defect this same release fixed, one
+    layer further out.
+    """
     violations: list[str] = []
     matched: set[str] = set()
     unresolved: list[str] = []
     self_path = Path(__file__).resolve()
     for rel, path, why in sorted(_walk_sources(scripts_dir), key=lambda x: x[0]):
+        rel = f"{label}{rel}"
         if path is None:
             violations.append(f"{rel}: {why}")
             continue
@@ -793,10 +801,21 @@ def scan(scripts_dir: Path) -> tuple[list[str], set[str], list[str]]:
     return violations, matched, unresolved
 
 
+# Directories whose files BECOME scripts/ in some profile. v3.8.45 (round-28
+# follow-on, caught by a strict consumer's own gate the first run after the
+# templates were wired): extras/*.py are copied into scripts/ on a strict
+# install, so they are governed scripts THERE — but they live outside scripts/
+# in the kit, so the kit's own gate never scanned them and their raw read/write
+# survived every sweep in this series. Auditing only the directory a file
+# currently sits in misses every file that moves into the surface later.
+STAGED_INTO_SCRIPTS = ("extras",)
+
+
 def main(argv: list[str]) -> int:
-    scripts_dir = SCRIPTS
+    root = ROOT
     if "--root" in argv:
-        scripts_dir = Path(argv[argv.index("--root") + 1]).resolve() / "scripts"
+        root = Path(argv[argv.index("--root") + 1]).resolve()
+    scripts_dir = root / "scripts"
     # v3.8.44 (round-27 P2): a SYMLINKED scripts/ made the gate audit bytes
     # outside the requested root and report green about them. The scan surface
     # must be a real directory in the tree it claims to be auditing.
@@ -816,6 +835,20 @@ def main(argv: list[str]) -> int:
               f"to this script's own tree ({scripts_dir}) — pass --root to be explicit",
               file=sys.stderr)
     violations, matched, unresolved = scan(scripts_dir)
+    # ...then the staging trees, under their own labels so a finding names the
+    # file the author would edit rather than the copy a profile makes.
+    for extra in STAGED_INTO_SCRIPTS:
+        staged = root / extra
+        if staged.is_symlink():
+            print(f"check-raw-file-io: {staged} is a symlink — refusing to audit "
+                  "a redirected scan surface", file=sys.stderr)
+            return 2
+        if not staged.is_dir():
+            continue
+        v2, m2, u2 = scan(staged, label=f"{extra}/")
+        violations += v2
+        matched |= m2
+        unresolved += u2
 
     stale = sorted(set(ALLOWLIST) - matched)
     for key in stale:

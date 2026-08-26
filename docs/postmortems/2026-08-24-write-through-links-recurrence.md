@@ -504,6 +504,25 @@ day before. A deliberate multi-site exemption is now declared as
   derived from the module's own parameter count, which the fixpoint provably
   reaches first, so it is a runaway backstop rather than a depth guess.
 
+### The wiring immediately paid for itself
+
+The first CI run after the templates were wired failed — in the **strict**
+full-setup jobs, and for the right reason. `extras/*.py` are copied into
+`scripts/` on a strict install, so they are governed scripts *there*, but they
+live outside `scripts/` in the kit and the gate had never scanned them.
+`check_license_headers.py` had kept a raw `read_text` and a raw `write_text`
+through every sweep in this series, invisible because the sweep audited the
+directory a file currently sits in rather than every directory a file can move
+*into*.
+
+That is the consumer blind spot one layer deeper than the one round 28 reported,
+and it was found by a consumer's own gate within minutes of that gate existing.
+Fixed in two parts: the extra is routed through the shared guards, and the kit's
+gate now scans every tree that becomes `scripts/` under some profile —
+namespaced by tree, because a staging file sharing an exemption with a same-named
+file in `scripts/` would have reintroduced the basename collision this very
+release fixed.
+
 **Carry-forward rule, part 9 — ship the mechanism, not just the file.** A gate
 that runs only in the repo that authored it protects nobody else. When a control
 is added, the question is not "is it wired here" but "what makes it impossible to

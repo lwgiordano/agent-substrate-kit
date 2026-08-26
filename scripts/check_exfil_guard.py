@@ -39,6 +39,16 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+# v3.8.43 (round-26): shared guarded file-IO helpers. Fallbacks fail CLOSED —
+# a reader yields None (no usable content) and a writer RAISES; neither
+# degrades to an unguarded operation.
+
+try:
+    from _doc_common import safe_read_text as _safe_read_text
+except Exception:  # pragma: no cover - stripped install
+    def _safe_read_text(path, root=None, max_bytes=None, tail_bytes=None):
+        return None
 # Detection is owned by command_policy.py. `_looks_dangerous`/`_profile` are
 # re-exported (back-compat for in-process tests) but are NOT defined here —
 # this file is an adapter, not the policy.
@@ -48,6 +58,7 @@ from command_policy import (  # noqa: E402
     profile as _profile,
 )
 from _doc_common import read_lock as _dc_read_lock  # noqa: E402
+from _doc_common import safe_read_text as _dc_safe_read_text  # noqa: E402
 
 
 def _root() -> Path:
@@ -81,8 +92,14 @@ def _sandbox_required(root: Path) -> bool:
         return True
     try:
         cfg = root / ".substrate" / "config"
-        if cfg.is_file():
-            for ln in cfg.read_text(encoding="utf-8", errors="replace").splitlines():
+        # v3.8.43 (round-26 P2): a FIFO .substrate/config hung the guard here —
+        # is_file() is True for a FIFO and read_text() then blocks forever.
+        # The shared guarded reader refuses linked/non-regular/routed configs and
+        # never blocks; None means "no usable config", which leaves the caller on
+        # its existing fail-closed default.
+        _cfg_text = _dc_safe_read_text(cfg, root, max_bytes=1 << 20)
+        if _cfg_text is not None:
+            for ln in _cfg_text.splitlines():
                 ln = ln.split("#", 1)[0].strip()
                 if ln.startswith("SUBSTRATE_SANDBOX=") and ln.split("=", 1)[1].strip().strip("\"'") == "1":
                     return True

@@ -28,6 +28,31 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+def _repo_root():
+    """Repo root for containment checks in functions that take no root param."""
+    try:
+        from _substrate_root import substrate_root as _sr2
+        return _sr2()
+    except Exception:
+        return Path.cwd()
+
+
+# v3.8.43 (round-26): shared guarded file-IO helpers. Fallbacks fail CLOSED —
+# a reader yields None (no usable content) and a writer RAISES; neither
+# degrades to an unguarded operation.
+
+try:
+    from _doc_common import safe_read_text as _safe_read_text
+except Exception:  # pragma: no cover - stripped install
+    def _safe_read_text(path, root=None, max_bytes=None, tail_bytes=None):
+        return None
+
+try:
+    from _doc_common import safe_atomic_write as _safe_atomic_write
+except Exception:  # pragma: no cover - stripped install
+    def _safe_atomic_write(*a, **k):
+        raise OSError("safe_atomic_write unavailable — refusing an unguarded write")
 from _doc_common import read_lock as _dc_read_lock  # noqa: E402
 try:
     from _substrate_root import substrate_root as _sr
@@ -41,7 +66,7 @@ _TIMEOUT = 8
 def _cfg_int(root: Path, key: str) -> int:
     cfg = root / ".substrate" / "config"
     if cfg.is_file():
-        for ln in cfg.read_text(encoding="utf-8", errors="replace").splitlines():
+        for ln in (_safe_read_text(cfg, root, max_bytes=1 << 20) or "").splitlines():
             ln = ln.split("#", 1)[0].strip()
             if ln.startswith(key + "="):
                 v = ln.split("=", 1)[1].strip().strip("\"'")
@@ -126,7 +151,7 @@ def _go_direct(root: Path):
         return []
     try:
         out, in_block = [], False
-        for ln in gm.read_text(encoding="utf-8").splitlines():
+        for ln in (_safe_read_text(gm, root, max_bytes=8 << 20) or "").splitlines():
             s = ln.strip()
             if s.startswith("require ("):
                 in_block = True
@@ -223,7 +248,7 @@ def main(argv) -> int:
     cache = {}
     if cache_path.is_file():
         try:
-            cache = json.loads(cache_path.read_text(encoding="utf-8"))
+            cache = json.loads(_safe_read_text(cache_path, root, max_bytes=8 << 20) or "{}")
         except Exception:
             cache = {}
     now = datetime.now(timezone.utc)
@@ -259,7 +284,8 @@ def main(argv) -> int:
     if cache_dirty:
         try:
             cache_path.parent.mkdir(parents=True, exist_ok=True)
-            cache_path.write_text(json.dumps(cache, indent=2, sort_keys=True), encoding="utf-8")
+            _safe_atomic_write(cache_path,
+                               json.dumps(cache, indent=2, sort_keys=True), root=root)
         except Exception:
             pass
 

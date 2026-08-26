@@ -34,6 +34,28 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+# v3.8.43 (round-26): shared guarded file-IO helpers. Fallbacks fail CLOSED —
+# a reader yields None (no usable content) and a writer RAISES; neither
+# degrades to an unguarded operation.
+
+try:
+    from _doc_common import safe_read_text as _safe_read_text
+except Exception:  # pragma: no cover - stripped install
+    def _safe_read_text(path, root=None, max_bytes=None, tail_bytes=None):
+        return None
+
+try:
+    from _doc_common import safe_atomic_write as _safe_atomic_write
+except Exception:  # pragma: no cover - stripped install
+    def _safe_atomic_write(*a, **k):
+        raise OSError("safe_atomic_write unavailable — refusing an unguarded write")
+
+try:
+    from _doc_common import refuse_linked_leaf as _refuse_linked_leaf
+except Exception:  # pragma: no cover - stripped install
+    def _refuse_linked_leaf(path):
+        return "guard unavailable"
 from _doc_common import read_lock as _dc_read_lock  # noqa: E402
 
 
@@ -172,7 +194,7 @@ def _load_install_json(root: Path) -> dict | None:
     p = root / ".substrate" / "install.json"
     if p.is_file():
         try:
-            data = json.loads(p.read_text(encoding="utf-8"))
+            data = json.loads(_safe_read_text(p, root, max_bytes=8 << 20) or "null")
         except Exception:
             return None
         # install.json is agent-writable and drift-EXCLUDED, so a hostile/garbled shape
@@ -217,7 +239,7 @@ def _parse_config_text(text: str) -> dict:
 def _parse_config(root: Path) -> dict:
     try:
         return _parse_config_text(
-            (root / ".substrate" / "config").read_text(encoding="utf-8", errors="replace"))
+            _safe_read_text(root / ".substrate" / "config", root, max_bytes=1 << 20) or "")
     except Exception:
         return {}
 
@@ -794,8 +816,14 @@ def _authority_snapshot(root: Path) -> dict:
                 f"lock must not enter the render authority. Fix the lock and re-run.")
     snap = {}
     for rel in ("config", "required_profile", "required_remote_governance", "required_sandbox"):
+        # v3.8.43 (round-26): snapshotting THROUGH a link would capture outside
+        # bytes as the pre-render state of a trust anchor. None is the existing
+        # "no usable value" path, so an unsafe leaf takes it.
         try:
-            snap[rel] = (root / ".substrate" / rel).read_bytes()
+            if _refuse_linked_leaf(root / ".substrate" / rel) is not None:
+                snap[rel] = None
+            else:
+                snap[rel] = (root / ".substrate" / rel).read_bytes()
         except Exception:
             snap[rel] = None
     return snap
@@ -810,18 +838,18 @@ def _apply_profile_ratchet(root: Path, target: str) -> None:
     strict lock)."""
     cfg = root / ".substrate" / "config"
     try:
-        lines = cfg.read_text(encoding="utf-8").splitlines()
+        lines = (_safe_read_text(cfg, root, max_bytes=1 << 20) or "").splitlines()
         for i, line in enumerate(lines):
             if line.startswith("SUBSTRATE_PROFILE="):
                 lines[i] = f'SUBSTRATE_PROFILE="{target}"'
                 break
         else:
             lines.append(f'SUBSTRATE_PROFILE="{target}"')
-        cfg.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        _safe_atomic_write(cfg, "\n".join(lines) + "\n", root=root)
         req = root / ".substrate" / "required_profile"
         prev = _read_required_profile(root)
         locked = target if _PROF_RANK[target] >= _PROF_RANK.get(prev, 0) else prev
-        req.write_text(locked + "\n", encoding="utf-8")
+        _safe_atomic_write(req, locked + "\n", root=root)
         print(f"upgrade: profile ratcheted to {target} (required_profile lock={locked})")
     except Exception as e:
         print(f"upgrade: WARNING could not apply the profile ratchet: {e}", file=sys.stderr)
@@ -842,11 +870,11 @@ def _apply_capability_floor(root: Path) -> None:
         want = set()
         for lock, key in pairs:
             lp = root / ".substrate" / lock
-            if lp.is_file() and lp.read_text(encoding="utf-8").strip() == "1":
+            if (_safe_read_text(lp, root, max_bytes=1 << 16) or "").strip() == "1":
                 want.add(key)
         if not want:
             return
-        lines = cfg.read_text(encoding="utf-8").splitlines()
+        lines = (_safe_read_text(cfg, root, max_bytes=1 << 20) or "").splitlines()
         seen = set()
         for i, line in enumerate(lines):
             key = line.split("=", 1)[0].strip() if "=" in line else ""
@@ -856,7 +884,7 @@ def _apply_capability_floor(root: Path) -> None:
                 seen.add(key)
         for key in want - seen:
             lines.append(f'{key}="1"')
-        cfg.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        _safe_atomic_write(cfg, "\n".join(lines) + "\n", root=root)
     except Exception as e:
         print(f"upgrade: WARNING could not floor capability config lines: {e}", file=sys.stderr)
 
@@ -1058,7 +1086,7 @@ def _main_after_args(a) -> int:
             _want = _lock_ge(_cur or "", _locks_pre.get(_n) or "")
             if _want and _want != _cur:
                 try:
-                    (root / ".substrate" / _n).write_text(_want + "\n", encoding="utf-8")
+                    _safe_atomic_write(root / ".substrate" / _n, _want + "\n", root=root)
                     print(f"upgrade: raise-only reconcile: {_n} {_cur or '(unset)'} -> {_want}",
                           file=sys.stderr)
                     _reconciled = True
@@ -1210,7 +1238,7 @@ def _main_after_args(a) -> int:
         ij = root / ".substrate" / "install.json"
         try:
             if ij.is_file() and not ij.is_symlink():
-                _pj = json.loads(ij.read_text(encoding="utf-8"))
+                _pj = json.loads(_safe_read_text(ij, root, max_bytes=8 << 20) or "null")
                 prov_ok = isinstance(_pj, dict) and _pj.get("kit_version") == new_ver
         except Exception:
             prov_ok = False

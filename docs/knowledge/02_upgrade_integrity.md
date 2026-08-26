@@ -3,7 +3,7 @@ purpose: Upgrade provenance, authority floors, transactions, and postconditions.
 asserts:
   - scripts/substrate_upgrade.py::_exec_module_from_source
   - scripts/substrate_upgrade.py::_apply_capability_floor
-last_human_reviewed: 2026-08-24
+last_human_reviewed: 2026-08-26
 covers:
   - bootstrap.sh
   - manage.sh
@@ -109,3 +109,8 @@ Render authority reads of the frozen locks refuse the upgrade when a lock is
 present but unreadable or invalid; only a genuinely absent lock yields the
 documented default. A reader that fell back to the lowest tier on error would
 let an unreadable lock silently drop a required tier.
+
+
+Every `.substrate/config` read in the doctor, the profile resolver, and the
+config gate goes through the shared guarded reader, so a linked or non-regular
+config can neither supply outside values nor block a gate on open.

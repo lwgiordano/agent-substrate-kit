@@ -14,6 +14,7 @@ import shlex
 import signal
 import subprocess
 import sys
+import unittest.mock
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -5384,6 +5385,312 @@ def test_harness_blocks_empty_scan_root(tmp_path) -> None:
                        cwd=repo, capture_output=True, text=True, timeout=30, env=_HERMETIC_ENV)
     assert p.returncode == 1, (p.returncode, (p.stdout + p.stderr)[-300:])
     assert "no governed surfaces" in (p.stdout + p.stderr)
+
+
+# --- v3.8.43 (Codex round-26): fd-anchored writes, the swept readers, and the
+# --- gate that mechanizes the whole class.
+
+def test_safe_atomic_write_never_writes_through_links(tmp_path) -> None:
+    """round-26 P1 (x3): the shared fd-anchored writer. It must break a hard
+    link, never follow a symlinked leaf, refuse an escaping parent, and leave no
+    temp file behind."""
+    import importlib
+    dc = importlib.import_module("_doc_common")
+    (tmp_path / "docs").mkdir()
+    t = tmp_path / "docs" / "OUT.md"
+    dc.safe_atomic_write(t, "HELLO\n", root=tmp_path)
+    assert t.read_text(encoding="utf-8") == "HELLO\n"
+    dc.safe_atomic_write(t, "AGAIN\n", root=tmp_path)
+    assert t.read_text(encoding="utf-8") == "AGAIN\n"
+    assert [p.name for p in (tmp_path / "docs").iterdir()] == ["OUT.md"], "temp file left behind"
+    outside = tmp_path / "outside.txt"
+    outside.write_text("PRECIOUS", encoding="utf-8")
+    sym = tmp_path / "docs" / "S.md"
+    sym.symlink_to(outside)
+    dc.safe_atomic_write(sym, "PWNED\n", root=tmp_path)
+    assert outside.read_text(encoding="utf-8") == "PRECIOUS", "wrote through a symlink"
+    outside2 = tmp_path / "outside2.txt"
+    outside2.write_text("PRECIOUS2", encoding="utf-8")
+    hard = tmp_path / "docs" / "H.md"
+    os.link(outside2, hard)
+    dc.safe_atomic_write(hard, "PWNED2\n", root=tmp_path)
+    assert outside2.read_text(encoding="utf-8") == "PRECIOUS2", "wrote through a hard link"
+    ext = tmp_path.parent / (tmp_path.name + "_ext")
+    ext.mkdir()
+    (tmp_path / "linkdir").symlink_to(ext)
+    with pytest.raises(OSError):
+        dc.safe_atomic_write(tmp_path / "linkdir" / "X.md", "NOPE", root=tmp_path)
+
+
+def test_locked_append_refuses_leaf_swapped_after_the_stat(tmp_path) -> None:
+    """round-26 P1: the leaf lstat and the open that followed were two lookups
+    of the same name. O_NOFOLLOW rejects a symlink swapped into that window but
+    NOT a hard link, so the guarded stat proved nothing about the fd actually
+    read. The opened fd must be re-verified against the approved inode."""
+    import importlib
+    dc = importlib.import_module("_doc_common")
+    (tmp_path / "docs").mkdir()
+    target = tmp_path / "docs" / "HISTORY.md"
+    target.write_text("# H\nreal\n", encoding="utf-8")
+    outside = tmp_path / "outside_secret.txt"
+    outside.write_text("OUTSIDE_IMPORT_MARK\n", encoding="utf-8")
+    real_lstat = os.lstat
+    state = {"swapped": False}
+
+    def _swapping_lstat(path, *a, **k):
+        res = real_lstat(path, *a, **k)
+        # Swap the leaf to a hard link immediately after the guard stats it.
+        if not state["swapped"] and str(path) == "HISTORY.md":
+            state["swapped"] = True
+            target.unlink()
+            os.link(outside, target)
+        return res
+
+    with unittest.mock.patch.object(os, "lstat", _swapping_lstat):
+        try:
+            dc.locked_atomic_append(target, "entry\n", "# H\n", "hist", root=tmp_path)
+        except OSError:
+            pass  # refusing is the correct outcome
+    assert state["swapped"], "the swap never fired — this test would pass vacuously"
+    # os.replace swaps the DIRECTORY ENTRY, so the outside inode is never
+    # written; the damage is the other direction — the outside bytes get read as
+    # `existing` and land INSIDE the repo's log. The discriminator is therefore
+    # the repo leaf: vulnerable => a fresh regular file holding the imported
+    # marker AND the new entry; fixed => refused, leaf untouched, no entry.
+    body = target.read_text(encoding="utf-8")
+    assert not ("entry" in body and "OUTSIDE_IMPORT_MARK" in body), \
+        f"imported outside bytes through the stat/open window: {body!r}"
+    assert outside.read_text(encoding="utf-8") == "OUTSIDE_IMPORT_MARK\n"
+
+
+def test_todo_state_hook_redacts_and_refuses_linked_docs(tmp_path) -> None:
+    """round-26 P1+P2: TodoWrite persistence wrote docs/.todo_state.json with an
+    unguarded mkdir+write_text, and persisted todo text BEFORE redaction."""
+    if not (SCRIPTS / "todo_state_hook.py").exists():
+        return
+    script = str(SCRIPTS / "todo_state_hook.py")
+    (tmp_path / "docs").mkdir()
+    payload = json.dumps({"tool_input": {"todos": [
+        {"status": "pending", "content": "use sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ012345 now"}]}})
+    subprocess.run([sys.executable, "-I", script], input=payload, cwd=tmp_path,
+                   capture_output=True, text=True, timeout=25,
+                   env=dict(os.environ, SUBSTRATE_PROJECT_DIR=str(tmp_path)))
+    body = (tmp_path / "docs" / ".todo_state.json").read_text(encoding="utf-8")
+    assert "REDACTED" in body and "sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ012345" not in body, \
+        "secret-shaped todo persisted in the clear"
+    # a symlinked docs/ must receive nothing
+    repo2 = tmp_path / "repo2"
+    repo2.mkdir()
+    outside = tmp_path / "outside_docs"
+    outside.mkdir()
+    (repo2 / "docs").symlink_to(outside)
+    subprocess.run([sys.executable, "-I", script],
+                   input=json.dumps({"tool_input": {"todos": [
+                       {"status": "pending", "content": "MARKER26"}]}}),
+                   cwd=repo2, capture_output=True, text=True, timeout=25,
+                   env=dict(os.environ, SUBSTRATE_PROJECT_DIR=str(repo2)))
+    assert not (outside / ".todo_state.json").exists(), "wrote through a symlinked docs/"
+
+
+def test_fifo_config_never_hangs_a_gate(tmp_path) -> None:
+    """round-26 P2 (root cause): a FIFO .substrate/config blocked _doc_common at
+    MODULE IMPORT, so every consumer wedged upstream of its own guards. Each
+    gate must return promptly and fail closed rather than hang."""
+    import shutil
+    repo = tmp_path / "kit"
+    repo.mkdir()
+    shutil.copytree(SCRIPTS, repo / "scripts")
+    (repo / ".substrate").mkdir()
+    os.mkfifo(repo / ".substrate" / "config")
+    env = dict(os.environ, SUBSTRATE_PROJECT_DIR=str(repo))
+    for script, stdin in (("check_exfil_guard.py",
+                           '{"tool_name":"Bash","tool_input":{"command":"echo hi"}}'),
+                          ("check_substrate_config.py", "")):
+        try:
+            p = subprocess.run([sys.executable, "-I", f"scripts/{script}"], input=stdin,
+                               cwd=repo, capture_output=True, text=True, timeout=25, env=env)
+        except subprocess.TimeoutExpired:
+            raise AssertionError(f"{script} HUNG on a FIFO .substrate/config") from None
+        assert p.returncode != 0, f"{script} passed a FIFO config (rc={p.returncode})"
+
+
+def test_config_gate_treats_unusable_config_as_tampering(tmp_path) -> None:
+    """round-26 P2: is_file() is False for a FIFO, so a PRESENT-but-unusable
+    config fell into the MISSING branch and every default sailed through —
+    'unsafe must not look like absent' (round-25 carry-forward 5c)."""
+    if not (SCRIPTS / "check_substrate_config.py").exists():
+        return
+    import shutil
+    outside = tmp_path / "out.cfg"
+    outside.write_text('SUBSTRATE_PROFILE="starter"\n', encoding="utf-8")
+    for kind in ("fifo", "symlink", "hardlink"):
+        repo = tmp_path / kind
+        repo.mkdir()
+        shutil.copytree(SCRIPTS, repo / "scripts")
+        (repo / ".substrate").mkdir()
+        cfg = repo / ".substrate" / "config"
+        if kind == "fifo":
+            os.mkfifo(cfg)
+        elif kind == "symlink":
+            cfg.symlink_to(outside)
+        else:
+            os.link(outside, cfg)
+        p = subprocess.run([sys.executable, "-I", "scripts/check_substrate_config.py"],
+                           cwd=repo, capture_output=True, text=True, timeout=25,
+                           env=dict(os.environ, SUBSTRATE_PROJECT_DIR=str(repo)))
+        assert p.returncode == 2, f"{kind} config not treated as tampering (rc={p.returncode})"
+
+
+def test_raw_file_io_gate_catches_regressions_without_false_positives(tmp_path) -> None:
+    """round-26: the gate that MECHANIZES this whole class. It must fail on a
+    newly added unguarded write to a repo-derived path, ignore the identical
+    write into a fixture temp dir, and pass on the real (swept) tree."""
+    if not (SCRIPTS / "check_raw_file_io.py").exists():
+        return
+    import shutil
+    gate = str(SCRIPTS / "check_raw_file_io.py")
+    clean = subprocess.run([sys.executable, "-I", gate], capture_output=True,
+                           text=True, timeout=60, cwd=SCRIPTS.parent)
+    assert clean.returncode == 0, f"gate fails on the swept tree: {clean.stdout + clean.stderr}"
+    bad = tmp_path / "bad"
+    bad.mkdir()
+    shutil.copytree(SCRIPTS, bad / "scripts")
+    (bad / "scripts" / "session_handoff.py").open("a", encoding="utf-8").write(
+        '\n\ndef _probe():\n    (ROOT / "docs" / "p.txt").write_text("x", encoding="utf-8")\n')
+    p = subprocess.run([sys.executable, "-I", gate, "--root", str(bad)],
+                       capture_output=True, text=True, timeout=60)
+    assert p.returncode == 1, "gate missed an unguarded governed write"
+    assert "ROOT.write_text" in (p.stdout + p.stderr)
+    ok = tmp_path / "ok"
+    ok.mkdir()
+    shutil.copytree(SCRIPTS, ok / "scripts")
+    (ok / "scripts" / "session_handoff.py").open("a", encoding="utf-8").write(
+        '\n\ndef _probe(td):\n    (td / "docs" / "p.txt").write_text("x", encoding="utf-8")\n')
+    p2 = subprocess.run([sys.executable, "-I", gate, "--root", str(ok)],
+                        capture_output=True, text=True, timeout=60)
+    assert p2.returncode == 0, f"gate false-positived on a fixture write: {p2.stdout + p2.stderr}"
+
+
+def test_raw_io_gate_catches_dynamic_dispatch(tmp_path) -> None:
+    """v3.8.43 in-release (round-26 auditor BLOCK #2): `getattr(p,"write_text")(x)`
+    made the CALLEE itself a Call, which matched no branch and was SILENTLY
+    DROPPED — not even counted as unresolved. Silence is the one property this
+    gate must not have, so the single-expression form is now a violation."""
+    if not (SCRIPTS / "check_raw_file_io.py").exists():
+        return
+    import shutil
+    bad = tmp_path / "bad"
+    bad.mkdir()
+    shutil.copytree(SCRIPTS, bad / "scripts", ignore=shutil.ignore_patterns("__pycache__"))
+    (bad / "scripts" / "lint_on_write.py").open("a", encoding="utf-8").write(
+        '\n\ndef _probe():\n'
+        '    p = ROOT / "docs" / "x"\n'
+        '    getattr(p, "write_text")("x")\n')
+    p = subprocess.run([sys.executable, "-I", str(SCRIPTS / "check_raw_file_io.py"),
+                        "--root", str(bad)], capture_output=True, text=True, timeout=90)
+    assert p.returncode == 1, "dynamic dispatch evaded the gate"
+    assert "write_text" in (p.stdout + p.stderr)
+    # TWO-STEP form. The first fix caught only the single-expression version;
+    # `fn = getattr(p, "write_text"); fn(x)` was still dropped in SILENCE — not
+    # even listed as unresolved — while the docstring claimed otherwise. Both
+    # forms must now be violations.
+    two = tmp_path / "two"
+    two.mkdir()
+    shutil.copytree(SCRIPTS, two / "scripts", ignore=shutil.ignore_patterns("__pycache__"))
+    (two / "scripts" / "lint_on_write.py").open("a", encoding="utf-8").write(
+        '\n\ndef _probe2():\n'
+        '    p = ROOT / "docs" / "y"\n'
+        '    fn = getattr(p, "write_text")\n'
+        '    fn("y")\n')
+    p2 = subprocess.run([sys.executable, "-I", str(SCRIPTS / "check_raw_file_io.py"),
+                         "--root", str(two)], capture_output=True, text=True, timeout=90)
+    assert p2.returncode == 1, "two-step getattr indirection evaded the gate"
+    assert "write_text" in (p2.stdout + p2.stderr)
+
+
+def test_context_report_root_arg_is_honoured(tmp_path) -> None:
+    """v3.8.43 in-release (round-26 auditor BLOCK #2): the guarded read was given
+    the PROCESS's own root instead of the caller-supplied --root, so containment
+    correctly refused a legitimate path and the keystone hash silently became
+    the hash of an empty string. A guard pointed at the wrong root is a silent
+    functional regression, not a security improvement."""
+    if not (SCRIPTS / "context_report.py").exists():
+        return
+    (tmp_path / "CLAUDE.md").write_text("@AGENTS.md\n# c\n", encoding="utf-8")
+    (tmp_path / "AGENTS.md").write_text("# a\n", encoding="utf-8")
+    p = subprocess.run([sys.executable, "-I", str(SCRIPTS / "context_report.py"),
+                        "--root", str(tmp_path), "--json"],
+                       capture_output=True, text=True, timeout=90)
+    assert p.returncode == 0, p.stdout + p.stderr
+    data = json.loads(p.stdout)
+    keystone = data.get("keystone_cache_prefix") or {}
+    assert keystone.get("bytes", 0) > 0, \
+        f"keystone read returned nothing — wrong root passed to the guard: {keystone}"
+
+
+def test_guarded_reads_use_a_containing_root(tmp_path) -> None:
+    """v3.8.43: four separate wrong-root regressions escaped during the sweep
+    (check_dep_cooldown, context_report, update_manifest, and two others), each
+    one a guard pointed at a root that cannot contain its target — which makes
+    every read return None. Pin the invariant instead of finding them one by one:
+    inside a function that takes a `root` parameter, a guarded call must pass
+    that `root`, never a process-global."""
+    import ast as _ast
+    offenders = []
+    for path in sorted(SCRIPTS.glob("*.py")):
+        try:
+            tree = _ast.parse(path.read_text(encoding="utf-8"))
+        except SyntaxError:
+            continue
+        for fn in _ast.walk(tree):
+            if not isinstance(fn, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+                continue
+            params = {a.arg for a in fn.args.args}
+            root_param = "root" if "root" in params else next(
+                (p for p in ("target_root", "history_root", "repo_root") if p in params), None)
+            if root_param is None:
+                # No root param: a guarded call here must still pass SOME root —
+                # omitting it skips containment entirely (round-26 auditor found
+                # exactly that in check_harness_patterns, invisible to the
+                # earlier version of this test, which only looked at functions
+                # that already declared `root`).
+                for node in _ast.walk(fn):
+                    if not (isinstance(node, _ast.Call) and isinstance(node.func, _ast.Name)
+                            and node.func.id in ("_safe_read_text", "_safe_atomic_write")):
+                        continue
+                    has_root = (node.func.id == "_safe_read_text" and len(node.args) > 1) or \
+                        any(kw.arg == "root" for kw in node.keywords)
+                    if not has_root:
+                        offenders.append(f"{path.name}:{node.lineno} passes NO root "
+                                         f"(containment skipped) in {fn.name}()")
+                continue
+            for node in _ast.walk(fn):
+                if not (isinstance(node, _ast.Call) and isinstance(node.func, _ast.Name)
+                        and node.func.id in ("_safe_read_text", "_safe_atomic_write")):
+                    continue
+                got = None
+                if node.func.id == "_safe_read_text" and len(node.args) > 1:
+                    got = _ast.unparse(node.args[1])
+                for kw in node.keywords:
+                    if kw.arg == "root":
+                        got = _ast.unparse(kw.value)
+                if got is not None and got != root_param:
+                    offenders.append(f"{path.name}:{node.lineno} uses {got!r} inside "
+                                     f"{fn.name}({root_param}=...)")
+    assert not offenders, "guarded call passed a non-local root:\n  " + "\n  ".join(offenders)
+
+
+def test_redactor_copies_stay_identical(tmp_path) -> None:
+    """round-26: three modules carry secret-pattern lists. The patterns are the
+    security-relevant half, so they are pinned byte-identical — a drifted copy
+    would silently redact less in one writer than another."""
+    import importlib
+    dc = importlib.import_module("_doc_common")
+    ml = importlib.import_module("memory_log")
+    sh = importlib.import_module("session_handoff")
+    canon = [r.pattern for r in dc.SECRET_PATTERNS]
+    assert [r.pattern for r in ml._SECRET_PATTERNS] == canon, "memory_log patterns drifted"
+    assert [r.pattern for r in sh._SECRET_PATTERNS] == canon, "session_handoff patterns drifted"
 
 
 def test_handoff_todo_framing_is_verify_not_resume(tmp_path) -> None:

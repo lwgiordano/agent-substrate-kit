@@ -123,14 +123,32 @@ def _code_suffixes() -> tuple[str, ...]:
     override = os.environ.get("SUBSTRATE_CODE_SUFFIXES", "")
     if not override:
         cfg = Path.cwd() / ".substrate" / "config"
-        if cfg.exists():
-            try:
-                for line in cfg.read_text(encoding="utf-8").splitlines():
+        # v3.8.43 (round-26 P2, root cause): this raw read_text ran at MODULE
+        # IMPORT (see `CODE_SUFFIXES = _code_suffixes()` below), so a FIFO
+        # .substrate/config blocked forever the moment ANY consumer imported
+        # _doc_common — the exfil guard, the config gate and the doctor all hung
+        # here, upstream of every guard they were about to run. The reported
+        # symptom was command_policy.profile(); this is where it actually wedged.
+        # safe_read_text is defined later in the module and cannot be used yet,
+        # so the minimum is inlined: O_NOFOLLOW (never follow a symlinked config),
+        # O_NONBLOCK (a FIFO fails fast), regular-file-only, bounded. Any refusal
+        # leaves `override` empty, which is the existing benign default.
+        import stat as _st_early
+        _fd = -1
+        try:
+            _fd = os.open(str(cfg), os.O_RDONLY
+                          | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+            if _st_early.S_ISREG(os.fstat(_fd).st_mode):
+                _raw = os.read(_fd, 1 << 20)
+                for line in _raw.decode("utf-8", errors="replace").splitlines():
                     if line.strip().startswith("SUBSTRATE_CODE_SUFFIXES="):
                         override = line.split("=", 1)[1].strip().strip("\"'")
                         break
-            except Exception:
-                override = ""
+        except (OSError, ValueError):
+            override = ""
+        finally:
+            if _fd >= 0:
+                os.close(_fd)
     for s in override.split(","):
         s = s.strip()
         if s:
@@ -516,6 +534,123 @@ def read_lock(path: Path, allowed: set, root=None) -> tuple:
     return ("ok", val, None)
 
 
+# Canonical secret-shaped-text patterns. v3.8.43 (round-26 P2): todo content is
+# model-authored and is persisted verbatim to a tracked file, so it needs the
+# same redaction memory_log and session_handoff already apply. Those two each
+# carry their own copy (identical patterns, different traversal); rather than
+# add a THIRD copy for the new caller, the list gets a canonical home here and a
+# parity test pins all copies byte-identical so they cannot drift apart.
+SECRET_PATTERNS = [
+    re.compile(r"\bsk-[A-Za-z0-9][A-Za-z0-9_-]{20,}\b"),
+    re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b"),
+    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+    re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"),
+    re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----"),
+    re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"),
+    re.compile(
+        r"(?i)\b(?:api[_-]?key|secret|token|password|passwd|bearer)\b\s*[:=]\s*"
+        r"['\"]?[A-Za-z0-9._\-/+]{8,}['\"]?"
+    ),
+]
+
+
+def redact_secrets(obj):
+    """Recursively replace secret-shaped substrings in str/list/dict content."""
+    if isinstance(obj, str):
+        out = obj
+        for rx in SECRET_PATTERNS:
+            out = rx.sub("[REDACTED-SECRET]", out)
+        return out
+    if isinstance(obj, list):
+        return [redact_secrets(x) for x in obj]
+    if isinstance(obj, dict):
+        return {k: redact_secrets(v) for k, v in obj.items()}
+    return obj
+
+
+def safe_atomic_write(target, text, root=None, tmp_prefix: str = ".saw-",
+                      make_parents: bool = False) -> None:
+    """Atomically write `text` to `target`, anchored to the parent DIRECTORY FD.
+
+    v3.8.43 (round-26 P1 x3): the write-side counterpart to `safe_read_text`, and
+    the single fix for a defect that appeared in THREE separate writers because
+    each re-derived it — `session_handoff._atomic_write_text`, `todo_state_hook`,
+    and the evals BENCHMARK/trace writers. Every one of them validated
+    containment and then performed PATH-BASED `mkdir`/`mkstemp`/`os.replace`, so
+    a parent swapped after the guard still redirected the write outside the repo.
+    A guard proves something about the path only at the instant it runs; the work
+    must be anchored to a HANDLE captured at that instant, not re-resolved by
+    name afterwards.
+
+    Order: containment check -> optional parent mkdir -> open the parent
+    `O_DIRECTORY|O_NOFOLLOW` -> re-validate that the path still names the opened
+    inode -> create the temp file with `O_CREAT|O_EXCL` under `dir_fd` -> write ->
+    `os.replace` with `src_dir_fd`/`dst_dir_fd` and basenames. `os.replace`
+    swaps the directory entry, so it breaks a hard link and never writes through
+    a symlinked leaf; the temp file is a fresh inode and is unlinked under the
+    same fd on any failure. Raises OSError on refusal — callers map that to their
+    existing nonzero contract.
+    """
+    target = Path(target)
+    if root is None:
+        root = repo_root()
+    parent = target.parent
+    name = target.name
+    if make_parents:
+        # mkdir BEFORE the containment check would create an outside directory on
+        # a refused write (the round-23 lesson), so check first, then create, then
+        # check again below against the fd we actually open.
+        if not within_root(target, root):
+            raise OSError(f"write target parent escapes the repo: {target}")
+        parent.mkdir(parents=True, exist_ok=True)
+    if not within_root(target, root):
+        raise OSError(f"write target parent escapes the repo: {target}")
+    dir_fd = os.open(str(parent),
+                     os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        try:
+            path_st = os.lstat(str(parent))
+        except OSError as e:
+            raise OSError(f"write parent vanished: {parent}") from e
+        fd_st = os.fstat(dir_fd)
+        if (path_st.st_dev, path_st.st_ino) != (fd_st.st_dev, fd_st.st_ino):
+            raise OSError(f"write parent was swapped after the guard — refusing: {parent}")
+        tmp_name = None
+        tfd = None
+        for _ in range(16):
+            cand = f"{tmp_prefix}{os.getpid()}-{os.urandom(6).hex()}.tmp"
+            try:
+                tfd = os.open(cand, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=dir_fd)
+                tmp_name = cand
+                break
+            except FileExistsError:
+                continue
+        if tfd is None:
+            raise OSError(f"could not create a temporary file for the write in {parent}")
+        try:
+            # `text` may be str or bytes: a binary copy (installing a staged
+            # script) needs the same anchoring, and a second bytes-only writer
+            # would be one more thing to re-derive and get wrong.
+            _binary = isinstance(text, (bytes, bytearray))
+            _mode = "wb" if _binary else "w"
+            _kw = {} if _binary else {"encoding": "utf-8"}
+            with os.fdopen(tfd, _mode, **_kw) as fh:
+                tfd = None  # the file object owns the fd now
+                fh.write(text)
+            os.replace(tmp_name, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+            tmp_name = None
+        finally:
+            if tfd is not None:
+                os.close(tfd)
+            if tmp_name is not None:
+                try:
+                    os.unlink(tmp_name, dir_fd=dir_fd)
+                except OSError:
+                    pass
+    finally:
+        os.close(dir_fd)
+
+
 def locked_atomic_append(target: Path, entry: str, header: str, tmp_prefix: str,
                          root=None) -> None:
     """Append `entry` to `target`, SERIALIZED against concurrent appenders.
@@ -630,6 +765,22 @@ def locked_atomic_append(target: Path, entry: str, header: str, tmp_prefix: str,
                           os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
                           dir_fd=dir_fd)
             try:
+                # v3.8.43 (round-26 P1): the lstat above and this open are TWO
+                # lookups of the same name, and the window between them is
+                # attacker-usable. O_NOFOLLOW rejects a SYMLINK swapped in, but a
+                # HARD LINK created in that window passes both O_NOFOLLOW and
+                # S_ISREG — so the guarded stat proved nothing about the fd we
+                # actually read. Re-verify the OPENED fd and require it to be the
+                # very inode we approved: same dev/ino as the lstat, still a
+                # single-link regular file. Statting a path and then opening it is
+                # check-then-use no matter how well the stat is guarded.
+                open_st = os.fstat(rfd)
+                if (not _stat.S_ISREG(open_st.st_mode) or open_st.st_nlink > 1
+                        or (open_st.st_dev, open_st.st_ino)
+                        != (leaf_st.st_dev, leaf_st.st_ino)):
+                    raise OSError(
+                        f"append target was swapped between the guard and the open "
+                        f"— refusing: {target}")
                 # STRICT decode: an append-only log holding undecodable bytes must
                 # surface through each CLI's existing nonzero contract, never be
                 # silently rewritten with replacement characters.

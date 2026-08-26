@@ -30,6 +30,17 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+# v3.8.43 (round-26): shared guarded file-IO helpers. Fallbacks fail CLOSED —
+# a reader yields None (no usable content) and a writer RAISES; neither
+# degrades to an unguarded operation.
+
+try:
+    from _doc_common import safe_atomic_write as _safe_atomic_write
+except Exception:  # pragma: no cover - stripped install
+    def _safe_atomic_write(*a, **k):
+        raise OSError("safe_atomic_write unavailable — refusing an unguarded write")
+
 try:
     from _substrate_root import substrate_root as _sr
     ROOT = _sr()
@@ -214,9 +225,10 @@ def main(argv: list[str] | None = None) -> int:
 
     validator.parent.mkdir(parents=True, exist_ok=True)
     test.parent.mkdir(parents=True, exist_ok=True)
-    validator.write_text(_VALIDATOR_TEMPLATE.format(name=name, desc=desc), encoding="utf-8")
+    _safe_atomic_write(validator,
+                       _VALIDATOR_TEMPLATE.format(name=name, desc=desc), root=ROOT)
     validator.chmod(validator.stat().st_mode | 0o755)
-    test.write_text(_TEST_TEMPLATE.format(name=name), encoding="utf-8")
+    _safe_atomic_write(test, _TEST_TEMPLATE.format(name=name), root=ROOT)
 
     dashed = name.replace("_", "-")
     # YAML scalars via JSON serialization (JSON is a YAML subset) — escapes controls,

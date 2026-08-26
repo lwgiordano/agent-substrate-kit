@@ -260,6 +260,7 @@ case "$cmd" in
     run_py scripts/check_python_syntax.py             # a broken security hook must not fail-open (rc1, not blocking rc2)
     run_py scripts/check_harness_patterns.py          # safety-policy data intact (regexes hash-pinned)
     run_py scripts/check_policy_code_integrity.py     # policy + scanner LOGIC intact (AST-pinned: funcs AND helper regexes)
+    run_py scripts/check_raw_file_io.py               # no raw file IO on a repo-derived path (the 8-round link/TOCTOU class, mechanized)
     run_py scripts/check_harness_smoke.py             # the harness scanner actually blocks injected context (multi-family)
     run_py scripts/check_hook_smoke.py                # hooks actually DENY (compile-clean but neutered hook)
     run_py scripts/check_agent_harness.py

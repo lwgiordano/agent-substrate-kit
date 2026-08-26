@@ -4,7 +4,7 @@ asserts:
   - bootstrap.sh::_safe_mkdir_p
   - bootstrap.sh::wappend
   - scripts/run_python_gate.sh::_ruff_args
-last_human_reviewed: 2026-08-24
+last_human_reviewed: 2026-08-26
 covers:
   - bootstrap.sh
   - manage.sh
@@ -83,3 +83,10 @@ the upgrade drift baseline.
 `doctor` reports operational readiness, integrity, hook wiring, and configured
 governance. Offline doctor and go-live checks do not claim live remote protection
 or a sandbox backend that the host cannot prove.
+
+
+A present-but-unusable `.substrate/config` is tampering, not an absent config.
+`is_file()` is false for a FIFO, a socket, and a dangling symlink, so such a
+file used to fall into the "missing config" branch and let every default
+through; the gate now distinguishes absent from unreadable and fails closed on
+the latter, matching how the frozen `required_*` locks already behave.

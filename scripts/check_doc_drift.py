@@ -7,6 +7,16 @@ from pathlib import Path
 # Explicit local import path so this works under `python -I` (isolated mode
 # does NOT auto-prepend the script dir). Stdlib imports above resolve first.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+# v3.8.43 (round-26): shared guarded file-IO helpers. Fallbacks fail CLOSED —
+# a reader yields None (no usable content) and a writer RAISES; neither
+# degrades to an unguarded operation.
+
+try:
+    from _doc_common import safe_read_text as _safe_read_text
+except Exception:  # pragma: no cover - stripped install
+    def _safe_read_text(path, root=None, max_bytes=None, tail_bytes=None):
+        return None
 from _doc_common import CODE_SUFFIXES, DEFAULT_EXCLUDES, git_file_last_modified, iter_code_modules, parse_front_matter, repo_root
 KNOWLEDGE_DIR='docs/knowledge'; MANIFEST_PATH='docs/manifest.json'
 def _git(args, cwd):
@@ -59,7 +69,7 @@ def _load_docs(root):
 def _manifest_paths(root):
     p=root/MANIFEST_PATH
     if not p.exists(): return None
-    try: data=json.loads(p.read_text(encoding='utf-8'))
+    try: data=json.loads(_safe_read_text(p, root, max_bytes=8 << 20) or 'null')
     except Exception: return None
     return {e['path'] for e in data.get('knowledge_docs',[])}
 def _date(s):
@@ -128,7 +138,7 @@ def _assert_failures(doc, root:Path) -> list:
         if not target.is_file():
             out.append((doc['path'], path, 'asserted file does not exist')); continue
         try:
-            text=target.read_text(encoding='utf-8', errors='replace')[:_ASSERT_MAX_READ]
+            text=(_safe_read_text(target, root, max_bytes=64 << 20) or '')[:_ASSERT_MAX_READ]
         except OSError as e:
             out.append((doc['path'], path, f'unreadable: {e}')); continue
         if needle not in text:

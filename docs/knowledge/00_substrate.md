@@ -1,6 +1,6 @@
 ---
 purpose: Entry point for current substrate contracts and functional knowledge.
-last_human_reviewed: 2026-08-21
+last_human_reviewed: 2026-08-26
 covers:
   - bootstrap.sh
   - manage.sh
@@ -55,3 +55,7 @@ Release-by-release history lives in [CHANGES_V3.md](../../CHANGES_V3.md) for the
 pre-v3.8 line and [HISTORY.md](../HISTORY.md) for v3.8 and later. These knowledge
 docs state current contracts and known limits instead of repeating that
 chronology.
+
+`check_raw_file_io.py` joins the structural pins in `manage.sh check`: raw file
+I/O against a repo-derived path fails the gate, so the link/TOCTOU class that
+recurred across six audit rounds is enforced mechanically rather than by review.

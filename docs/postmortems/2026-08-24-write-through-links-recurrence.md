@@ -8,7 +8,16 @@ related_commits:
   - WORKING (v3.8.40 — round-23 remediation)
   - WORKING (v3.8.41 — round-24 remediation)
   - WORKING (v3.8.42 — round-25 remediation)
+  - WORKING (v3.8.43 — round-26 remediation + mechanization)
 gates_added:
+  - scripts/check_raw_file_io.py
+  - tests/test_hook_scripts.py::test_safe_atomic_write_never_writes_through_links
+  - tests/test_hook_scripts.py::test_locked_append_refuses_leaf_swapped_after_the_stat
+  - tests/test_hook_scripts.py::test_todo_state_hook_redacts_and_refuses_linked_docs
+  - tests/test_hook_scripts.py::test_fifo_config_never_hangs_a_gate
+  - tests/test_hook_scripts.py::test_config_gate_treats_unusable_config_as_tampering
+  - tests/test_hook_scripts.py::test_raw_file_io_gate_catches_regressions_without_false_positives
+  - tests/test_hook_scripts.py::test_redactor_copies_stay_identical
   - tests/test_hook_scripts.py::test_refuse_linked_leaf_rejects_non_regular
   - tests/test_hook_scripts.py::test_safe_read_text_guards_every_unsafe_leaf
   - tests/test_hook_scripts.py::test_locked_atomic_append_refuses_parent_swap_under_lock
@@ -238,6 +247,59 @@ The four parts above are about WHAT to check. These are about WHEN and WHERE:
 5c. **Unsafe must not look like empty.** When a guard refuses, the caller must
     distinguish "absent" from "present but refused". Collapsing them makes the
     refusal a fail-open wherever emptiness is the benign case.
+
+## Round 6 — v3.8.43 (round-26): the loop was the bug
+
+Round 26 found ten more, four P1. Two were incompleteness in fixes shipped the
+previous day: `locked_atomic_append` lstat'd the leaf under the locked dir fd
+and then opened the name **without fstatting the opened fd** (`O_NOFOLLOW`
+rejects a symlink swapped into that window but a HARD LINK passes it, so the
+guarded stat proved nothing about the fd actually read), and
+`_atomic_write_text` was the round-25 parent-swap P1 *verbatim* in a function
+that round simply hadn't touched.
+
+That is the sixth consecutive round of the same story, so the honest conclusion
+is not another entry in this list: **the remediation method was the defect.**
+Every round fixed the reported instances correctly and left the rest of the
+class untouched, so the next audit found the next sample. Measuring the surface
+made this concrete — and corrected an inflated first estimate: a grep suggested
+~176 raw-I/O sites, but an AST pass that resolves each call site to the BASE
+symbol of its path expression showed only ~30 are **governed** (rooted at the
+process's own repo root, therefore attacker-preparable). The rest write into
+freshly created temp directories inside fixtures, where no attacker-controlled
+link can exist. A finite, small, enumerable surface — which is what makes the
+real fix affordable.
+
+So v3.8.43 did three things instead of ten patches:
+
+1. **Two shared fd-anchored helpers.** `safe_atomic_write` (parent opened
+   `O_DIRECTORY|O_NOFOLLOW`, re-validated against the opened inode, then
+   `mkstemp`/`replace`/`unlink` via `dir_fd=` and basenames) fixed three
+   independent writers at once, and `locked_atomic_append` gained an
+   fstat-after-open that pins the read to the exact inode the guard approved.
+2. **A sweep, not a sample.** Every governed call site moved onto the guards —
+   including six the audit had never reported (`check_history_sha`, two
+   `completion_gate` reads, two in the evals runner, one in the doctor), and the
+   FIFO-config root cause: `_doc_common._code_suffixes()` ran a raw read at
+   MODULE IMPORT, so a FIFO `.substrate/config` wedged every consumer upstream
+   of its own guards. The reported symptom was `command_policy.profile()`.
+3. **`scripts/check_raw_file_io.py`** — the gate. It fails when raw file I/O
+   targets a repo-derived path, with a short allowlist where each entry carries
+   a reason and a stale entry is itself a failure.
+
+Item 3 is the one that matters, and it is what the FIRST postmortem in this
+series already prescribed: *"the class was documented but not MECHANIZED, so
+each new writer was free to reintroduce it."* Six rounds were spent re-proving
+that sentence. The gate found seven unguarded sites the moment it was written,
+which is the proof it was the missing piece — and it will find the eighth, from
+a contributor who has never read any of this.
+
+**Carry-forward rule, part 6 — fix the class, then gate the class.** A fix that
+only covers reported instances is a sampling strategy, not a remediation. When a
+class recurs twice, stop patching and ask what mechanically prevents instance
+N+1; if the answer is "reviewer diligence", the class will recur. Shared helpers
+are necessary but insufficient — nothing forces a new call site through them
+except a gate that fails the build.
 
 ## (Optional) Reproduction
 

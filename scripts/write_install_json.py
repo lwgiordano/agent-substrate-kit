@@ -23,6 +23,16 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+# v3.8.43 (round-26): shared guarded file-IO helpers. Fallbacks fail CLOSED —
+# a reader yields None (no usable content) and a writer RAISES; neither
+# degrades to an unguarded operation.
+
+try:
+    from _doc_common import refuse_linked_leaf as _refuse_linked_leaf
+except Exception:  # pragma: no cover - stripped install
+    def _refuse_linked_leaf(path):
+        return "guard unavailable"
 try:
     from _substrate_surfaces import (
         COVERAGE_SKIP_PARTS, OPTIONAL_DIRS, OPTIONAL_FILES, OWNED_DIRS, OWNED_FILES,
@@ -65,6 +75,12 @@ def hash_owned(root: Path) -> dict[str, str]:
     result: dict[str, str] = {}
     for rel in owned_files(root):
         if rel in _BASELINE_EXCLUDE:
+            continue
+        # v3.8.43 (round-26): hashing THROUGH a link records the wrong bytes as
+        # this repo's provenance — an outside file's hash stored as if it were
+        # ours. An owned surface is never legitimately a link, so skip it here
+        # (the harness BLOCKs it separately) rather than attest a false hash.
+        if _refuse_linked_leaf(root / rel) is not None:
             continue
         try:
             result[rel] = hashlib.sha256((root / rel).read_bytes()).hexdigest()

@@ -1,6 +1,6 @@
 ---
 purpose: Release packaging, signing, manifests, and artifact verification.
-last_human_reviewed: 2026-08-21
+last_human_reviewed: 2026-08-26
 covers:
   - manage.sh
   - package_release.sh
@@ -56,3 +56,8 @@ Signature strength depends on protection of the configured key or identity and
 the remote trusted-base boundary. A local agent-writable install manifest is not
 a substitute for the signed release. Hosts without a verification backend must
 report that limitation instead of labeling an artifact verified.
+
+
+`manage.sh check` runs `check_raw_file_io.py` alongside the other structural
+pins: it fails the chain when raw file I/O targets a repo-derived path, which is
+the mechanized form of the link/TOCTOU class the earlier rounds fixed by hand.

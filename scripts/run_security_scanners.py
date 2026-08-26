@@ -34,6 +34,26 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+# v3.8.43 (round-26): shared guarded file-IO helpers. Fallbacks fail CLOSED —
+# a reader yields None (no usable content) and a writer RAISES; neither
+# degrades to an unguarded operation.
+
+try:
+    from _doc_common import safe_atomic_write as _safe_atomic_write
+except Exception:  # pragma: no cover - stripped install
+    def _safe_atomic_write(*a, **k):
+        raise OSError("safe_atomic_write unavailable — refusing an unguarded write")
+
+# v3.8.43 (round-26 P2): the canonical guarded reader. The fallback returns None
+# ("no usable config") rather than an unguarded read, so a stripped install
+# degrades to the caller's fail-closed default instead of blocking on a FIFO.
+try:
+    from _doc_common import safe_read_text as _safe_read_text
+except Exception:  # pragma: no cover - stripped install
+    def _safe_read_text(path, root=None, max_bytes=None, tail_bytes=None):
+        return None
+
 from _doc_common import read_lock as _dc_read_lock  # noqa: E402
 try:
     from _substrate_root import substrate_root as _sr
@@ -54,8 +74,10 @@ SCANNERS = [
 
 def _cfg(root: Path, key: str, default: str = "0") -> str:
     cfg = root / ".substrate" / "config"
-    if cfg.is_file():
-        for ln in cfg.read_text(encoding="utf-8", errors="replace").splitlines():
+    # v3.8.43 (round-26 P2): guarded read — a FIFO config must not block a gate.
+    _cfg_text = _safe_read_text(cfg, root, max_bytes=1 << 20)
+    if _cfg_text is not None:
+        for ln in _cfg_text.splitlines():
             ln = ln.split("#", 1)[0].strip()
             if ln.startswith(key + "="):
                 return ln.split("=", 1)[1].strip().strip("\"'")
@@ -122,7 +144,8 @@ def main(argv=None) -> int:
         run_id = hashlib.sha256(json.dumps(results, sort_keys=True).encode()).hexdigest()[:12]
         outdir = root / ".substrate" / "audits" / "security" / run_id
         outdir.mkdir(parents=True, exist_ok=True)
-        (outdir / "results.json").write_text(json.dumps(results, indent=2) + "\n", encoding="utf-8")
+        _safe_atomic_write(outdir / "results.json",
+                           json.dumps(results, indent=2) + "\n", root=root)
     except Exception:
         pass
 

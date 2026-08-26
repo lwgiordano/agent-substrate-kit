@@ -34,6 +34,16 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+# v3.8.43 (round-26): shared guarded file-IO helpers. Fallbacks fail CLOSED —
+# a reader yields None (no usable content) and a writer RAISES; neither
+# degrades to an unguarded operation.
+
+try:
+    from _doc_common import safe_read_text as _safe_read_text
+except Exception:  # pragma: no cover - stripped install
+    def _safe_read_text(path, root=None, max_bytes=None, tail_bytes=None):
+        return None
 try:
     from _substrate_root import substrate_root as _sr
     ROOT = _sr()
@@ -66,7 +76,7 @@ def _eslint_config_exists() -> bool:
     pkg = ROOT / "package.json"
     if pkg.is_file():
         try:
-            return "eslintConfig" in json.loads(pkg.read_text(encoding="utf-8"))
+            return "eslintConfig" in json.loads(_safe_read_text(pkg, ROOT, max_bytes=8 << 20) or "{}")
         except Exception:
             return False
     return False

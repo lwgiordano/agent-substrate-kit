@@ -41,6 +41,25 @@ import argparse, hashlib, json, os, sys
 sys.dont_write_bytecode = True
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+def _repo_root():
+    """Repo root for containment checks in functions that take no root param."""
+    try:
+        from _substrate_root import substrate_root as _sr2
+        return _sr2()
+    except Exception:
+        return Path.cwd()
+
+
+# v3.8.43 (round-26): shared guarded file-IO helpers. Fallbacks fail CLOSED —
+# a reader yields None (no usable content) and a writer RAISES; neither
+# degrades to an unguarded operation.
+
+try:
+    from _doc_common import safe_read_text as _safe_read_text
+except Exception:  # pragma: no cover - stripped install
+    def _safe_read_text(path, root=None, max_bytes=None, tail_bytes=None):
+        return None
 try:
     from _substrate_root import substrate_root as _sr
     _DEFAULT_ROOT = _sr()
@@ -176,7 +195,7 @@ def build(root: Path) -> dict:
     for rel in ("CLAUDE.md", "AGENTS.md"):
         p = root / rel
         if p.is_file():
-            data = p.read_bytes()
+            data = (_safe_read_text(p, root, max_bytes=64 << 20) or '').encode('utf-8', 'replace')
             h.update(data)
             prefix_bytes += len(data)
     keystone = h.hexdigest()

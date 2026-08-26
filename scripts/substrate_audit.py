@@ -4,6 +4,18 @@ from __future__ import annotations
 import argparse, json, subprocess, sys
 from datetime import UTC, datetime
 from pathlib import Path
+
+# v3.8.43 (round-26): shared guarded file-IO helpers. Fallbacks fail CLOSED —
+# a reader yields None (no usable content) and a writer RAISES; neither
+# degrades to an unguarded operation.
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+try:
+    from _doc_common import safe_atomic_write as _safe_atomic_write
+except Exception:  # pragma: no cover - stripped install
+    def _safe_atomic_write(*a, **k):
+        raise OSError("safe_atomic_write unavailable — refusing an unguarded write")
 ROOT=Path.cwd()
 def run(cmd):
     start=datetime.now(UTC).replace(microsecond=0).isoformat().replace('+00:00','Z')
@@ -34,12 +46,12 @@ def plan(mode):
     return full
 def write_report(report):
     stamp=datetime.now(UTC).strftime('%Y-%m-%dT%H%M%SZ'); outdir=ROOT/'ai'/'audits'/stamp; outdir.mkdir(parents=True,exist_ok=True)
-    (outdir/'audit-report.json').write_text(json.dumps(report,indent=2,sort_keys=True)+'\n',encoding='utf-8')
+    _safe_atomic_write(outdir/'audit-report.json', json.dumps(report,indent=2,sort_keys=True)+'\n', root=ROOT)
     lines=[f'# Audit report — {stamp}','',f"Mode: `{report['mode']}`",f"Final: **{report['final']}**",'', '## Checks','']
     for c in report['checks']:
         status='PASS' if c['returncode']==0 else 'BLOCK'; lines.append(f"### {status}: `{' '.join(c['cmd'])}`")
         if c['output']: lines+=['','```text',c['output'][-4000:],'```','']
-    (outdir/'audit-report.md').write_text('\n'.join(lines)+'\n',encoding='utf-8')
+    _safe_atomic_write(outdir/'audit-report.md', '\n'.join(lines)+'\n', root=ROOT)
     return outdir/'audit-report.json'
 def main():
     ap=argparse.ArgumentParser(); ap.add_argument('--mode',choices=['quick','full'],default='quick'); ap.add_argument('--write-report',action='store_true'); ap.add_argument('--json',action='store_true'); a=ap.parse_args()

@@ -177,10 +177,44 @@ def profile() -> str:
     cfg = _ROOT / ".substrate" / "config"
     configured = "standard"
     if cfg.exists():
+        # v3.8.43 (round-26 P2): a raw read_text here HUNG every consumer of the
+        # policy when .substrate/config was a FIFO — the exfil guard, the config
+        # gate, the completion gate and the doctor all wedged instead of failing
+        # closed. This file decides the runtime profile, so it gets the same
+        # treatment as the required_* locks: O_NOFOLLOW (never follow a symlinked
+        # config), O_NONBLOCK (a FIFO fails fast), S_ISREG + single link (no
+        # shared outside inode), and a bounded read. Kept inline because this
+        # module is AST-pinned. Any refusal raises rather than downgrading.
         try:
-            lines = cfg.read_text(encoding="utf-8").splitlines()
-        except Exception as e:
-            raise CommandPolicyUnavailable(f"could not read .substrate/config: {e}")
+            _fd = os.open(str(cfg), os.O_RDONLY
+                          | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+        except OSError as e:
+            raise CommandPolicyUnavailable(
+                f"could not read .substrate/config ({e.__class__.__name__}) — failing closed")
+        try:
+            _st = os.fstat(_fd)
+            if not stat.S_ISREG(_st.st_mode) or _st.st_nlink > 1:
+                raise CommandPolicyUnavailable(
+                    ".substrate/config is not a private regular file — failing closed")
+            _CFG_MAX = 1 << 20
+            _chunks = []
+            _got = 0
+            while _got < _CFG_MAX:
+                _b = os.read(_fd, min(65536, _CFG_MAX - _got))
+                if not _b:
+                    break
+                _chunks.append(_b)
+                _got += len(_b)
+        except OSError as e:
+            raise CommandPolicyUnavailable(
+                f"could not read .substrate/config ({e.__class__.__name__}) — failing closed")
+        finally:
+            os.close(_fd)
+        try:
+            lines = b"".join(_chunks).decode("utf-8").splitlines()
+        except UnicodeDecodeError as e:
+            raise CommandPolicyUnavailable(
+                f"could not read .substrate/config: {e}") from None
         for line in lines:
             s = line.strip()
             if not s or s.startswith("#"):

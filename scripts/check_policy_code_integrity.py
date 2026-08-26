@@ -38,6 +38,8 @@ Exit: 0 ok | 1 module changed / unreadable. Stdlib only.
 from __future__ import annotations
 
 import hashlib
+import os
+import stat
 import sys
 from pathlib import Path
 
@@ -48,8 +50,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 #   shasum -a 256 scripts/command_policy.py scripts/check_agent_harness.py
 # (identical on every Python — see the module docstring on why raw bytes, not AST).
 MODULE_SOURCE_SHA256 = {
-    "command_policy.py": "f60c5f5a47ffe5567edbb0241a57f696a5f7b5b9393173c087068079bc924809",
-    "check_agent_harness.py": "07caeba1123e2fc12f56d94669c8e6812d27d754138b10b43f8c1b477bf9f3e1",
+    "command_policy.py": "374fc9cb8277ef3dd329692ac21dd7527ec2f73154327eb43b53111797b5320d",
+    "check_agent_harness.py": "8c46d95a8f9f1ae3333ba0e9b737ab46eb61c4b2cc150c8f8bd3b63352e488bd",
 }
 
 
@@ -65,7 +67,24 @@ def main(argv: list[str]) -> int:
     for rel, want in MODULE_SOURCE_SHA256.items():
         src = scripts / rel
         try:
-            got = hashlib.sha256(src.read_bytes()).hexdigest()
+            # v3.8.43 (round-26 P2): read_bytes() BLOCKS on a FIFO, so a
+            # non-regular pinned module wedged the integrity check instead of
+            # failing it. Open O_NOFOLLOW|O_NONBLOCK and require a regular
+            # file before hashing; anything else is a pin mismatch (BLOCK).
+            fd = os.open(str(src), os.O_RDONLY
+                         | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+            try:
+                if not stat.S_ISREG(os.fstat(fd).st_mode):
+                    raise OSError("pinned module is not a regular file")
+                chunks = []
+                while True:
+                    b = os.read(fd, 1 << 20)
+                    if not b:
+                        break
+                    chunks.append(b)
+            finally:
+                os.close(fd)
+            got = hashlib.sha256(b"".join(chunks)).hexdigest()
         except Exception as e:
             print(f"check-policy-code-integrity: BLOCK: {rel}: {e}", file=sys.stderr)
             return 1

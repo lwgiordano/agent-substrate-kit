@@ -6,7 +6,7 @@ asserts:
   - scripts/_doc_common.py::locked_atomic_append
   - scripts/session_handoff.py::_safe_history_line
   - scripts/session_handoff.py::_rejected_block
-last_human_reviewed: 2026-08-25
+last_human_reviewed: 2026-08-26
 covers:
   - manage.sh
   - scripts/_doc_common.py
@@ -79,6 +79,16 @@ is anchored to the locked directory fd (`dir_fd=` plus basenames) rather than
 re-resolved by path: a parent swapped while an appender waits on the lock now
 fails closed instead of redirecting the write, and the bytes land in the inode
 that was locked or nowhere.
+
+`safe_atomic_write` is the write-side counterpart: it opens the parent
+`O_DIRECTORY|O_NOFOLLOW`, re-validates that the path still names the opened
+inode, and then creates, writes, and `os.replace`s entirely through that
+directory fd using basenames. Replacing the directory entry breaks a hard link
+and never writes through a symlinked leaf, and anchoring to the fd means a
+parent swapped after the guard cannot redirect the write. Where a guarded stat
+is followed by an open, the opened fd is re-verified against the inode the stat
+approved — statting a path and then opening it by name is check-then-use however
+well the stat is guarded.
 
 Readers carry the same guarantees as writers. `safe_read_text` is the read-side
 counterpart — containment, `O_NOFOLLOW | O_NONBLOCK`, `S_ISREG`, single link,

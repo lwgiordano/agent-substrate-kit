@@ -47,6 +47,16 @@ from pathlib import Path
 _REPO = Path(__file__).resolve().parents[1]
 _HISTORY = _REPO / "docs" / "HISTORY.md"
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+# v3.8.43 (round-26 sweep): HISTORY.md is agent-writable and append-only, so the
+# SHA gate must not read it through a link or block on a FIFO. Found by
+# check_raw_file_io.py, not by an external audit round.
+try:
+    from _doc_common import safe_read_text as _safe_read_text
+except Exception:  # pragma: no cover - stripped install
+    def _safe_read_text(path, root=None, max_bytes=None, tail_bytes=None):
+        return None
+
 # `## <ts> — <token> — <sha|WORKING|Correction...>` with em-dash
 # separators. The token is usually a ULID (uppercase Crockford-32:
 # 0-9 + A-Z minus I,L,O,U) but can also be `NO_SESSION` when
@@ -134,7 +144,11 @@ def main() -> int:
         print(f"check-history-sha: missing {_HISTORY}", file=sys.stderr)
         return 2
 
-    text = _HISTORY.read_text(encoding="utf-8")
+    text = _safe_read_text(_HISTORY, _REPO, max_bytes=64 << 20)
+    if text is None:
+        print(f"check-history-sha: {_HISTORY} is unreadable or not a private "
+              "regular file", file=sys.stderr)
+        return 2
     headers = list(_HEADER_RE.finditer(text))
     if not headers:
         # Two indistinguishable cases: a bootstrapped repo with no

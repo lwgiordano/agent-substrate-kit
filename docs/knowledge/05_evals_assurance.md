@@ -1,6 +1,6 @@
 ---
 purpose: Behavioral evals, deterministic validators, audits, and assurance limits.
-last_human_reviewed: 2026-08-25
+last_human_reviewed: 2026-08-26
 covers:
   - manage.sh
   - extras/calibrate_diy_ultrareview.py
@@ -19,6 +19,7 @@ covers:
   - scripts/check_postmortem_for_bug_fix.py
   - scripts/check_postmortem_gates_resolved.py
   - scripts/check_python_syntax.py
+  - scripts/check_raw_file_io.py
   - scripts/check_secrets.py
   - scripts/check_validator_input_coverage.py
   - scripts/code_shape.py
@@ -48,6 +49,20 @@ into failure. The single-task diagnostic uses the same semantics.
 The benign corpus tests false positives in real kit and consumer layouts.
 Staged fixtures resolve both source assets and their installed `.substrate`
 locations. A missing required fixture is an error, not a vacuous pass.
+
+Some invariants are cheap to state and impossible to keep by review alone.
+`check_raw_file_io.py` fails the gate when raw file I/O targets a path rooted at
+the process's own repo root — the set an attacker can pre-link, swap, or replace
+with a FIFO before the process runs. Detection is AST-based, so a string literal
+naming a primitive cannot false-positive, and paths rooted at a freshly created
+temporary directory inside a fixture are deliberately ignored: the code creates
+that directory itself, so no attacker-controlled link can exist, and flagging it
+would be the noise that gets a gate switched off. Exemptions live in a small
+allowlist where every entry carries a reason, and an entry that no longer
+matches any call site is itself a failure — a stale exemption is permanent
+cover. The gate exists because the class it guards recurred across six
+consecutive audit rounds while being fixed correctly each time: shared helpers
+make the safe path available, and only a gate makes it mandatory.
 
 A hang is a failure, not a pending result. Tasks that exercise a blocking shape
 (a FIFO in place of a lock, a log, or a governed surface) assert that the tool

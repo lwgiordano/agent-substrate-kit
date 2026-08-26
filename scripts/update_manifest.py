@@ -6,6 +6,25 @@ from pathlib import Path
 # Explicit local import path so this works under `python -I` (isolated mode
 # does NOT auto-prepend the script dir). Stdlib imports above resolve first.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+def _repo_root():
+    """Repo root for containment checks in functions that take no root param."""
+    try:
+        from _substrate_root import substrate_root as _sr2
+        return _sr2()
+    except Exception:
+        return Path.cwd()
+
+
+# v3.8.43 (round-26): shared guarded file-IO helpers. Fallbacks fail CLOSED —
+# a reader yields None (no usable content) and a writer RAISES; neither
+# degrades to an unguarded operation.
+
+try:
+    from _doc_common import safe_read_text as _safe_read_text
+except Exception:  # pragma: no cover - stripped install
+    def _safe_read_text(path, root=None, max_bytes=None, tail_bytes=None):
+        return None
 from _doc_common import parse_front_matter, repo_root
 TITLE_RE=re.compile(r'^#\s+(.+?)\s*$', re.M); STATUS_RE=re.compile(r'^\*\*Status:\*\*\s+(.+?)\s*$', re.M)
 def knowledge(root):
@@ -31,7 +50,7 @@ def main():
     ap=argparse.ArgumentParser(); g=ap.add_mutually_exclusive_group(); g.add_argument('--check', action='store_true'); g.add_argument('--fix', action='store_true'); a=ap.parse_args()
     root=repo_root(); target=root/'docs'/'manifest.json'; payload={'knowledge_docs':knowledge(root),'decisions':decisions(root)}; expected=render(payload)
     if a.check:
-        if not target.exists() or target.read_text(encoding='utf-8')!=expected:
+        if not target.exists() or (_safe_read_text(target, root, max_bytes=16 << 20) or '')!=expected:
             print('update_manifest: docs/manifest.json is stale or missing; run `python scripts/update_manifest.py --fix`.'); return 1
         print(f"update_manifest: manifest is current ({len(payload['knowledge_docs'])} knowledge, {len(payload['decisions'])} decisions)"); return 0
     write_atomic(target, expected); print(f"update_manifest: wrote {target.relative_to(root)} ({len(payload['knowledge_docs'])} knowledge, {len(payload['decisions'])} decisions)"); return 0

@@ -55,6 +55,21 @@ SCRIPTS = Path(__file__).resolve().parent
 PY = sys.executable
 TRACES = ROOT / ".substrate" / "traces"
 
+# v3.8.43 (round-26 P1): BENCHMARK.md and the trace/progress files are writes to
+# repo-derived paths, so they were link-followable exactly like every other
+# unguarded writer this series has fixed. Route them through the shared
+# fd-anchored writer. A stripped install SKIPS the write rather than falling
+# back to an unguarded one — these are reports, never worth an outside write.
+try:
+    from _doc_common import safe_atomic_write as _safe_atomic_write
+    from _doc_common import safe_read_text as _safe_read_text
+except Exception:  # pragma: no cover - stripped install
+    def _safe_atomic_write(*a, **k):
+        raise OSError("safe_atomic_write unavailable — refusing an unguarded write")
+
+    def _safe_read_text(path, root=None, max_bytes=None, tail_bytes=None):
+        return None
+
 
 def _d(b64: str) -> str:
     return base64.b64decode(b64).decode()
@@ -192,10 +207,11 @@ def _write_progress(no_trace, current, done):
         return
     try:
         TRACES.mkdir(parents=True, exist_ok=True)
-        (TRACES / "evals_progress.json").write_text(
+        _safe_atomic_write(
+            TRACES / "evals_progress.json",
             json.dumps({"current_task": current, "completed": False,
                         "done": [r["id"] for r in done]}, indent=2),
-            encoding="utf-8")
+            root=ROOT, tmp_prefix=".trace-")
     except Exception:
         pass
 
@@ -908,6 +924,34 @@ def t_history_fifo_no_hang():
         return p.returncode != 0, f"rc={p.returncode}"
 
 
+def t_raw_io_gate_catches_new_unguarded_write():
+    """v3.8.43 (round-26): the gate that MECHANIZES the link/TOCTOU class must
+    fail when a new unguarded write to a repo-derived path appears — including
+    the shapes that evaded its first cut: a bare builtin open(), a governed path
+    hidden in a lowercase local, an aliased os.replace, and a governed variable
+    NAMED like a fixture. It must NOT fire on the same write into a real temp
+    dir, or the noise would get it switched off."""
+    import shutil as _sh
+    gate = SCRIPTS / "check_raw_file_io.py"
+    if not gate.is_file():
+        return None, "gate not present"
+    with tempfile.TemporaryDirectory() as bad, tempfile.TemporaryDirectory() as ok:
+        for d, probe in ((bad, 'def _p():\n    open(str(ROOT / "docs" / "x"), "w").write("x")\n'),
+                         (ok, 'def _p(td):\n    (td / "x").write_text("x", encoding="utf-8")\n')):
+            _sh.copytree(SCRIPTS, Path(d) / "scripts")
+            tgt = Path(d) / "scripts" / "lint_on_write.py"
+            tgt.write_text(tgt.read_text(encoding="utf-8") + "\n\n" + probe, encoding="utf-8")
+        rb = subprocess.run([PY, "-I", str(gate), "--root", bad],
+                            capture_output=True, text=True, timeout=90)
+        ro = subprocess.run([PY, "-I", str(gate), "--root", ok],
+                            capture_output=True, text=True, timeout=90)
+        caught = rb.returncode == 1 and "ROOT.open" in (rb.stdout + rb.stderr)
+        clean = ro.returncode == 0
+        if caught and clean:
+            return True, "caught the unguarded write, ignored the fixture write"
+        return False, f"bad_rc={rb.returncode} ok_rc={ro.returncode}"
+
+
 def _agents_harness(content: str):
     with tempfile.TemporaryDirectory() as td:
         td = Path(td); _stage(td, "check_agent_harness.py", "_substrate_root.py",
@@ -990,6 +1034,8 @@ TASKS = [
     ("profile_ratchet_lower_refused", "malicious", "block", t_profile_ratchet_lower_refused, True),
     ("profile_ratchet_raise_succeeds", "benign", "allow", t_profile_ratchet_raise_succeeds, True),
     ("completion_gate_unaudited", "malicious", "block", t_completion_gate_unaudited, True),
+    ("raw_io_gate_catches_new_unguarded_write", "malicious", "block",
+     t_raw_io_gate_catches_new_unguarded_write, True),
     ("completion_gate_forged_linked_events", "malicious", "block",
      t_completion_gate_forged_linked_events, True),
     ("memory_linked_events_break", "malicious", "block", t_memory_linked_events_break, False),
@@ -1020,11 +1066,11 @@ def _sandbox_required(argv) -> bool:
     root = SCRIPTS.parent
     try:
         rs = root / ".substrate" / "required_sandbox"
-        if rs.is_file() and rs.read_text(encoding="utf-8").strip() == "1":
+        if (_safe_read_text(rs, ROOT, max_bytes=1 << 16) or "").strip() == "1":
             return True
         cfg = root / ".substrate" / "config"
         if cfg.is_file():
-            for ln in cfg.read_text(encoding="utf-8", errors="replace").splitlines():
+            for ln in (_safe_read_text(cfg, ROOT, max_bytes=1 << 20) or "").splitlines():
                 ln = ln.split("#", 1)[0].strip()
                 if ln.startswith("SUBSTRATE_SANDBOX=") and ln.split("=", 1)[1].strip().strip("\"'") == "1":
                     return True
@@ -1042,7 +1088,9 @@ def _write_benchmark(metrics: dict, results: list) -> Path:
     it). Honest about skips and scope (NOT a hosted benchmark, NOT AgentDojo)."""
     version = "?"
     try:
-        version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
+        # v3.8.43 (round-26 sweep): guarded read of a repo-derived path.
+        version = (_safe_read_text(ROOT / "VERSION", ROOT, max_bytes=1 << 16)
+                   or "?").strip()
     except Exception:
         pass
     try:
@@ -1138,7 +1186,7 @@ sandbox backend present (macOS seatbelt / Linux bubblewrap / `@anthropic-ai/sand
 the containment task is tested rather than skipped.
 """
     out = ROOT / "BENCHMARK.md"
-    out.write_text(md, encoding="utf-8")
+    _safe_atomic_write(out, md, root=ROOT, tmp_prefix=".bench-")
     return out
 
 
@@ -1256,13 +1304,15 @@ def main(argv) -> int:
     if not no_trace:
         try:
             TRACES.mkdir(parents=True, exist_ok=True)
-            (TRACES / f"evals-{trace['ran_at_utc'].replace(':', '').replace('-', '')}.json"
-             ).write_text(json.dumps(trace, indent=2), encoding="utf-8")
+            _safe_atomic_write(
+                TRACES / f"evals-{trace['ran_at_utc'].replace(':', '').replace('-', '')}.json",
+                json.dumps(trace, indent=2), root=ROOT, tmp_prefix=".trace-")
             # Mark the progress sentinel complete (it was written per-task).
-            (TRACES / "evals_progress.json").write_text(
+            _safe_atomic_write(
+                TRACES / "evals_progress.json",
                 json.dumps({"current_task": None, "completed": True,
                             "done": [r["id"] for r in results]}, indent=2),
-                encoding="utf-8")
+                root=ROOT, tmp_prefix=".trace-")
         except Exception:
             pass
 

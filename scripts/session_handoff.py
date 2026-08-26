@@ -69,6 +69,57 @@ except Exception:
             return p.stdout.strip() if p.returncode == 0 else ""
         except Exception:
             return ""
+
+# v3.8.43 (round-26): prefer the CANONICAL fd-anchored writer over a fourth
+# inline copy. scripts/ is already on sys.path above and _doc_common is pure
+# stdlib with no circular import, so the "self-contained hook" reasoning that
+# produced the _within_root/_safe_read_text mirrors does not require re-deriving
+# this one — and re-derivation is precisely what made this defect recur across
+# three separate writers. The fallback keeps the hook working in a stripped
+# install; it is deliberately the SAME algorithm, not a simplified one.
+try:
+    from _doc_common import safe_atomic_write as _safe_atomic_write
+except Exception:  # pragma: no cover - stripped install
+    def _safe_atomic_write(target, text, root=None, tmp_prefix=".saw-", make_parents=False):
+        target = Path(target)
+        parent = target.parent
+        if make_parents:
+            parent.mkdir(parents=True, exist_ok=True)
+        dir_fd = os.open(str(parent), os.O_RDONLY
+                         | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            path_st = os.lstat(str(parent))
+            fd_st = os.fstat(dir_fd)
+            if (path_st.st_dev, path_st.st_ino) != (fd_st.st_dev, fd_st.st_ino):
+                raise OSError(f"write parent was swapped after the guard — refusing: {parent}")
+            tmp_name = None
+            tfd = None
+            for _ in range(16):
+                cand = f"{tmp_prefix}{os.getpid()}-{os.urandom(6).hex()}.tmp"
+                try:
+                    tfd = os.open(cand, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=dir_fd)
+                    tmp_name = cand
+                    break
+                except FileExistsError:
+                    continue
+            if tfd is None:
+                raise OSError(f"could not create a temporary file for the write in {parent}")
+            try:
+                with os.fdopen(tfd, "w", encoding="utf-8") as fh:
+                    tfd = None
+                    fh.write(text)
+                os.replace(tmp_name, target.name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+                tmp_name = None
+            finally:
+                if tfd is not None:
+                    os.close(tfd)
+                if tmp_name is not None:
+                    try:
+                        os.unlink(tmp_name, dir_fd=dir_fd)
+                    except OSError:
+                        pass
+        finally:
+            os.close(dir_fd)
 try:
     import _text_safety  # confusable/leet-fold + kit-token neutralize for danger scans
 except Exception:  # pragma: no cover - fail open to the un-folded raw text
@@ -182,10 +233,28 @@ def _safe_todo_text(text: str) -> str:
 
 
 def _todo_lines() -> list[str]:
+    # v3.8.43 (round-26 P2): this fed capture from a raw stat + read_text, so a
+    # hard-linked or symlinked docs/.todo_state.json imported OUTSIDE task labels
+    # into the next handoff (and into model context through it), and a FIFO hung
+    # capture outright. The guarded reader enforces containment, refuses a linked
+    # or non-regular leaf, never blocks, and treats an oversize file as malformed
+    # — the same size ceiling the raw stat used to apply.
+    raw = _safe_read_text(TODO_STATE, ROOT, max_bytes=_TODO_STATE_MAX_BYTES)
+    if raw is None:
+        # The guarded read refuses absent, unsafe (linked/non-regular/routed) AND
+        # oversize alike. Oversize is a benign operator-visible condition and
+        # keeps its explicit marker so todos do not just silently vanish; the
+        # tampering cases stay silent. This lstat is for the MESSAGE only —
+        # safe_read_text above is what actually gates the read — so a race here
+        # can mislabel the reason but can never widen access.
+        try:
+            if os.lstat(str(TODO_STATE)).st_size > _TODO_STATE_MAX_BYTES:
+                return ["- [ ] [todo state skipped: file too large] ( )"]
+        except (OSError, ValueError):
+            pass
+        return []
     try:
-        if TODO_STATE.stat().st_size > _TODO_STATE_MAX_BYTES:
-            return ["- [ ] [todo state skipped: file too large] ( )"]
-        data = json.loads(TODO_STATE.read_text(encoding="utf-8"))
+        data = json.loads(raw)
     except Exception:
         return []
     lines = []
@@ -471,24 +540,18 @@ def _atomic_write_text(path, text: str) -> None:
 
     v3.8.39 (round-22): refuse a symlinked ANCESTOR — mkstemp(dir=parent) would
     otherwise create the temp file (and os.replace the target) inside the
-    outside directory the parent symlink points to."""
-    import tempfile
+    outside directory the parent symlink points to.
+
+    v3.8.43 (round-26 P1): the containment check and the PATH-BASED
+    mkdir/mkstemp/os.replace that followed it were two separate resolutions of
+    the same path, so a parent swapped in between still redirected the write
+    outside — the round-25 locked_atomic_append defect, verbatim, in a function
+    that round did not touch. Anchored to the parent DIRECTORY FD now, via the
+    shared helper, so the same defect cannot be re-derived here a third time."""
     path = Path(path)
     if not _within_root(path):
         raise OSError(f"refusing capture write outside repo (symlinked ancestor): {path}")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=".sh-", dir=str(path.parent))
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(text)
-        os.replace(tmp, path)
-        tmp = ""
-    finally:
-        if tmp and os.path.exists(tmp):
-            try:
-                os.remove(tmp)
-            except OSError:
-                pass
+    _safe_atomic_write(path, text, root=ROOT, tmp_prefix=".sh-", make_parents=True)
 
 
 def capture(hook: dict) -> int:

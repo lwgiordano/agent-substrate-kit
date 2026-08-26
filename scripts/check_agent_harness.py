@@ -119,5 +119,15 @@ def main():
         print('agent-harness: BLOCK findings')
         for label,rel,line in findings: print(f'  - BLOCK: {label}: {rel}:{line}')
         return 1
-    print(f'agent-harness: ok ({len(context|code)} files scanned)'); return 0
+    # v3.8.43 (round-26 P3): a poisoned _substrate_root can still aim a STANDALONE
+    # run at a clean nonempty outside tree, and the empty-scan BLOCK above only
+    # catches the zero-surface case. There is no false-positive-free way to
+    # self-detect this here — running the scanner from OUTSIDE the tree it scans
+    # is a legitimate, tested pattern, so "my file must live under ROOT" would
+    # fail valid runs. What is honest is to stop reporting an unqualified "ok":
+    # print the ROOT that was actually scanned, so a redirected scan is visible
+    # in the output rather than indistinguishable from a real pass. The full
+    # `manage.sh check` remains the authority — check_harness_smoke re-runs this
+    # scanner against known-bad payloads and catches a redirected root.
+    print(f'agent-harness: ok ({len(context|code)} files scanned under {ROOT})'); return 0
 if __name__=='__main__': sys.exit(main())

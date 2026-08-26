@@ -16,9 +16,19 @@ Run by `manage.sh check` and `release_gate.sh` before the lang gates.
 Exit codes: 0 ok | 1 dangerous value | 2 invalid config syntax.
 """
 from __future__ import annotations
-import re, sys
+import os, re, sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+# v3.8.43 (round-26): shared guarded file-IO helpers. Fallbacks fail CLOSED —
+# a reader yields None (no usable content) and a writer RAISES; neither
+# degrades to an unguarded operation.
+
+try:
+    from _doc_common import safe_read_text as _safe_read_text
+except Exception:  # pragma: no cover - stripped install
+    def _safe_read_text(path, root=None, max_bytes=None, tail_bytes=None):
+        return None
 try:
     from _substrate_root import substrate_root as _sr
     ROOT = _sr()
@@ -27,6 +37,7 @@ except Exception:
 import json
 
 from _doc_common import read_lock as _dc_read_lock
+from _doc_common import safe_read_text as _dc_safe_read_text
 # Detection is owned by command_policy.py. FAIL CLOSED: if it cannot import
 # (broken/neutered policy module), looks_dangerous_command raises and main()
 # converts that to exit 2 — never silently allow a command value.
@@ -203,6 +214,17 @@ def main() -> int:
               file=sys.stderr)
         return 2
     if not cfg.is_file():
+        # v3.8.43 (round-26 P2): is_file() is False for a FIFO/socket/device and
+        # for a symlink to nowhere, so a PRESENT-but-unusable config fell into
+        # the "MISSING" branch and every default sailed through. Absent and
+        # tampered must not look alike (round-25 carry-forward 5c): lexists()
+        # distinguishes them, and a present-but-unusable config fails closed with
+        # the same rc 2 the locks use.
+        if os.path.lexists(str(cfg)):
+            print("check-substrate-config: .substrate/config is PRESENT but is not a "
+                  "regular file (symlink/FIFO/socket/device/directory) — treating as "
+                  "tampering, not as 'no config'", file=sys.stderr)
+            return 2
         violated = []
         if req == "strict":
             violated.append("required_profile=strict (default profile is standard)")
@@ -218,7 +240,18 @@ def main() -> int:
             return 2
         return 0
     vals: dict[str, str] = {}
-    for raw in cfg.read_text(encoding="utf-8", errors="replace").splitlines():
+    # v3.8.43 (round-26 P2): a PRESENT config that cannot be safely read is
+    # tampering, not "no config" — the same rule the locks above already apply,
+    # and the round-25 carry-forward "unsafe must not look like absent". A FIFO
+    # config previously HUNG this gate; treating it as absent instead would let
+    # every default through, so it fails closed with the lock-style rc 2.
+    _cfg_text = _dc_safe_read_text(cfg, ROOT, max_bytes=1 << 20)
+    if _cfg_text is None:
+        print("check-substrate-config: .substrate/config is PRESENT but cannot be "
+              "safely read (symlinked, hard-linked, non-regular, routed, or oversize) "
+              "— treating as tampering, not as 'no config'", file=sys.stderr)
+        return 2
+    for raw in _cfg_text.splitlines():
         line = raw
         # drop full-line comments / blanks
         if not line.strip() or line.lstrip().startswith("#"):

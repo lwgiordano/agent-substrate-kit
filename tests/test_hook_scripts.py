@@ -5837,6 +5837,359 @@ def test_raw_io_gate_catches_every_round27_evasion(tmp_path) -> None:
             f"{label} false-positived on a fixture path: {p.stdout + p.stderr}"
 
 
+def test_guarded_helpers_refuse_a_detached_parent(tmp_path) -> None:
+    """round-28 P1 x2 (_doc_common.py:435 read, :780 write) — the honest limit of
+    the round-27 fix, and the reason fd-anchoring needs a companion.
+
+    open_dir_chain stops the kernel following a hostile NEW path. It says
+    nothing about whether the pinned inode is still REACHABLE at the path the
+    caller asked for. Rename the parent after capture and every dir_fd=
+    operation works perfectly on a DETACHED directory: the read returned
+    INSIDE-OLD while the live target held LIVE-NEW, and the write returned
+    SUCCESS with the bytes in the moved directory and the live target absent.
+    Move the parent OUTSIDE the repo instead of alongside it and the same
+    mechanism puts the bytes outside. The fd cannot prevent it, so the helpers
+    detect it and fail rather than report a write that did not land.
+    """
+    import importlib
+    dc = importlib.import_module("_doc_common")
+
+    def _rename_on(match, repo, live_content=None):
+        """Rename repo/state aside the first time `match` decides to fire."""
+        real = os.open
+        state = {"fired": False}
+
+        def hooked(path, *a, **k):
+            if not state["fired"] and match(path, k):
+                state["fired"] = True
+                os.rename(repo / "state", repo / "stash")
+                (repo / "state" / "tasks").mkdir(parents=True)
+                if live_content is not None:
+                    (repo / "state" / "tasks" / "note.txt").write_text(
+                        live_content, encoding="utf-8")
+            return real(path, *a, **k)
+        return hooked, real
+
+    # READ: the leaf opens under a parent fd that has just been moved aside.
+    repo = tmp_path / "r1"
+    (repo / "state" / "tasks").mkdir(parents=True)
+    (repo / "state" / "tasks" / "note.txt").write_text("INSIDE-OLD\n", encoding="utf-8")
+    hooked, real = _rename_on(
+        lambda path, k: k.get("dir_fd") is not None and str(path) == "note.txt",
+        repo, live_content="LIVE-NEW\n")
+    os.open = hooked
+    try:
+        got = dc.safe_read_text(repo / "state" / "tasks" / "note.txt", root=repo)
+    finally:
+        os.open = real
+    assert got != "INSIDE-OLD\n", "returned bytes from a detached parent as current"
+    assert got is None, got
+
+    # WRITE: the replace lands in the moved directory; success must not be
+    # reported when the live target was not updated.
+    repo2 = tmp_path / "r2"
+    (repo2 / "state" / "tasks").mkdir(parents=True)
+    (repo2 / "state" / "tasks" / "out.txt").write_text("OLD\n", encoding="utf-8")
+    real_replace = os.replace
+    fired = {"n": False}
+
+    def replace_hook(*a, **k):
+        if not fired["n"]:
+            fired["n"] = True
+            os.rename(repo2 / "state", repo2 / "stash")
+            (repo2 / "state" / "tasks").mkdir(parents=True)
+        return real_replace(*a, **k)
+
+    os.replace = replace_hook
+    try:
+        with pytest.raises(OSError, match="renamed"):
+            dc.safe_atomic_write(repo2 / "state" / "tasks" / "out.txt", "NEW\n", root=repo2)
+    finally:
+        os.replace = real_replace
+    assert not (repo2 / "state" / "tasks" / "out.txt").exists()
+
+    # APPEND: same shape. Round 28 reported the generic writer; the log appender
+    # shares the primitive, so it shares the defect.
+    repo3 = tmp_path / "r3"
+    (repo3 / "docs").mkdir(parents=True)
+    (repo3 / "docs" / "HISTORY.md").write_text("# H\n", encoding="utf-8")
+    fired2 = {"n": False}
+
+    def replace_hook2(*a, **k):
+        if not fired2["n"]:
+            fired2["n"] = True
+            os.rename(repo3 / "docs", repo3 / "stash_docs")
+            (repo3 / "docs").mkdir()
+        return real_replace(*a, **k)
+
+    os.replace = replace_hook2
+    try:
+        with pytest.raises(OSError, match="renamed"):
+            dc.locked_atomic_append(repo3 / "docs" / "HISTORY.md", "- e\n", "# H\n",
+                                    ".H.", root=repo3)
+    finally:
+        os.replace = real_replace
+
+    # ...and the ordinary path is untouched: no spurious refusals, no fd leak.
+    repo4 = tmp_path / "r4"
+    (repo4 / "d").mkdir(parents=True)
+    before = len(os.listdir("/proc/self/fd")) if os.path.isdir("/proc/self/fd") else None
+    for _ in range(50):
+        dc.safe_atomic_write(repo4 / "d" / "f.txt", "x", root=repo4)
+        assert dc.safe_read_text(repo4 / "d" / "f.txt", root=repo4) == "x"
+        assert dc.read_lock(repo4 / "d" / "lock", {"0", "1"}, root=repo4)[0] == "absent"
+    if before is not None:
+        assert len(os.listdir("/proc/self/fd")) == before, "fd leak in the liveness check"
+
+
+def test_raw_io_gate_catches_every_round28_evasion(tmp_path) -> None:
+    """round-28 found seven more ways past the gate. Asserted individually: a
+    BLOCK for the wrong reason is not evidence a given evasion is closed."""
+    if not (SCRIPTS / "check_raw_file_io.py").exists():
+        return
+    cases = {
+        # P1 :462 — operand collection walked node.args only, so a path passed
+        # by KEYWORD vanished entirely. The round-27 positional multi-path bug
+        # in a second spelling.
+        "kw_open": 'def a():\n    open(file=ROOT / "docs" / "d", mode="w")\n',
+        "kw_copy": ('def a(tmp_path):\n'
+                    '    shutil.copy(src=tmp_path / "s", dst=ROOT / "docs" / "d")\n'),
+        "kw_replace": ('def a(tmp_path):\n'
+                       '    os.replace(src=tmp_path / "s", dst=ROOT / "docs" / "d")\n'),
+        # P2 :405 — a star import binds the whole covered surface under bare
+        # names; matching only explicit names dropped all of them in silence.
+        "wildcard": None,   # needs its own header, handled below
+        # P2 :556 — the propagation bound was 4, so a five-deep module-local
+        # wrapper chain stayed `unresolved` and the build passed.
+        "deep_wrapper": ('def f5(p):\n    p.write_text("x")\n'
+                         'def f4(p):\n    f5(p)\n'
+                         'def f3(p):\n    f4(p)\n'
+                         'def f2(p):\n    f3(p)\n'
+                         'def f1(p):\n    f2(p)\n'
+                         'def probe():\n    f1(ROOT / "docs" / "d")\n'),
+    }
+    for label, body in cases.items():
+        if body is None:
+            continue
+        p, _ = _gate_probe(tmp_path, label, body)
+        out = p.stdout + p.stderr
+        assert p.returncode == 1, f"{label} evaded the gate: {out}"
+        assert "round27_probe.py" in out, f"{label} blocked for another reason: {out}"
+
+    # Wildcard import needs its own module header.
+    import shutil as _sh
+    wild = tmp_path / "wildcard"
+    wild.mkdir()
+    _sh.copytree(SCRIPTS, wild / "scripts", ignore=_sh.ignore_patterns("__pycache__"))
+    (wild / "scripts" / "round28_wild.py").write_text(
+        'from pathlib import Path\n'
+        'from shutil import *\n'
+        'ROOT = Path(__file__).resolve().parent.parent\n'
+        'def a(tmp_path):\n'
+        '    copy(tmp_path / "s", ROOT / "docs" / "d")\n', encoding="utf-8")
+    pw = subprocess.run([sys.executable, "-I", str(SCRIPTS / "check_raw_file_io.py"),
+                         "--root", str(wild)], capture_output=True, text=True, timeout=120)
+    assert pw.returncode == 1 and "round28_wild.py" in (pw.stdout + pw.stderr), \
+        f"wildcard import evaded the gate: {pw.stdout + pw.stderr}"
+
+    # P3 :611 — the RecursionError guard wrapped the VISITOR but not ast.parse,
+    # which is what actually raises first on a 12,000-term expression.
+    deep = tmp_path / "deep"
+    deep.mkdir()
+    _sh.copytree(SCRIPTS, deep / "scripts", ignore=_sh.ignore_patterns("__pycache__"))
+    (deep / "scripts" / "round28_deep.py").write_text(
+        "x = 1" + "+1" * 12000 + "\n", encoding="utf-8")
+    pd = subprocess.run([sys.executable, "-I", str(SCRIPTS / "check_raw_file_io.py"),
+                         "--root", str(deep)], capture_output=True, text=True, timeout=120)
+    out = pd.stdout + pd.stderr
+    assert pd.returncode == 1, f"deep expression did not BLOCK (rc={pd.returncode})"
+    assert "too deeply nested to analyze" in out, f"escaped as a traceback: {out}"
+    assert "Traceback" not in out
+
+
+def test_raw_io_gate_never_drops_a_call_in_silence(tmp_path) -> None:
+    """v3.8.45 in-release (ast-parsing checklist BLOCK): the refactor that fixed
+    keyword operands REINTRODUCED the silent drop it was written to remove. A
+    `**` keyword node has `arg=None`, so filtering on `k.arg in PATH_KWARGS`
+    discarded `shutil.copy(**{"src": ..., "dst": ROOT / "x"})` entirely — no
+    finding and no unresolved line, the one property this gate must not have.
+
+    A readable literal dict resolves like any other operand; an unreadable
+    `**d` must still be REPORTED as unresolved rather than vanish.
+    """
+    if not (SCRIPTS / "check_raw_file_io.py").exists():
+        return
+    resolved, _ = _gate_probe(tmp_path, "kwunpack", (
+        'def a(tmp_path):\n'
+        '    shutil.copy(**{"src": tmp_path / "s", "dst": ROOT / "docs" / "d"})\n'))
+    out = resolved.stdout + resolved.stderr
+    assert resolved.returncode == 1, f"a **-unpacked governed dst was dropped: {out}"
+    assert "shutil.copy" in out
+
+    opaque, _ = _gate_probe(tmp_path, "kwopaque", 'def a(d):\n    shutil.copy(**d)\n')
+    out2 = opaque.stdout + opaque.stderr
+    assert "round27_probe.py" in out2, f"an unreadable ** unpack vanished: {out2}"
+    assert "unresolved" in out2
+
+
+def test_raw_io_gate_star_import_does_not_shadow_local_defs(tmp_path) -> None:
+    """v3.8.45 in-release (ast-parsing checklist WARN): registering every
+    covered name from `from shutil import *` attributed a module's OWN
+    `def copy(...)` to shutil. `copy`/`move`/`remove` are ordinary verbs, so
+    that is a false positive on ordinary code — and a gate people switch off
+    for noise protects nothing."""
+    if not (SCRIPTS / "check_raw_file_io.py").exists():
+        return
+    import shutil as _sh
+    root = tmp_path / "shadow"
+    root.mkdir()
+    _sh.copytree(SCRIPTS, root / "scripts", ignore=_sh.ignore_patterns("__pycache__"))
+    (root / "scripts" / "round28_shadow.py").write_text(
+        'from pathlib import Path\n'
+        'from shutil import *\n'
+        'ROOT = Path(__file__).resolve().parent.parent\n'
+        'def copy(a, b):\n'
+        '    return (a, b)\n'
+        'def probe(tmp_path):\n'
+        '    copy(tmp_path / "s", ROOT / "docs" / "d")\n', encoding="utf-8")
+    p = subprocess.run([sys.executable, "-I", str(SCRIPTS / "check_raw_file_io.py"),
+                        "--root", str(root)], capture_output=True, text=True, timeout=120)
+    assert p.returncode == 0, \
+        f"a local def shadowing a star import false-positived: {p.stdout + p.stderr}"
+
+
+def test_raw_io_gate_propagation_bound_follows_the_module(tmp_path) -> None:
+    """v3.8.45 in-release (ast-parsing checklist WARN): raising the flat bound
+    from 4 to 64 only moved the same defect from depth 5 to depth 65. The bound
+    is now derived from the module's own parameter count — the fixpoint is
+    reached before it by construction — so a chain longer than any hand-picked
+    number still resolves."""
+    if not (SCRIPTS / "check_raw_file_io.py").exists():
+        return
+    body = ['def f65(p):', '    p.write_text("x")']
+    for i in range(64, 0, -1):
+        body += [f"def f{i}(p):", f"    f{i + 1}(p)"]
+    body += ["def probe():", '    f1(ROOT / "docs" / "deep")']
+    p, _ = _gate_probe(tmp_path, "deep65", "\n".join(body) + "\n")
+    out = p.stdout + p.stderr
+    assert p.returncode == 1, f"a 65-deep wrapper chain evaded the gate: {out[:400]}"
+    assert "write_text" in out
+
+
+def test_read_lock_refusal_does_not_leak_a_descriptor(tmp_path) -> None:
+    """v3.8.45 in-release (security-auditor BLOCK): the new detached-parent
+    check sat between the leaf open and the try/finally that closes it, so
+    every refusal leaked the lock fd — 20 refusals, 20 descriptors. A guard
+    that converts a race into a resource-exhaustion vector is not a guard, and
+    a lock is the one file an attacker can make this fire on repeatedly."""
+    import importlib
+    dc = importlib.import_module("_doc_common")
+    if not os.path.isdir("/proc/self/fd"):
+        return
+    repo = tmp_path / "repo"
+    (repo / ".substrate").mkdir(parents=True)
+    (repo / ".substrate" / "required_x").write_text("1\n", encoding="utf-8")
+    lock = repo / ".substrate" / "required_x"
+    real = dc.dir_fd_still_live
+    dc.dir_fd_still_live = lambda *a, **k: False
+    try:
+        before = len(os.listdir("/proc/self/fd"))
+        for _ in range(30):
+            state, _v, reason = dc.read_lock(lock, {"0", "1"}, root=repo)
+        assert state == "bad" and "renamed" in reason, (state, reason)
+        assert len(os.listdir("/proc/self/fd")) == before, "refusal path leaks an fd"
+    finally:
+        dc.dir_fd_still_live = real
+    # The ordinary paths keep working and keep not leaking.
+    before2 = len(os.listdir("/proc/self/fd"))
+    for _ in range(100):
+        assert dc.read_lock(lock, {"0", "1"}, root=repo)[:2] == ("ok", "1")
+        assert dc.read_lock(repo / ".substrate" / "nope", {"0", "1"}, root=repo)[0] == "absent"
+    assert len(os.listdir("/proc/self/fd")) == before2
+
+
+def test_raw_io_gate_scan_surface_and_exemptions_are_per_file(tmp_path) -> None:
+    """round-28 P1 :626 / P2 :598 / P2 :597 — three ways the gate's own
+    bookkeeping was keyed too loosely.
+
+    The allowlist key was a BASENAME, so an exemption reviewed for
+    scripts/_doc_common.py covered a same-named file anywhere in the tree — a
+    stale-exemption hole in the mechanism whose selling point is that stale
+    exemptions fail. The self-skip was by basename too, so any nested file
+    called check_raw_file_io.py was unscannable. And a symlinked CHILD
+    directory under scripts/ silently redirected part of the surface while the
+    gate reported ok (only the top-level scripts symlink was refused).
+    """
+    if not (SCRIPTS / "check_raw_file_io.py").exists():
+        return
+    import shutil as _sh
+    gate = str(SCRIPTS / "check_raw_file_io.py")
+
+    def _tree(name):
+        root = tmp_path / name
+        root.mkdir()
+        _sh.copytree(SCRIPTS, root / "scripts", ignore=_sh.ignore_patterns("__pycache__"))
+        return root
+
+    dup = _tree("dup")
+    (dup / "scripts" / "nested").mkdir()
+    (dup / "scripts" / "nested" / "_doc_common.py").write_text(
+        'import os\n'
+        'def probe(root):\n'
+        '    return os.open(root / "docs" / "d", os.O_RDONLY)\n', encoding="utf-8")
+    p1 = subprocess.run([sys.executable, "-I", gate, "--root", str(dup)],
+                        capture_output=True, text=True, timeout=120)
+    assert p1.returncode == 1, "a same-named nested file inherited an exemption"
+    assert "nested/_doc_common.py" in (p1.stdout + p1.stderr)
+
+    selfname = _tree("selfname")
+    (selfname / "scripts" / "pkg").mkdir()
+    (selfname / "scripts" / "pkg" / "check_raw_file_io.py").write_text(
+        'from pathlib import Path\n'
+        'ROOT = Path(__file__).resolve().parent.parent.parent\n'
+        'def a():\n    (ROOT / "docs" / "d").write_text("x")\n', encoding="utf-8")
+    p2 = subprocess.run([sys.executable, "-I", gate, "--root", str(selfname)],
+                        capture_output=True, text=True, timeout=120)
+    assert p2.returncode == 1, "a nested file named like the gate was skipped"
+    assert "pkg/check_raw_file_io.py" in (p2.stdout + p2.stderr)
+
+    linked = _tree("linked")
+    outside = tmp_path / "outside28"
+    outside.mkdir()
+    (outside / "hidden.py").write_text("x = 1\n", encoding="utf-8")
+    (linked / "scripts" / "child").symlink_to(outside)
+    p3 = subprocess.run([sys.executable, "-I", gate, "--root", str(linked)],
+                        capture_output=True, text=True, timeout=120)
+    assert p3.returncode == 1, "a symlinked child dir silently redirected the surface"
+    assert "symlinked directory" in (p3.stdout + p3.stderr)
+
+
+def test_raw_io_allowlist_does_not_silently_cover_extra_sites(tmp_path) -> None:
+    """round-28 P1 :626 (second half): one reviewed exemption covered EVERY
+    matching call site, so a second raw call with the same base and method
+    inherited a reason a human had read about a different line. Counting
+    matches found two real cases in the kit on the first run — one of them
+    introduced by v3.8.44's own new eval. A deliberate multi-site exemption is
+    declared as (reason, count)."""
+    if not (SCRIPTS / "check_raw_file_io.py").exists():
+        return
+    import shutil as _sh
+    root = tmp_path / "extra"
+    root.mkdir()
+    _sh.copytree(SCRIPTS, root / "scripts", ignore=_sh.ignore_patterns("__pycache__"))
+    src = root / "scripts" / "run_substrate_evals.py"
+    text = src.read_text(encoding="utf-8")
+    # A THIRD site under an entry reviewed for two.
+    text += ('\n\ndef _round28_extra():\n'
+             '    TRACES.mkdir(parents=True, exist_ok=True)\n')
+    src.write_text(text, encoding="utf-8")
+    p = subprocess.run([sys.executable, "-I", str(SCRIPTS / "check_raw_file_io.py"),
+                        "--root", str(root)], capture_output=True, text=True, timeout=120)
+    out = p.stdout + p.stderr
+    assert p.returncode == 1, f"an extra site inherited a reviewed exemption: {out}"
+    assert "matched 3 call sites but was reviewed for 2" in out, out
+
+
 def test_raw_io_gate_propagation_resolves_the_right_definition(tmp_path) -> None:
     """v3.8.44 in-release (security-auditor BLOCK + ast-parsing checklist item
     9): the first cut of the interprocedural pass keyed definitions by bare

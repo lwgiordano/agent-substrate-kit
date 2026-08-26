@@ -924,6 +924,46 @@ def t_history_fifo_no_hang():
         return p.returncode != 0, f"rc={p.returncode}"
 
 
+def t_detached_parent_write_refused():
+    """v3.8.45 (round-28 P1): a parent renamed AFTER the guarded write captured
+    its fd means the bytes land in a detached directory while the live target is
+    untouched — and the helper used to return success. The write must FAIL and
+    the live target must stay absent."""
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        _stage(td, "_doc_common.py", "_substrate_root.py")
+        (td / "state" / "tasks").mkdir(parents=True)
+        driver = td / "scripts" / "_eval_detached.py"
+        driver.write_text(
+            "import os, sys\n"
+            "from pathlib import Path\n"
+            "sys.path.insert(0, str(Path(__file__).resolve().parent))\n"
+            "import _doc_common as dc\n"
+            "repo = Path(sys.argv[1])\n"
+            "real = os.replace\n"
+            "state = {'n': False}\n"
+            "def hook(*a, **k):\n"
+            "    if not state['n']:\n"
+            "        state['n'] = True\n"
+            "        os.rename(repo / 'state', repo / 'stash')\n"
+            "        (repo / 'state' / 'tasks').mkdir(parents=True)\n"
+            "    return real(*a, **k)\n"
+            "os.replace = hook\n"
+            "try:\n"
+            "    dc.safe_atomic_write(repo / 'state' / 'tasks' / 'o.txt', 'NEW', root=repo)\n"
+            "except OSError:\n"
+            "    print('REFUSED')\n"
+            "    sys.exit(0)\n"
+            "print('REPORTED SUCCESS')\n"
+            "sys.exit(1)\n", encoding="utf-8")
+        p = subprocess.run([PY, "-I", str(driver), str(td)],
+                           capture_output=True, text=True, timeout=30)
+        live = td / "state" / "tasks" / "o.txt"
+        if p.returncode == 0 and "REFUSED" in p.stdout and not live.exists():
+            return True, "refused a write into a detached parent"
+        return False, f"rc={p.returncode} out={p.stdout.strip()[:60]} live={live.exists()}"
+
+
 def t_raw_io_gate_catches_new_unguarded_write():
     """v3.8.43 (round-26): the gate that MECHANIZES the link/TOCTOU class must
     fail when a new unguarded write to a repo-derived path appears — including
@@ -1064,6 +1104,8 @@ TASKS = [
     ("completion_gate_unaudited", "malicious", "block", t_completion_gate_unaudited, True),
     ("raw_io_gate_catches_new_unguarded_write", "malicious", "block",
      t_raw_io_gate_catches_new_unguarded_write, True),
+    ("detached_parent_write_refused", "malicious", "block",
+     t_detached_parent_write_refused, False),
     ("raw_io_gate_catches_wrapped_governed_write", "malicious", "block",
      t_raw_io_gate_catches_wrapped_governed_write, True),
     ("completion_gate_forged_linked_events", "malicious", "block",

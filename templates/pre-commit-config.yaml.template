@@ -42,6 +42,12 @@ repos:
         language: system
         pass_filenames: false
         always_run: true
+      - id: check-raw-file-io
+        name: No raw file IO on a repo-derived path
+        entry: {{PY}} -I scripts/check_raw_file_io.py
+        language: system
+        pass_filenames: false
+        always_run: true
       - id: check-harness-smoke
         name: Agent-harness scanner blocks injected context
         entry: {{PY}} -I scripts/check_harness_smoke.py

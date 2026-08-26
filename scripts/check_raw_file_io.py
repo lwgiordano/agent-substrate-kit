@@ -147,6 +147,16 @@ TWO_PATH_FUNCS = {
 TWO_PATH_LABELS = {f"{m}.{f}" for m, f in TWO_PATH_FUNCS}
 TWO_PATH_METHODS = {"replace", "rename", "symlink_to", "hardlink_to"}
 
+# Keyword names that carry a PATH on the operations above. v3.8.45 (round-28
+# P1): operand collection walked `node.args` only, so `open(file=ROOT/"x","w")`,
+# `shutil.copy(src=tmp, dst=ROOT/"x")` and `os.replace(src=..., dst=...)`
+# vanished entirely — no finding AND no unresolved line. That is the positional
+# multi-path bug of round 27 in a second spelling, which is exactly the shape a
+# fix should have generalized the first time. These names are only consulted on
+# a call already identified as one of the covered I/O operations.
+PATH_KWARGS = {"file", "path", "src", "dst", "target", "oldpath", "newpath",
+               "filename", "name"}
+
 # Metadata-changing operations (chmod/lchmod/touch; os.chmod/chown/utime)
 # follow links and mutate governed or outside-routed files even though they
 # write no content (round-27 P2). They live in PATH_IO_METHODS and FUNC_IO
@@ -195,13 +205,18 @@ ALLOWLIST: dict[str, str] = {
     "substrate_audit.py:outdir.mkdir":
         "same shape as run_security_scanners — mkdir then guarded writes into "
         "the created directory, which re-check containment themselves",
-    "run_substrate_evals.py:TRACES.mkdir":
+    "run_substrate_evals.py:TRACES.mkdir": (
         "creates .substrate/traces immediately before a safe_atomic_write into "
-        "it; that writer re-validates containment and anchors to the parent fd",
-    "run_substrate_evals.py:SCRIPTS.shutil.copytree":
+        "it; that writer re-validates containment and anchors to the parent fd. "
+        "TWO sites, identical shape: the per-task progress sentinel and the "
+        "final trace write", 2),
+    "run_substrate_evals.py:SCRIPTS.shutil.copytree": (
         "stages a copy of the kit's OWN scripts/ into a fresh TemporaryDirectory "
         "so the raw-IO gate can be run against a planted violation; source is "
-        "code under review, destination is a temp dir",
+        "code under review, destination is a temp dir. TWO sites, identical "
+        "shape: the planted-write eval and the wrapped-write eval, each staging "
+        "a bad/ok pair. The second was added in v3.8.44 and silently inherited "
+        "this reason until v3.8.45 started counting matches", 2),
     "run_substrate_evals.py:SCRIPTS.read_text":
         "reads the substrate's own validator SOURCE to hash/compare it — code "
         "under review, not agent-writable state",
@@ -252,6 +267,19 @@ ALLOWLIST: dict[str, str] = {
 }
 
 
+# How many call sites each ALLOWLIST key actually matched this run. v3.8.45
+# (round-28 P1): a key covered EVERY matching call site, so a second raw call
+# with the same base and method silently inherited a reason reviewed for the
+# first. An exemption is granted to a specific call site that a human read; if
+# it starts covering more, that is a review event, not a detail. Declare a
+# count explicitly by making the value a (reason, count) tuple.
+_ALLOWLIST_HITS: dict[str, int] = {}
+
+
+def _allow_count(v) -> int:
+    return v[1] if isinstance(v, tuple) else 1
+
+
 def _base_symbol(node: ast.AST) -> str | None:
     """Walk an `a / b / c` chain (or Name/Attribute/Call) to its base symbol."""
     seen = 0
@@ -292,7 +320,9 @@ def _base_symbol(node: ast.AST) -> str | None:
 class _ScopeResolver(ast.NodeVisitor):
     """Resolve path-bearing names to GOVERNED / FIXTURE within each scope."""
 
-    def __init__(self, seed: dict[str, set[str]] | None = None) -> None:
+    def __init__(self, seed: dict[str, set[str]] | None = None,
+                 local_defs: frozenset[str] = frozenset()) -> None:
+        self._local_defs = local_defs
         self.findings: list[tuple[int, str, str]] = []   # (line, base, method)
         self.unresolved: list[tuple[int, str, str]] = []
         # Calls to module-local helpers carrying a governed path, recorded so
@@ -405,7 +435,21 @@ class _ScopeResolver(ast.NodeVisitor):
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:  # noqa: N802
         if node.module in {"os", "shutil"}:
             for a in node.names:
-                if (node.module, a.name) in FUNC_IO:
+                # v3.8.45 (round-28 P2): `from shutil import *` binds every
+                # covered function under its bare name, and matching only
+                # explicit names dropped all of them in SILENCE — the third
+                # spelling of the alias defect. A star import binds the whole
+                # module surface, so register the whole covered surface.
+                if a.name == "*":
+                    for mod, fname in FUNC_IO:
+                        # A module-local `def copy(...)` SHADOWS the star
+                        # import at that name, and `copy`/`move`/`remove` are
+                        # common verbs. Attributing a local helper to shutil
+                        # would be a false positive on ordinary code
+                        # (v3.8.45 in-release, ast-parsing checklist WARN).
+                        if mod == node.module and fname not in self._local_defs:
+                            self._funcalias.setdefault(fname, f"{mod}.{fname}")
+                elif (node.module, a.name) in FUNC_IO:
                     self._funcalias[a.asname or a.name] = f"{node.module}.{a.name}"
         self.generic_visit(node)
 
@@ -453,18 +497,59 @@ class _ScopeResolver(ast.NodeVisitor):
         # a governed write that produced no finding AND no unresolved line.
         # Collect every path-bearing position instead of picking one.
         cands: list[tuple[str | None, str]] = []
+
+        def _operands(npaths: int):
+            """Every path-bearing operand of this call: the first `npaths`
+            POSITIONAL arguments plus any keyword named like a path. Keyword
+            operands were invisible before v3.8.45 (round-28 P1).
+
+            Returns (operands, opaque). `opaque` is True when the call carries
+            a `**` unpacking whose contents cannot be read, so the caller can
+            report an UNRESOLVED entry instead of nothing. v3.8.45 in-release
+            (ast-parsing checklist BLOCK): a `**` keyword node has `arg=None`,
+            so the first cut of this filter dropped `shutil.copy(**{"src": ...,
+            "dst": ROOT / "x"})` entirely — no finding AND no unresolved line.
+            That is the silent drop this file's own docstring calls a bug, and
+            the refactor that fixed keyword operands reintroduced it.
+            """
+            out = [node.args[i] for i in range(min(npaths, len(node.args)))]
+            opaque = False
+            for k in node.keywords:
+                if k.arg is not None:
+                    if k.arg in PATH_KWARGS:
+                        out.append(k.value)
+                    continue
+                # `**something`. A literal dict with constant keys is readable;
+                # anything else is not, and unreadable must mean REPORTED.
+                if isinstance(k.value, ast.Dict) and all(
+                        isinstance(key, ast.Constant) and isinstance(key.value, str)
+                        for key in k.value.keys):
+                    for key, val in zip(k.value.keys, k.value.values):
+                        if key.value in PATH_KWARGS:
+                            out.append(val)
+                else:
+                    opaque = True
+            return out, opaque
+
         if isinstance(fn, ast.Attribute):
             if isinstance(fn.value, ast.Name) and (
                     self._modalias.get(fn.value.id, fn.value.id), fn.attr) in FUNC_IO:
                 mod = self._modalias.get(fn.value.id, fn.value.id)
                 label = f"{mod}.{fn.attr}"
                 npaths = 2 if (mod, fn.attr) in TWO_PATH_FUNCS else 1
-                for i in range(min(npaths, len(node.args))):
-                    cands.append((_base_symbol(node.args[i]), label))
+                ops, opaque = _operands(npaths)
+                for a in ops:
+                    cands.append((_base_symbol(a), label))
+                if opaque:
+                    cands.append((None, label))
             elif fn.attr in PATH_IO_METHODS:
                 cands.append((_base_symbol(fn.value), fn.attr))
-                if fn.attr in TWO_PATH_METHODS and node.args:
-                    cands.append((_base_symbol(node.args[0]), fn.attr))
+                if fn.attr in TWO_PATH_METHODS:
+                    ops, opaque = _operands(1)
+                    for a in ops:
+                        cands.append((_base_symbol(a), fn.attr))
+                    if opaque:
+                        cands.append((None, fn.attr))
         elif isinstance(fn, ast.Name) and f"@bound:{fn.id}" in self._scopes[-1]:
             _b, _a = self._scopes[-1][f"@bound:{fn.id}"].split("|", 1)
             cands.append((_b, _a))
@@ -475,8 +560,11 @@ class _ScopeResolver(ast.NodeVisitor):
             # `open`. Aliases are resolved through _funcalias.
             label = self._funcalias.get(fn.id) or "open"
             npaths = 2 if label in TWO_PATH_LABELS else 1
-            for i in range(min(npaths, len(node.args))):
-                cands.append((_base_symbol(node.args[i]), label))
+            ops, opaque = _operands(npaths)
+            for a in ops:
+                cands.append((_base_symbol(a), label))
+            if opaque:
+                cands.append((None, label))
         elif isinstance(fn, ast.Call):
             gf = fn.func
             if (isinstance(gf, ast.Name) and gf.id == "getattr" and len(fn.args) >= 2
@@ -550,10 +638,24 @@ def _resolve_module(tree: ast.AST) -> _ScopeResolver:
     excluded from keywords) and skips a leading `self`/`cls`, because an
     off-by-one in that mapping seeds an unrelated parameter.
     """
+    # v3.8.45 (round-28 P2): the bound was a flat 4, so a five-deep
+    # module-local wrapper chain left the write merely `unresolved` and the
+    # build passed — a number chosen to feel like "enough" is a guess about
+    # other people's code, and a 65-deep chain would only move the same defect
+    # further out. Each pass either adds at least one (scope, parameter) pair
+    # to the seed or halts, and the pairs a module can have is finite and
+    # countable, so bound the loop by THAT: the fixpoint is reached before the
+    # cap by construction, and the cap is a runaway backstop rather than a
+    # depth limit. Counted once here, not re-derived per pass.
+    _params = sum(len(n.args.posonlyargs) + len(n.args.args) + len(n.args.kwonlyargs) + 1
+                  for n in ast.walk(tree)
+                  if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)))
+    local_defs = frozenset(n.name for n in ast.walk(tree)
+                           if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)))
     seed: dict[tuple[str, ...], set[str]] = {}
-    r = _ScopeResolver(seed)
+    r = _ScopeResolver(seed, local_defs)
     r.visit(tree)
-    for _ in range(4):
+    for _ in range(_params + 1):
         grew = False
         for scope, name, pos, kw in r.local_calls:
             # Innermost enclosing definition of `name` wins, then outward —
@@ -584,9 +686,47 @@ def _resolve_module(tree: ast.AST) -> _ScopeResolver:
                 grew = True
         if not grew:
             break
-        r = _ScopeResolver(seed)
+        r = _ScopeResolver(seed, local_defs)
         r.visit(tree)
     return r
+
+
+def _walk_sources(scripts_dir: Path):
+    """Yield (rel, path) for every candidate, or (rel, None) for a directory
+    that cannot be trusted to be part of the scan surface.
+
+    v3.8.45 (round-28 P2): the top-level `scripts` symlink was refused but
+    `rglob` happily followed a symlinked CHILD directory, so `scripts/linked ->
+    /outside` silently redirected part of the surface and the gate still said
+    ok. A scan surface that quietly changes shape is the same failure as an
+    exemption that quietly stops matching.
+    """
+    stack = [scripts_dir]
+    while stack:
+        d = stack.pop()
+        try:
+            with os.scandir(d) as _it:
+                entries = sorted(_it, key=lambda e: e.name)
+        except OSError as e:
+            yield (str(d.relative_to(scripts_dir)) if d != scripts_dir else ".",
+                   None, f"unreadable directory ({e.__class__.__name__})")
+            continue
+        for e in entries:
+            child = Path(e.path)
+            rel = child.relative_to(scripts_dir).as_posix()
+            if e.is_symlink():
+                # A symlinked FILE is caught by _read_source; a symlinked DIR
+                # would silently swap the surface, so refuse it here.
+                if e.is_dir(follow_symlinks=False) or child.is_dir():
+                    yield (rel, None, "symlinked directory — refusing a "
+                                      "redirected scan surface")
+                    continue
+            if e.is_dir(follow_symlinks=False):
+                if e.name in {"__pycache__", ".git"}:
+                    continue
+                stack.append(child)
+            elif e.name.endswith(".py"):
+                yield (rel, child, None)
 
 
 def scan(scripts_dir: Path) -> tuple[list[str], set[str], list[str]]:
@@ -594,9 +734,18 @@ def scan(scripts_dir: Path) -> tuple[list[str], set[str], list[str]]:
     violations: list[str] = []
     matched: set[str] = set()
     unresolved: list[str] = []
-    for path in sorted(scripts_dir.rglob("*.py")):
-        if path.name == Path(__file__).name:
-            continue  # this gate's own docstring names the primitives
+    self_path = Path(__file__).resolve()
+    for rel, path, why in sorted(_walk_sources(scripts_dir), key=lambda x: x[0]):
+        if path is None:
+            violations.append(f"{rel}: {why}")
+            continue
+        # v3.8.45 (round-28 P2): the self-skip compared BASENAMES, so any
+        # nested file called check_raw_file_io.py was silently unscannable.
+        try:
+            if path.resolve() == self_path:
+                continue  # this gate's own docstring names the primitives
+        except OSError:
+            pass
         # v3.8.44 (round-27 P2): this gate read every candidate with a blocking
         # path.read_text() BEFORE any non-regular check, so a FIFO in scripts/
         # HUNG it — the fourth time a component of this system carried the very
@@ -604,35 +753,43 @@ def scan(scripts_dir: Path) -> tuple[list[str], set[str], list[str]]:
         # and treat anything else as a violation rather than a hang.
         src = _read_source(path)
         if src is None:
-            violations.append(f"{path.name}: not a readable regular file "
+            violations.append(f"{rel}: not a readable regular file "
                               "(symlink/FIFO/socket/device) — refusing to scan it")
             continue
+        # Deeply nested source can exhaust the interpreter's stack inside
+        # ast.parse or the visitor, and the fixpoint runs the visitor several
+        # times. An unanalyzable file must FAIL, not crash the gate out with a
+        # traceback that a CI log reads as an infrastructure blip. v3.8.45
+        # (round-28 P3): the guard was around the VISITOR only, so a
+        # syntactically valid 12,000-term expression blew the stack inside
+        # ast.parse and escaped as a traceback — the guard did not cover the
+        # call that actually raises first.
         try:
             tree = ast.parse(src)
-        except SyntaxError as e:
-            violations.append(f"{path.name}: unparseable ({e})")
-            continue
-        # Deeply nested source can exhaust the interpreter's stack inside
-        # ast.parse or the visitor, and the fixpoint runs the visitor up to
-        # five times. An unanalyzable file must FAIL, not crash the gate out
-        # with a traceback that a CI log reads as an infrastructure blip.
-        try:
             r = _resolve_module(tree)
+        except SyntaxError as e:
+            violations.append(f"{rel}: unparseable ({e})")
+            continue
         except (RecursionError, MemoryError) as e:
-            violations.append(f"{path.name}: too deeply nested to analyze "
+            violations.append(f"{rel}: too deeply nested to analyze "
                               f"({type(e).__name__}) — refusing to pass it")
             continue
         for line, base, method in r.findings:
-            key = f"{path.name}:{base}.{method}"
+            # v3.8.45 (round-28 P1): the key was the BASENAME, so an exemption
+            # reviewed for scripts/_doc_common.py also covered a same-named file
+            # anywhere else in the tree. A stale-exemption hole in the mechanism
+            # whose selling point is that stale exemptions fail is not a detail.
+            key = f"{rel}:{base}.{method}"
             if key in ALLOWLIST:
                 matched.add(key)
+                _ALLOWLIST_HITS[key] = _ALLOWLIST_HITS.get(key, 0) + 1
                 continue
             violations.append(
-                f"{path.name}:{line}: raw {base}.{method}() on a repo-derived "
+                f"{rel}:{line}: raw {base}.{method}() on a repo-derived "
                 f"path — use the guarded helper (safe_read_text / "
                 f"safe_atomic_write / read_lock)")
         for line, base, method in r.unresolved:
-            unresolved.append(f"{path.name}:{line}: {base}.{method}()")
+            unresolved.append(f"{rel}:{line}: {base}.{method}()")
     return violations, matched, unresolved
 
 
@@ -665,6 +822,17 @@ def main(argv: list[str]) -> int:
         violations.append(
             f"allowlist entry no longer matches any call site: {key!r} — "
             "remove it (a stale exemption is permanent cover)")
+    # v3.8.45 (round-28 P1): an exemption is granted to a call site a human
+    # actually read. If it silently starts covering MORE sites, the extra ones
+    # were never reviewed — the same failure as a stale entry, in the opposite
+    # direction. Declare a deliberate multi-site exemption as (reason, count).
+    for key, hits in sorted(_ALLOWLIST_HITS.items()):
+        want = _allow_count(ALLOWLIST[key])
+        if hits != want:
+            violations.append(
+                f"allowlist entry {key!r} matched {hits} call sites but was "
+                f"reviewed for {want} — review the new site(s) and update the "
+                "entry to (reason, count) if all of them are genuinely safe")
 
     if "--list-unresolved" in argv:
         for u in unresolved:

@@ -361,7 +361,8 @@ def test_source_root_manage_matches_template() -> None:
     template = (KIT / "templates" / "manage.sh.template").read_text(encoding="utf-8")
     root_manage = KIT / "manage.sh"
     required = ("scripts/check_python_syntax.py", "scripts/check_harness_patterns.py",
-                "scripts/check_policy_code_integrity.py", "scripts/check_harness_smoke.py",
+                "scripts/check_policy_code_integrity.py", "scripts/check_raw_file_io.py",
+                "scripts/check_harness_smoke.py",
                 "scripts/check_hook_smoke.py", "scripts/check_agent_harness.py",
                 "scripts/check_substrate_config.py")
     for r in required:
@@ -372,13 +373,64 @@ def test_source_root_manage_matches_template() -> None:
             assert r in rm, f"source-root manage.sh stale — missing {r}"
 
 
+def test_every_kit_validator_reaches_consumers(tmp_path) -> None:
+    """v3.8.45 (round-28 P1): the hand-maintained list above is the same shape
+    as the defect this whole series is about — it documents parity instead of
+    MECHANIZING it. check_raw_file_io.py was added to the kit's own check and
+    pre-commit in v3.8.43 and to neither template, so every install since then
+    carried the gate as an inert file. A reviewer had to notice; nobody did.
+
+    So derive the expectation instead of restating it: every validator the
+    KIT's own `check` runs must also be wired into the template a consumer
+    gets, in both manage.sh and pre-commit. A new validator now fails this test
+    until it ships to consumers too.
+    """
+    root_manage = KIT / "manage.sh"
+    template = KIT / "templates" / "manage.sh.template"
+    if not (root_manage.exists() and template.exists()):
+        return
+    import re as _re
+
+    def _check_block(text: str) -> str:
+        # The `check)` case arm — from its label to the next top-level arm.
+        m = _re.search(r"\n\s*check\)(.*?)\n\s*[a-z-]+\)", text, _re.S)
+        return m.group(1) if m else ""
+
+    def _validators(text: str) -> set[str]:
+        return set(_re.findall(r"run_py (scripts/check_[a-z_]+\.py)", _check_block(text)))
+
+    kit_validators = _validators(root_manage.read_text(encoding="utf-8"))
+    assert kit_validators, "could not parse the kit's own check block"
+    tmpl_validators = _validators(template.read_text(encoding="utf-8"))
+    missing = sorted(kit_validators - tmpl_validators)
+    assert not missing, (
+        "validators run by the kit but NOT wired into templates/manage.sh.template — "
+        f"consumers would receive them as inert files: {missing}")
+
+    pc_tmpl = KIT / "templates" / "pre-commit-config.yaml.template"
+    if pc_tmpl.exists():
+        pc_text = pc_tmpl.read_text(encoding="utf-8")
+        # Smoke/behavioral validators are deliberately check-only in some
+        # profiles; require pre-commit coverage for the static ones the kit's
+        # own pre-commit runs.
+        kit_pc = KIT / ".pre-commit-config.yaml"
+        if kit_pc.exists():
+            kit_pc_text = kit_pc.read_text(encoding="utf-8")
+            for v in sorted(kit_validators):
+                if v in kit_pc_text:
+                    assert v in pc_text, (
+                        f"{v} runs in the kit's pre-commit but is absent from "
+                        "templates/pre-commit-config.yaml.template")
+
+
 def test_source_root_precommit_has_core_validators() -> None:
     pc = KIT / ".pre-commit-config.yaml"
     if not pc.exists():
         return
     text = pc.read_text(encoding="utf-8")
     for hook_id in ("check-python-syntax", "check-harness-patterns",
-                    "check-policy-code-integrity", "check-harness-smoke",
+                    "check-policy-code-integrity", "check-raw-file-io",
+                    "check-harness-smoke",
                     "check-hook-smoke", "check-substrate-config", "check-agent-harness"):
         assert hook_id in text, f"source-root .pre-commit-config.yaml stale — missing {hook_id}"
 

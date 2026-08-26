@@ -418,6 +418,103 @@ in silence, and each extension was prompted by someone attacking the gate
 rather than the code. State its limits explicitly, then treat every stated
 limit as a lead rather than a boundary.
 
+## Round 8 — v3.8.45 (round-28): the gate shipped inert to every consumer
+
+Round 28's most valuable finding is not a race. It is this: `check_raw_file_io.py`
+was copied into every bootstrapped install and **nothing ran it**. Generated
+`manage.sh check` and generated pre-commit never invoked it; only the kit's own
+repo did. Two releases were spent arguing that this class recurs because the safe
+path is available but not *mandatory* — and the mechanism that makes it mandatory
+was shipped to consumers as an inert file.
+
+The parity test that exists to catch exactly this listed validators **by hand**,
+so it agreed with itself. That is the same shape as the defect: parity was
+documented, not mechanized. The fix wires the gate into both templates *and*
+replaces the hand-maintained list with a derived one — every validator the kit's
+own `check` runs must appear in the template a consumer gets, or the build fails.
+Verified by bootstrapping a consumer and watching its `manage.sh` gate block a
+planted write.
+
+### The fd anchor has a limit, and it is not the one that was fixed
+
+Round 27's `open_dir_chain` stops the kernel following a hostile **new** path.
+Round 28 showed what it does *not* do: it says nothing about whether the pinned
+inode is still **reachable** at the path the caller asked for. Rename the parent
+after capture and every `dir_fd=` operation works flawlessly on a **detached**
+directory —
+
+- the read returned `INSIDE-OLD` while the live target held `LIVE-NEW`;
+- the write returned **success** with the bytes in the moved directory and the
+  live target absent.
+
+Round 28's repro keeps the moved directory in-repo. Move it outside instead and
+the same mechanism puts the bytes outside. No fd can prevent that, because the
+rename has already happened. So the fix is detection, deliberately placed *after*
+the operation: `dir_fd_still_live()` re-descends from the root and compares
+identities, and the caller turns a mismatch into a refusal. It cannot un-write
+bytes already placed in a detached directory. It can stop the caller believing
+they landed where they were asked to — which is the one shape this series exists
+to remove. Applied to the read, the write, the append, and `read_lock`.
+
+### Seven more gate holes, and one that found my own code
+
+Keyword operands (`open(file=...)`, `shutil.copy(dst=...)`) were the round-27
+positional multi-path bug in a second spelling. Wildcard imports were the alias
+defect in a third. The propagation bound of 4 was a guess about other people's
+code that a five-deep wrapper chain walked past — the seed set only grows, so the
+loop already terminates on its own and the number is now a runaway backstop
+rather than a depth limit. The `RecursionError` guard added in v3.8.44 wrapped
+the visitor but not `ast.parse`, which is what actually raises first.
+
+Three were the gate's own bookkeeping being keyed too loosely: the allowlist key
+was a **basename**, so an exemption reviewed for `scripts/_doc_common.py` covered
+a same-named file anywhere in the tree; the self-skip was by basename too, so a
+nested `check_raw_file_io.py` was unscannable; and a symlinked **child**
+directory under `scripts/` silently redirected part of the surface while only the
+top-level symlink was refused.
+
+The allowlist fix went further than reported. A key covered *every* matching call
+site, so a second raw call with the same base and method silently inherited a
+reason a human had read about a different line. Counting matches found two real
+cases on the first run — and one of them was created by **v3.8.44's own new
+eval**, which had inherited an exemption written for a different call site the
+day before. A deliberate multi-site exemption is now declared as
+`(reason, count)`.
+
+### Four in-release auditor findings — two of them BLOCKs in the new code
+
+- **The keyword-operand fix reintroduced the silent drop it was written to
+  remove.** A `**` keyword node has `arg=None`, so filtering on `k.arg in
+  PATH_KWARGS` discarded `shutil.copy(**{"src": ..., "dst": ROOT / "x"})`
+  entirely — no finding, no `unresolved` line. The file's own docstring calls
+  that a bug in the gate. A readable literal dict now resolves like any other
+  operand; an unreadable `**d` is reported as unresolved.
+- **The new liveness check leaked a file descriptor on every refusal.** In
+  `read_lock` it sat between the leaf `open` and the `try/finally` that closes
+  it, so 20 refusals leaked 20 fds. A guard that converts a race into a
+  resource-exhaustion vector is not a guard — and a lock is precisely the file
+  an attacker can make this fire on repeatedly.
+- **The wildcard-import fix false-positived on ordinary code.** Registering
+  every covered name from `from shutil import *` attributed a module's own
+  `def copy(...)` to shutil, and `copy`/`move`/`remove` are common verbs. A gate
+  people switch off for noise protects nothing; star names that the module
+  itself defines are now skipped.
+- **Raising the propagation bound from 4 to 64 moved the defect rather than
+  fixing it** — a 65-deep chain would degrade the same way. The bound is now
+  derived from the module's own parameter count, which the fixpoint provably
+  reaches first, so it is a runaway backstop rather than a depth guess.
+
+**Carry-forward rule, part 9 — ship the mechanism, not just the file.** A gate
+that runs only in the repo that authored it protects nobody else. When a control
+is added, the question is not "is it wired here" but "what makes it impossible to
+add the next one without wiring it everywhere" — and the answer has to be a
+derived check, because a hand-maintained parity list agrees with itself.
+
+**Carry-forward rule, part 10 — an exemption is granted to a call site, not to a
+shape.** If an allowlist entry silently starts covering more code than the
+reviewer read, it has become the thing it was supposed to prevent. Count the
+matches and fail when the count moves.
+
 ## (Optional) Reproduction
 
 In a disposable repo: `ln victim.txt AGENT_BUS.md` then

@@ -439,10 +439,9 @@ def safe_read_bytes(path, root=None, max_bytes: int | None = SAFE_READ_MAX_BYTES
             fd = os.open(str(path),
                          os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
     except (OSError, ValueError):
-        return None  # absent, symlinked (ELOOP), escaping, or unreadable
-    finally:
         if _dir_fd is not None:
             os.close(_dir_fd)
+        return None  # absent, symlinked (ELOOP), escaping, or unreadable
     try:
         st = os.fstat(fd)
         if not _stat.S_ISREG(st.st_mode) or st.st_nlink > 1:
@@ -450,15 +449,28 @@ def safe_read_bytes(path, root=None, max_bytes: int | None = SAFE_READ_MAX_BYTES
         if tail_bytes is not None:
             if st.st_size > tail_bytes:
                 os.lseek(fd, st.st_size - tail_bytes, os.SEEK_SET)
-            return _read_fd_bytes(fd, tail_bytes)
-        if max_bytes is None:
-            return _read_fd_bytes(fd, None)
-        raw = _read_fd_bytes(fd, max_bytes + 1)
-        return None if len(raw) > max_bytes else raw
+            raw = _read_fd_bytes(fd, tail_bytes)
+        elif max_bytes is None:
+            raw = _read_fd_bytes(fd, None)
+        else:
+            raw = _read_fd_bytes(fd, max_bytes + 1)
+            if len(raw) > max_bytes:
+                return None
+        # v3.8.45 (round-28 P1): the pinned parent may have been RENAMED after
+        # open_dir_chain returned, in which case these bytes came from a
+        # detached directory and the live target now holds something else.
+        # Reproduced: this returned INSIDE-OLD while the live path held
+        # LIVE-NEW. Stale bytes presented as current are the read-side twin of
+        # a write that reports success without landing.
+        if _dir_fd is not None and not dir_fd_still_live(root, Path(path).parent, _dir_fd):
+            return None
+        return raw
     except (OSError, ValueError):
         return None
     finally:
         os.close(fd)
+        if _dir_fd is not None:
+            os.close(_dir_fd)
 
 
 def safe_read_text(path, root=None, max_bytes: int | None = SAFE_READ_MAX_BYTES,
@@ -555,20 +567,31 @@ def read_lock(path: Path, allowed: set, root=None) -> tuple:
         return ("bad", None, "lock parent escapes the repo, or an ancestor is a "
                              "symlink/non-directory — refusing to resolve it")
     try:
-        try:
-            fd = os.open(Path(path).name,
-                         os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
-                         dir_fd=_lock_dir_fd)
-        except OSError as e:
-            if e.errno in (errno.ENOENT, errno.ENOTDIR):
-                return ("absent", None, None)
-            if e.errno == errno.ELOOP:
-                return ("bad", None, "lock is a symlink — refusing to follow it")
-            # ENXIO: a write-only FIFO with no reader; still not a real lock.
-            return ("bad", None, f"unreadable ({e.__class__.__name__})")
-    finally:
+        fd = os.open(Path(path).name,
+                     os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+                     dir_fd=_lock_dir_fd)
+    except OSError as e:
         os.close(_lock_dir_fd)
+        if e.errno in (errno.ENOENT, errno.ENOTDIR):
+            return ("absent", None, None)
+        if e.errno == errno.ELOOP:
+            return ("bad", None, "lock is a symlink — refusing to follow it")
+        # ENXIO: a write-only FIFO with no reader; still not a real lock.
+        return ("bad", None, f"unreadable ({e.__class__.__name__})")
+    # Both fds are now owned by the single finally below. v3.8.45 in-release
+    # (security-auditor BLOCK): the first cut put the liveness check between the
+    # leaf open and the try/finally that closes it, so EVERY time the new
+    # detection fired the lock fd leaked — 20 refusals leaked 20 fds. A guard
+    # that turns a race into a resource-exhaustion vector is not a guard.
     try:
+        # v3.8.45 (round-28 P1): a lock read out of a parent renamed after the
+        # descent captured it is a STALE value presented as current — and a lock
+        # is the highest-value thing in the tree to read stale. Round 28 reported
+        # this on the generic readers; a lock must not be the one place left
+        # trusting a detached parent.
+        if not dir_fd_still_live(root, Path(path).parent, _lock_dir_fd):
+            return ("bad", None, "lock parent was renamed during the read — "
+                                 "refusing a value from a detached directory")
         st = os.fstat(fd)
         if not _stat.S_ISREG(st.st_mode):
             return ("bad", None, "lock is not a regular file (directory/fifo/special)")
@@ -583,6 +606,7 @@ def read_lock(path: Path, allowed: set, root=None) -> tuple:
             return ("bad", None, f"unreadable ({e.__class__.__name__})")
     finally:
         os.close(fd)
+        os.close(_lock_dir_fd)
     if len(raw) > LOCK_MAX_BYTES:
         return ("bad", None, f"lock exceeds {LOCK_MAX_BYTES} bytes — refusing to parse a padded value")
     try:
@@ -689,6 +713,42 @@ def open_dir_chain(root, parent, create: bool = False) -> int:
         raise
 
 
+def dir_fd_still_live(root, parent, dir_fd: int) -> bool:
+    """True when `dir_fd` is STILL the directory that `parent` names right now.
+
+    v3.8.45 (round-28 P1 x2) — the honest limit of `open_dir_chain`, and the
+    reason it needs a companion. Anchoring to a parent fd stops the kernel from
+    following a hostile NEW path, which is exactly what round 27 needed. It says
+    nothing about whether that inode is still REACHABLE at the path the caller
+    asked for. A concurrent `rename(repo/state, repo/stash)` after the fd is
+    captured leaves every subsequent `dir_fd=` operation working correctly on a
+    DETACHED directory: the read returns the moved directory's bytes while the
+    live target holds something else, and the write lands in the moved directory
+    and RETURNS SUCCESS while the live target is absent. Reproduced both ways.
+    Move the pinned parent outside the repo instead of alongside it and the same
+    mechanism puts the bytes outside — the fd cannot prevent that, because by
+    then the rename has already happened.
+
+    So this is detection, not prevention, and it is deliberately placed AFTER
+    the operation: re-descend from the root and compare identities. Callers turn
+    a False into a refusal. That converts the one shape this series exists to
+    remove — a silent false success — into a loud failure. It cannot un-write
+    bytes already placed in the detached directory; it can stop the caller
+    believing they landed where they were asked to.
+    """
+    try:
+        probe = open_dir_chain(root, parent, create=False)
+    except OSError:
+        return False
+    try:
+        a, b = os.fstat(dir_fd), os.fstat(probe)
+    except OSError:
+        return False
+    finally:
+        os.close(probe)
+    return (a.st_dev, a.st_ino) == (b.st_dev, b.st_ino)
+
+
 def safe_atomic_write(target, text, root=None, tmp_prefix: str = ".saw-",
                       make_parents: bool = False, mode: int | None = None) -> None:
     """Atomically write `text` to `target`, anchored to the parent DIRECTORY FD.
@@ -779,6 +839,19 @@ def safe_atomic_write(target, text, root=None, tmp_prefix: str = ".saw-",
                 fh.write(text)
             os.replace(tmp_name, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
             tmp_name = None
+            # v3.8.45 (round-28 P1): the fd keeps the write inside the directory
+            # we validated, but a concurrent rename of that directory AFTER
+            # capture means the bytes landed in a DETACHED copy while the live
+            # target is untouched — and this used to return success. Reproduced:
+            # repo/state renamed to repo/stash mid-write; out.txt absent at the
+            # live path, content in the detached one. Raise instead: every
+            # caller maps OSError to its existing nonzero contract, and a write
+            # reported as done but absent from the requested path is exactly the
+            # silent false success this series exists to remove.
+            if not dir_fd_still_live(root, parent, dir_fd):
+                raise OSError(
+                    f"write parent was renamed during the write — the bytes landed in a "
+                    f"detached directory and {target} was NOT updated")
         finally:
             if tfd is not None:
                 os.close(tfd)
@@ -961,6 +1034,14 @@ def locked_atomic_append(target: Path, entry: str, header: str, tmp_prefix: str,
                 fh.write(existing + entry)
             os.replace(tmp_name, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
             tmp_name = None
+            # v3.8.45 (round-28 P1): same detached-parent false success as
+            # safe_atomic_write. An append that lands in a moved docs/ while the
+            # live HISTORY.md is absent must not report success — the log's whole
+            # value is that an entry recorded as written is there to be read.
+            if not dir_fd_still_live(root, parent, dir_fd):
+                raise OSError(
+                    f"append parent was renamed during the append — the entry landed in a "
+                    f"detached directory and {target} was NOT updated")
         finally:
             if tfd is not None:
                 os.close(tfd)

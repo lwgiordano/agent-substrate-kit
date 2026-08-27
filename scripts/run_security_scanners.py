@@ -45,6 +45,16 @@ except Exception:  # pragma: no cover - stripped install
     def _safe_atomic_write(*a, **k):
         raise OSError("safe_atomic_write unavailable — refusing an unguarded write")
 
+# v3.8.46 (round-29 P2): guarded mkdir. A raw mkdir(parents=True) BEFORE a
+# guarded write creates the directory through a symlinked ancestor and only
+# then gets refused — the mutation has already happened outside the repo.
+try:
+    from _doc_common import safe_mkdir as _safe_mkdir
+except Exception:  # pragma: no cover - stripped install
+    def _safe_mkdir(*a, **k):
+        raise OSError("safe_mkdir unavailable — refusing an unguarded mkdir")
+
+
 # v3.8.43 (round-26 P2): the canonical guarded reader. The fallback returns None
 # ("no usable config") rather than an unguarded read, so a stripped install
 # degrades to the caller's fail-closed default instead of blocking on a FIFO.
@@ -143,7 +153,7 @@ def main(argv=None) -> int:
         import hashlib
         run_id = hashlib.sha256(json.dumps(results, sort_keys=True).encode()).hexdigest()[:12]
         outdir = root / ".substrate" / "audits" / "security" / run_id
-        outdir.mkdir(parents=True, exist_ok=True)
+        _safe_mkdir(outdir, root)
         _safe_atomic_write(outdir / "results.json",
                            json.dumps(results, indent=2) + "\n", root=root)
     except Exception:

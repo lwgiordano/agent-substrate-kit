@@ -1,6 +1,6 @@
 ---
 purpose: Behavioral evals, deterministic validators, audits, and assurance limits.
-last_human_reviewed: 2026-08-26
+last_human_reviewed: 2026-08-27
 covers:
   - manage.sh
   - extras/calibrate_diy_ultrareview.py
@@ -57,9 +57,31 @@ with a FIFO before the process runs. Detection is AST-based, so a string literal
 naming a primitive cannot false-positive, and paths rooted at a freshly created
 temporary directory inside a fixture are deliberately ignored: the code creates
 that directory itself, so no attacker-controlled link can exist, and flagging it
-would be the noise that gets a gate switched off. Exemptions live in a small
-allowlist where every entry carries a reason, and an entry that no longer
-matches any call site is itself a failure — a stale exemption is permanent
+would be the noise that gets a gate switched off. Resolution is scope-aware and resolved BEFORE any body is
+scanned: import bindings are a property of the module's shape, not of the order
+a walker reaches them, so a module-level import binds everywhere regardless of
+textual position while a function's own import binds only inside it. Learning
+bindings during the walk instead produced three separate escapes at once —
+use-before-import dropped, a nested import clobbering a sibling's alias, and a
+nested definition suppressing a star import.
+
+The scan surface is every tree that BECOMES `scripts/` under some profile, not
+just `scripts/` itself: `extras/*.py` are copied in on a strict install, so a
+file that is governed in the install but sits elsewhere in the source would
+otherwise never be audited. Findings and exemptions from a staging tree are
+namespaced by tree so they cannot share identity with a same-named file.
+
+The gate also runs in generated CONSUMERS — wired into the manage.sh and
+pre-commit templates, with a derived parity test asserting that every validator
+the kit's own `check` runs reaches those templates. A gate that runs only in the
+repo that authored it protects nobody else, and a hand-maintained parity list
+agrees with itself.
+
+Exemptions live in a small
+allowlist where every entry carries a reason AND an expected match COUNT, and an
+entry that no longer matches any call site — or that silently starts covering
+more sites than were reviewed — is itself a failure. An exemption is granted to a
+call site a human actually read, not to a shape. A stale exemption is permanent
 cover. The gate exists because the class it guards recurred across six
 consecutive audit rounds while being fixed correctly each time: shared helpers
 make the safe path available, and only a gate makes it mandatory.

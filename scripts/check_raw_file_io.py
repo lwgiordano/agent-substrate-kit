@@ -73,9 +73,13 @@ something to re-verify rather than trust.
     callee is an Attribute), is still only `unresolved`. Before v3.8.44 there
     was no propagation at all, and a one-line wrapper was enough to demote a
     governed write to a line that does not fail the build.
-  - `_modalias`/`_funcalias` are module-wide, not per-scope, so an alias bound
-    inside one function is visible in the next. That direction over-reports
-    (more findings), never under-reports, so it is left as-is.
+  - IMPORT bindings are resolved per scope in a pre-pass (module-level imports
+    bind everywhere regardless of textual order; a function's own imports bind
+    only inside it), so the "module-wide alias map" limit stated here through
+    v3.8.45 no longer applies — and it was never merely an over-report: it let
+    a nested import clobber a sibling's alias and drop a real violation.
+    ASSIGNMENT aliases (`op = open`) are still walker-maintained and per-scope
+    by construction, since a name assigned later genuinely is not bound yet.
   - Paths built entirely from CLI arguments are out of scope by design and are
     the bulk of the `unresolved` count.
   - Indirection beyond one `getattr` binding (a method stored in a dict, a
@@ -198,18 +202,6 @@ ALLOWLIST: dict[str, str] = {
     "memory_log.py:lock.open":
         "the .lock leaf is one of the two explicitly refused above (symlink, "
         "hard link, non-regular) before this open, inside the same guarded block",
-    "run_security_scanners.py:outdir.mkdir":
-        "creates the report dir immediately before a safe_atomic_write into it; "
-        "that writer re-validates containment and anchors to the parent fd, so "
-        "the mkdir cannot be used to place content",
-    "substrate_audit.py:outdir.mkdir":
-        "same shape as run_security_scanners — mkdir then guarded writes into "
-        "the created directory, which re-check containment themselves",
-    "run_substrate_evals.py:TRACES.mkdir": (
-        "creates .substrate/traces immediately before a safe_atomic_write into "
-        "it; that writer re-validates containment and anchors to the parent fd. "
-        "TWO sites, identical shape: the per-task progress sentinel and the "
-        "final trace write", 2),
     "run_substrate_evals.py:SCRIPTS.shutil.copytree": (
         "stages a copy of the kit's OWN scripts/ into a fresh TemporaryDirectory "
         "so the raw-IO gate can be run against a planted violation; source is "
@@ -288,6 +280,13 @@ def _base_symbol(node: ast.AST) -> str | None:
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
             node = node.left
             continue
+        # v3.8.46 (round-29 P2): a governed path collected into *args or
+        # **kwargs is reached by SUBSCRIPT — `args[0].write_text(...)`,
+        # `kwargs["p"].write_text(...)`. The container is what propagation
+        # marks governed, so the element inherits it.
+        if isinstance(node, ast.Subscript):
+            node = node.value
+            continue
         if isinstance(node, ast.Name):
             return node.id
         if isinstance(node, ast.Attribute):
@@ -300,6 +299,17 @@ def _base_symbol(node: ast.AST) -> str | None:
             # base "str". Recurse through the wrapper to the real path
             # expression — a conversion is not a change of origin.
             if isinstance(f, ast.Name) and f.id in {"str", "Path", "fspath"} and node.args:
+                node = node.args[0]
+                continue
+            # v3.8.46 (round-29 P1): the transparent-wrapper list was the
+            # wrappers I happened to think of. `os.path.join(ROOT, "docs", x)`
+            # — the most ordinary way anyone builds a path — was not among
+            # them, so it resolved to the useless base "join" and an ordinary
+            # governed write passed the build. A path CONSTRUCTOR does not
+            # change where the path came from.
+            if (isinstance(f, ast.Attribute)
+                    and f.attr in {"join", "normpath", "abspath", "realpath"}
+                    and node.args):
                 node = node.args[0]
                 continue
             if (isinstance(f, ast.Attribute) and f.attr in {"fspath", "resolve", "absolute",
@@ -317,12 +327,116 @@ def _base_symbol(node: ast.AST) -> str | None:
     return None
 
 
+def _scope_body(node):
+    """Yield the statements belonging to THIS scope, not to nested ones.
+
+    Imports inside `if`/`try` at module level still bind module-wide, but a
+    nested def/class is its own namespace and must not leak outward.
+    """
+    stack = list(getattr(node, "body", []))
+    stack += list(getattr(node, "orelse", [])) + list(getattr(node, "finalbody", []))
+    while stack:
+        n = stack.pop()
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue        # its own namespace
+        yield n
+        for f in ("body", "orelse", "finalbody"):
+            stack += list(getattr(n, f, []) or [])
+        for h in getattr(n, "handlers", []) or []:
+            stack += list(getattr(h, "body", []) or [])
+        # `match`/`case` keeps its statements under .cases[i].body, which is
+        # neither body nor orelse. v3.8.46 in-release (both auditors, BLOCK):
+        # an import inside a case was invisible to the binding pre-pass, so the
+        # call using it produced NEITHER a finding NOR an unresolved line — the
+        # silent drop this file's own docstring calls a bug in the gate, in the
+        # very pass written to make binding resolution correct.
+        for c in getattr(n, "cases", []) or []:
+            stack += list(getattr(c, "body", []) or [])
+
+
+def _collect_bindings(tree: ast.AST):
+    """Resolve import bindings BEFORE scanning any body, module scope apart.
+
+    v3.8.46 (round-29 P1 x3) — one design error wearing three hats. Aliases
+    were learned DURING the same ordered visit that scans function bodies, and
+    kept in flat module-wide dicts, so:
+
+      * a function using an alias defined by a LATER import line was dropped
+        entirely (the visitor had not reached the binding yet) — perfectly
+        valid Python, since the import runs before the call does;
+      * a nested `import os as io` overwrote a sibling function's module-level
+        `import shutil as io`, because there was one dict for the whole file;
+      * the v3.8.45 star-import shadow fix collected def names with `ast.walk`,
+        so an unrelated NESTED `def copy` inside some other function suppressed
+        a real `from shutil import *` call. That is the ast.walk scope-collapse
+        mistake caught in v3.8.44 in a different place, reintroduced two
+        releases later by code written to fix something else.
+
+    Binding structure is a property of the module's SHAPE, so it is resolved up
+    front: module-level imports bind everywhere regardless of textual order, a
+    function's own imports bind only inside it, and only MODULE-level defs
+    shadow a star import. Returns (effective_by_scope, module_defs) where the
+    effective maps are precomputed per scope path.
+    """
+    module_defs = frozenset(
+        n.name for n in getattr(tree, "body", [])
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)))
+
+    def _own(node):
+        mods: dict[str, str] = {}
+        funcs: dict[str, str] = {}
+        for n in _scope_body(node):
+            if isinstance(n, ast.Import):
+                for a in n.names:
+                    if a.name in {"os", "shutil"}:
+                        mods[a.asname or a.name] = a.name
+            elif isinstance(n, ast.ImportFrom) and n.module in {"os", "shutil"}:
+                for a in n.names:
+                    if a.name == "*":
+                        for mod, fname in FUNC_IO:
+                            # Only a MODULE-level def shadows the star import.
+                            if mod == n.module and fname not in module_defs:
+                                funcs.setdefault(fname, f"{mod}.{fname}")
+                    elif (n.module, a.name) in FUNC_IO:
+                        funcs[a.asname or a.name] = f"{n.module}.{a.name}"
+        return mods, funcs
+
+    effective: dict[tuple[str, ...], tuple[dict, dict]] = {}
+    root_mods, root_funcs = _own(tree)
+    effective[()] = (root_mods, root_funcs)
+
+    def _descend(node, path, mods, funcs):
+        for n in ast.iter_child_nodes(node):
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                own_m, own_f = _own(n)
+                m2 = {**mods, **own_m}
+                f2 = {**funcs, **own_f}
+                sub = (*path, n.name)
+                effective[sub] = (m2, f2)
+                _descend(n, sub, m2, f2)
+            elif isinstance(n, ast.ClassDef):
+                # The class name is part of the scope path. Passing `path`
+                # through unchanged made a method's key collide with a
+                # same-named module-level function, and whichever the walk
+                # reached LAST overwrote the other's bindings — an
+                # order-dependent silent fail-open (v3.8.46 in-release BLOCK).
+                _descend(n, (*path, n.name), mods, funcs)
+            else:
+                _descend(n, path, mods, funcs)
+
+    _descend(tree, (), root_mods, root_funcs)
+    return effective, module_defs
+
+
 class _ScopeResolver(ast.NodeVisitor):
     """Resolve path-bearing names to GOVERNED / FIXTURE within each scope."""
 
     def __init__(self, seed: dict[str, set[str]] | None = None,
-                 local_defs: frozenset[str] = frozenset()) -> None:
-        self._local_defs = local_defs
+                 bindings: dict | None = None) -> None:
+        # Import bindings resolved up front by _collect_bindings, keyed by
+        # scope path: module-level imports bind everywhere regardless of
+        # textual order, a function's own imports bind only inside it.
+        self._bindings = bindings if bindings is not None else {(): ({}, {})}
         self.findings: list[tuple[int, str, str]] = []   # (line, base, method)
         self.unresolved: list[tuple[int, str, str]] = []
         # Calls to module-local helpers carrying a governed path, recorded so
@@ -337,7 +451,6 @@ class _ScopeResolver(ast.NodeVisitor):
         # literal "os"/"shutil" name check missed os.replace/shutil.copy behind
         # the alias. Track aliases so the module identity, not the spelling, is
         # what matters.
-        self._modalias: dict[str, str] = {}
         # `from os import unlink as remove_file` and `op = open` both produce a
         # bare-Name callee that is not literally `open`, so both were dropped in
         # SILENCE (round-27 P2). Map alias -> canonical label.
@@ -369,6 +482,8 @@ class _ScopeResolver(ast.NodeVisitor):
                                   + node.args.kwonlyargs)]
         if node.args.vararg is not None:
             params.append(node.args.vararg.arg)
+        if node.args.kwarg is not None:
+            params.append(node.args.kwarg.arg)
         self._push(params)
         # A parameter this helper is CALLED with a governed path through is
         # governed inside the body. Governed wins over the fixture-name
@@ -382,6 +497,16 @@ class _ScopeResolver(ast.NodeVisitor):
         self._pop()
 
     visit_AsyncFunctionDef = visit_FunctionDef  # type: ignore[assignment]
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:  # noqa: N802
+        # Mirror _collect_bindings: the class name is part of the scope path,
+        # so a method's lookup key matches the map built for it. Without this
+        # the resolver asks for ("helper",) while the pre-pass stored
+        # ("Widget", "helper") and the lookup silently falls back to module
+        # scope (v3.8.46 in-release BLOCK).
+        self._fnstack.append(node.name)
+        self.generic_visit(node)
+        self._fnstack.pop()
 
     # --- binding --------------------------------------------------------
     def _bind(self, target: ast.AST, value: ast.AST) -> None:
@@ -400,13 +525,13 @@ class _ScopeResolver(ast.NodeVisitor):
             return
         # `op = open` / `rm = os.unlink` — alias a callable, not a path.
         if isinstance(value, ast.Name) and (value.id in BUILTIN_IO
-                                            or value.id in self._funcalias):
-            self._funcalias[target.id] = self._funcalias.get(value.id, "open")
+                                            or self._func_of(value.id)):
+            self._funcalias[target.id] = self._func_of(value.id) or "open"
             return
         if (isinstance(value, ast.Attribute) and isinstance(value.value, ast.Name)
-                and (self._modalias.get(value.value.id, value.value.id),
+                and (self._mod_of(value.value.id),
                      value.attr) in FUNC_IO):
-            mod = self._modalias.get(value.value.id, value.value.id)
+            mod = self._mod_of(value.value.id)
             self._funcalias[target.id] = f"{mod}.{value.attr}"
             return
         # `fn = p.write_text` — a BOUND METHOD taken as an attribute rather than
@@ -426,32 +551,19 @@ class _ScopeResolver(ast.NodeVisitor):
                 return
             self._scopes[-1][target.id] = kind
 
-    def visit_Import(self, node: ast.Import) -> None:  # noqa: N802
-        for a in node.names:
-            if a.name in {"os", "shutil"}:
-                self._modalias[a.asname or a.name] = a.name
-        self.generic_visit(node)
 
-    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:  # noqa: N802
-        if node.module in {"os", "shutil"}:
-            for a in node.names:
-                # v3.8.45 (round-28 P2): `from shutil import *` binds every
-                # covered function under its bare name, and matching only
-                # explicit names dropped all of them in SILENCE — the third
-                # spelling of the alias defect. A star import binds the whole
-                # module surface, so register the whole covered surface.
-                if a.name == "*":
-                    for mod, fname in FUNC_IO:
-                        # A module-local `def copy(...)` SHADOWS the star
-                        # import at that name, and `copy`/`move`/`remove` are
-                        # common verbs. Attributing a local helper to shutil
-                        # would be a false positive on ordinary code
-                        # (v3.8.45 in-release, ast-parsing checklist WARN).
-                        if mod == node.module and fname not in self._local_defs:
-                            self._funcalias.setdefault(fname, f"{mod}.{fname}")
-                elif (node.module, a.name) in FUNC_IO:
-                    self._funcalias[a.asname or a.name] = f"{node.module}.{a.name}"
-        self.generic_visit(node)
+    # --- alias resolution (scope-resolved, not walk-order) ---------------
+    def _mods(self) -> dict:
+        return self._bindings.get(tuple(self._fnstack), self._bindings[()])[0]
+
+    def _funcs(self) -> dict:
+        return self._bindings.get(tuple(self._fnstack), self._bindings[()])[1]
+
+    def _mod_of(self, name: str) -> str:
+        return self._mods().get(name, name)
+
+    def _func_of(self, name: str):
+        return self._funcalias.get(name) or self._funcs().get(name)
 
     def visit_Assign(self, node: ast.Assign) -> None:  # noqa: N802
         for t in node.targets:
@@ -471,6 +583,15 @@ class _ScopeResolver(ast.NodeVisitor):
 
     # --- classification -------------------------------------------------
     def _classify_expr(self, expr: ast.AST) -> str:
+        # os.path.join takes MANY path operands and the last absolute one wins
+        # at runtime, so following argument 0 alone can miss a governed path in
+        # a later position (in-release auditor WARN). Classify every operand
+        # and let governed dominate — over-reporting is the safe direction.
+        if (isinstance(expr, ast.Call) and isinstance(expr.func, ast.Attribute)
+                and expr.func.attr == "join" and len(expr.args) > 1):
+            kinds = [self._classify_base(_base_symbol(a)) for a in expr.args]
+            if "governed" in kinds:
+                return "governed"
         base = _base_symbol(expr)
         return self._classify_base(base)
 
@@ -533,8 +654,8 @@ class _ScopeResolver(ast.NodeVisitor):
 
         if isinstance(fn, ast.Attribute):
             if isinstance(fn.value, ast.Name) and (
-                    self._modalias.get(fn.value.id, fn.value.id), fn.attr) in FUNC_IO:
-                mod = self._modalias.get(fn.value.id, fn.value.id)
+                    self._mod_of(fn.value.id), fn.attr) in FUNC_IO:
+                mod = self._mod_of(fn.value.id)
                 label = f"{mod}.{fn.attr}"
                 npaths = 2 if (mod, fn.attr) in TWO_PATH_FUNCS else 1
                 ops, opaque = _operands(npaths)
@@ -554,11 +675,11 @@ class _ScopeResolver(ast.NodeVisitor):
             _b, _a = self._scopes[-1][f"@bound:{fn.id}"].split("|", 1)
             cands.append((_b, _a))
         elif isinstance(fn, ast.Name) and (
-                fn.id in BUILTIN_IO or self._funcalias.get(fn.id) is not None):
+                fn.id in BUILTIN_IO or self._func_of(fn.id) is not None):
             # `op = open` and `from os import unlink as remove_file` were both
             # dropped in silence: the callee is a bare Name that is not literally
             # `open`. Aliases are resolved through _funcalias.
-            label = self._funcalias.get(fn.id) or "open"
+            label = self._func_of(fn.id) or "open"
             npaths = 2 if label in TWO_PATH_LABELS else 1
             ops, opaque = _operands(npaths)
             for a in ops:
@@ -579,6 +700,14 @@ class _ScopeResolver(ast.NodeVisitor):
             pos = [self._classify_expr(a) for a in node.args]
             kw = {k.arg: self._classify_expr(k.value)
                   for k in node.keywords if k.arg is not None}
+            # v3.8.46 (round-29 P2): `sink(**{"p": ROOT / "x"})` left the
+            # callee's parameter unseeded, so the write inside stayed a passing
+            # `unresolved` line. A literal dict is readable; read it.
+            for k in node.keywords:
+                if k.arg is None and isinstance(k.value, ast.Dict):
+                    for key, val in zip(k.value.keys, k.value.values):
+                        if isinstance(key, ast.Constant) and isinstance(key.value, str):
+                            kw[key.value] = self._classify_expr(val)
             if "governed" in pos or "governed" in kw.values():
                 self.local_calls.append((tuple(self._fnstack), fn.id, pos, kw))
         for base, method in cands:
@@ -650,10 +779,9 @@ def _resolve_module(tree: ast.AST) -> _ScopeResolver:
     _params = sum(len(n.args.posonlyargs) + len(n.args.args) + len(n.args.kwonlyargs) + 1
                   for n in ast.walk(tree)
                   if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)))
-    local_defs = frozenset(n.name for n in ast.walk(tree)
-                           if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)))
+    bindings, _module_defs = _collect_bindings(tree)
     seed: dict[tuple[str, ...], set[str]] = {}
-    r = _ScopeResolver(seed, local_defs)
+    r = _ScopeResolver(seed, bindings)
     r.visit(tree)
     for _ in range(_params + 1):
         grew = False
@@ -681,12 +809,18 @@ def _resolve_module(tree: ast.AST) -> _ScopeResolver:
                 elif fnode.args.vararg is not None:
                     want.add(fnode.args.vararg.arg)   # collected into *args
             want |= {k for k, v in kw.items() if v == "governed" and k in byname}
+            # A governed keyword the callee does not name by hand is collected
+            # into **kwargs, and `kwargs["p"]` reaches it by subscript
+            # (round-29 P2). Seed the container.
+            if fnode.args.kwarg is not None and any(
+                    v == "governed" and k not in byname for k, v in kw.items()):
+                want.add(fnode.args.kwarg.arg)
             if want - seed.get(key, set()):
                 seed.setdefault(key, set()).update(want)
                 grew = True
         if not grew:
             break
-        r = _ScopeResolver(seed, local_defs)
+        r = _ScopeResolver(seed, bindings)
         r.visit(tree)
     return r
 

@@ -652,6 +652,17 @@ def redact_secrets(obj):
     return obj
 
 
+class GuardRefusal(OSError):
+    """A guarded operation REFUSED — containment, or an unsafe leaf/ancestor.
+
+    v3.8.46 (in-release, security-auditor WARN): callers were left string-
+    matching or treating every OSError alike, so a read-only checkout and a
+    symlink pointing out of the repo produced the same reaction. They are not
+    the same event: one is an environment, the other is tampering. Subclassing
+    OSError keeps every existing `except OSError` contract intact.
+    """
+
+
 def open_dir_chain(root, parent, create: bool = False) -> int:
     """Open `parent` as a directory fd WITHOUT ever resolving a multi-component
     path. Caller owns the returned fd and must close it.
@@ -689,11 +700,11 @@ def open_dir_chain(root, parent, create: bool = False) -> int:
     if rel == os.curdir:
         parts: list[str] = []
     elif rel == os.pardir or rel.startswith(os.pardir + os.sep) or os.path.isabs(rel):
-        raise OSError(f"path escapes the root: {parent}")
+        raise GuardRefusal(f"path escapes the root: {parent}")
     else:
         parts = [c for c in rel.split(os.sep) if c and c != os.curdir]
     if any(c == os.pardir for c in parts):
-        raise OSError(f"parent traversal is not allowed in a guarded path: {parent}")
+        raise GuardRefusal(f"parent traversal is not allowed in a guarded path: {parent}")
     fd = os.open(str(root), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     try:
         for comp in parts:
@@ -711,6 +722,38 @@ def open_dir_chain(root, parent, create: bool = False) -> int:
     except BaseException:
         os.close(fd)
         raise
+
+
+def safe_mkdir(path, root=None, mode: int = 0o755) -> None:
+    """Create `path` (and missing parents) WITHOUT ever resolving a
+    multi-component path — the mkdir counterpart to `safe_atomic_write`.
+
+    v3.8.46 (round-29 P2 x3) — the class this round is really about. Three call
+    sites created a directory with a raw `mkdir(parents=True)` and THEN wrote
+    into it with a guarded writer. The guard did its job and refused; the
+    directory had already been created, outside the repo, through a symlinked
+    ancestor. The allowlist reasons I wrote for those three exemptions said
+    "creates X immediately before a safe_atomic_write into it" — which states
+    the wrong order in my own words, three times. A guard that runs after the
+    mutation is a report, not a control.
+
+    `open_dir_chain(create=True)` already descends one component at a time from
+    the root with `O_NOFOLLOW|O_DIRECTORY`, so every component is created inside
+    the tree or not at all; this just exposes it as a mkdir and owns the fd.
+    Raises OSError on refusal — callers map that to their existing contract.
+    """
+    if root is None:
+        root = repo_root()
+    try:
+        fd = open_dir_chain(root, Path(path), create=True)
+    except OSError as e:
+        raise GuardRefusal(f"refusing to create a directory outside the repo or "
+                           f"through an unsafe ancestor: {path} ({e})") from e
+    try:
+        if mode != 0o755:
+            os.fchmod(fd, mode & INHERIT_MODE_MASK)
+    finally:
+        os.close(fd)
 
 
 def dir_fd_still_live(root, parent, dir_fd: int) -> bool:
@@ -788,7 +831,7 @@ def safe_atomic_write(target, text, root=None, tmp_prefix: str = ".saw-",
     try:
         dir_fd = open_dir_chain(root, parent, create=make_parents)
     except OSError as e:
-        raise OSError(f"write target parent escapes the repo or is unusable: {target} ({e})") from e
+        raise GuardRefusal(f"write target parent escapes the repo or is unusable: {target} ({e})") from e
     try:
         tmp_name = None
         tfd = None
@@ -849,7 +892,7 @@ def safe_atomic_write(target, text, root=None, tmp_prefix: str = ".saw-",
             # reported as done but absent from the requested path is exactly the
             # silent false success this series exists to remove.
             if not dir_fd_still_live(root, parent, dir_fd):
-                raise OSError(
+                raise GuardRefusal(
                     f"write parent was renamed during the write — the bytes landed in a "
                     f"detached directory and {target} was NOT updated")
         finally:
@@ -935,8 +978,8 @@ def locked_atomic_append(target: Path, entry: str, header: str, tmp_prefix: str,
     try:
         dir_fd = open_dir_chain(root, parent, create=True)
     except OSError as e:
-        raise OSError(f"append target parent escapes the repo or has an unsafe "
-                      f"ancestor: {target} ({e})") from e
+        raise GuardRefusal(f"append target parent escapes the repo or has an unsafe "
+                           f"ancestor: {target} ({e})") from e
     try:
         try:
             timeout_s = float(os.environ.get("SUBSTRATE_APPEND_LOCK_TIMEOUT") or 10.0)

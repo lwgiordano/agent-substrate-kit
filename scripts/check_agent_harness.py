@@ -47,12 +47,24 @@ def _glob(pats):
     # inventory — the scan returned ok with a quietly lower count, which is the
     # same false-green a broken symlink used to produce. Non-regular existing
     # surfaces go to `bad` so main() BLOCKs them instead of skipping them.
+    # v3.8.46 (round-29 P3): a HARD LINK is a regular file — is_symlink() is
+    # False and is_file() is True — so a governed prompt surface hard-linked to
+    # an outside file scanned as ordinary and returned ok, leaving AGENTS.md
+    # writable through an alias the scan never sees. This is the oldest reader
+    # in the kit and it predates refuse_linked_leaf; every newer reader refuses
+    # st_nlink > 1 and this one still did not. Grouped with the non-regular
+    # surfaces so main() BLOCKs rather than silently trusting it.
     out=set(); links=set(); bad=set()
     for pat in pats:
         cands = ROOT.glob(pat) if '*' in pat else ([ROOT/pat] if (ROOT/pat).is_symlink() or (ROOT/pat).exists() else [])
         for p in cands:
             if p.is_symlink(): links.add(p)
-            elif p.is_file(): out.add(p)
+            elif p.is_file():
+                try:
+                    linked = p.lstat().st_nlink > 1
+                except OSError:
+                    linked = True     # cannot prove it is private: fail closed
+                (bad if linked else out).add(p)
             elif p.exists(): bad.add(p)
     return out, links, bad
 def main():
@@ -67,7 +79,8 @@ def main():
     for p in sorted((ctx_bad|code_bad)):
         if p in skip: continue
         rel=p.relative_to(ROOT).as_posix()
-        findings.append(("governed surface is not a regular file (fifo/socket/device) "
+        findings.append(("governed surface is not a private regular file "
+                         "(fifo/socket/device, or a hard link sharing an outside inode) "
                          "— refusing to skip it", rel, 0))
     # v3.8.39/40 (round-22/23): a symlinked governed DIRECTORY — or ANY ancestor
     # of one — redirects or shrinks the glob under it while the per-file scan

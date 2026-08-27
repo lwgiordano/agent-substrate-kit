@@ -70,6 +70,25 @@ except Exception:  # pragma: no cover - stripped install
     def _safe_read_text(path, root=None, max_bytes=None, tail_bytes=None):
         return None
 
+# v3.8.46 (round-29 P2): guarded mkdir. A raw mkdir(parents=True) BEFORE a
+# guarded write creates the directory through a symlinked ancestor and only
+# then gets refused — the mutation has already happened outside the repo.
+# Its OWN try/except: an in-release auditor BLOCK caught this block spliced
+# into the one above, so on an install that had safe_read_text but not
+# safe_mkdir the successfully imported reader was overwritten by a None stub —
+# and _sandbox_required() reads the sandbox lock through it, so a tier that
+# should have been REQUIRED silently became optional. A fallback for one import
+# must never disarm another.
+try:
+    from _doc_common import GuardRefusal as _GuardRefusal
+    from _doc_common import safe_mkdir as _safe_mkdir
+except Exception:  # pragma: no cover - stripped install
+    class _GuardRefusal(OSError):
+        pass
+
+    def _safe_mkdir(*a, **k):
+        raise _GuardRefusal("safe_mkdir unavailable — refusing an unguarded mkdir")
+
 
 def _d(b64: str) -> str:
     return base64.b64decode(b64).decode()
@@ -206,14 +225,19 @@ def _write_progress(no_trace, current, done):
     if no_trace:
         return
     try:
-        TRACES.mkdir(parents=True, exist_ok=True)
+        _safe_mkdir(TRACES, ROOT)
         _safe_atomic_write(
             TRACES / "evals_progress.json",
             json.dumps({"current_task": current, "completed": False,
                         "done": [r["id"] for r in done]}, indent=2),
             root=ROOT, tmp_prefix=".trace-")
-    except Exception:
-        pass
+    except Exception as e:
+        # v3.8.46 (round-29 P2): `except: pass` here meant a CONTAINMENT REFUSAL
+        # — .substrate pointing outside the repo — looked identical to a disk
+        # blip, and the run carried on reporting green. The sentinel itself is
+        # advisory, so this does not fail the run; it must never be silent.
+        print(f"substrate-evals: could not write the progress trace: {e}",
+              file=sys.stderr)
 
 
 # ---- task helpers: each returns (blocked: bool, detail: str) ----
@@ -924,6 +948,39 @@ def t_history_fifo_no_hang():
         return p.returncode != 0, f"rc={p.returncode}"
 
 
+def t_mkdir_creates_nothing_outside_the_repo():
+    """v3.8.46 (round-29 P2 x3): a raw mkdir(parents=True) BEFORE a guarded
+    write created the directory through a symlinked ancestor and only THEN got
+    refused — the outside mutation had already happened. safe_mkdir must refuse
+    without creating anything."""
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        _stage(td, "_doc_common.py", "_substrate_root.py")
+        outside = td / "outside"
+        outside.mkdir()
+        (td / "ai").symlink_to(outside)
+        driver = td / "scripts" / "_eval_mkdir.py"
+        driver.write_text(
+            "import sys\n"
+            "from pathlib import Path\n"
+            "sys.path.insert(0, str(Path(__file__).resolve().parent))\n"
+            "import _doc_common as dc\n"
+            "repo = Path(sys.argv[1])\n"
+            "try:\n"
+            "    dc.safe_mkdir(repo / 'ai' / 'audits' / 'x', root=repo)\n"
+            "except OSError:\n"
+            "    print('REFUSED')\n"
+            "    sys.exit(0)\n"
+            "print('CREATED')\n"
+            "sys.exit(1)\n", encoding="utf-8")
+        p = subprocess.run([PY, "-I", str(driver), str(td)],
+                           capture_output=True, text=True, timeout=30)
+        made = list(outside.iterdir())
+        if p.returncode == 0 and "REFUSED" in p.stdout and not made:
+            return True, "refused without creating anything outside"
+        return False, f"rc={p.returncode} outside={[x.name for x in made]}"
+
+
 def t_detached_parent_write_refused():
     """v3.8.45 (round-28 P1): a parent renamed AFTER the guarded write captured
     its fd means the bytes land in a detached directory while the live target is
@@ -1104,6 +1161,8 @@ TASKS = [
     ("completion_gate_unaudited", "malicious", "block", t_completion_gate_unaudited, True),
     ("raw_io_gate_catches_new_unguarded_write", "malicious", "block",
      t_raw_io_gate_catches_new_unguarded_write, True),
+    ("mkdir_creates_nothing_outside_the_repo", "malicious", "block",
+     t_mkdir_creates_nothing_outside_the_repo, False),
     ("detached_parent_write_refused", "malicious", "block",
      t_detached_parent_write_refused, False),
     ("raw_io_gate_catches_wrapped_governed_write", "malicious", "block",
@@ -1375,7 +1434,7 @@ def main(argv) -> int:
 
     if not no_trace:
         try:
-            TRACES.mkdir(parents=True, exist_ok=True)
+            _safe_mkdir(TRACES, ROOT)
             _safe_atomic_write(
                 TRACES / f"evals-{trace['ran_at_utc'].replace(':', '').replace('-', '')}.json",
                 json.dumps(trace, indent=2), root=ROOT, tmp_prefix=".trace-")
@@ -1385,8 +1444,28 @@ def main(argv) -> int:
                 json.dumps({"current_task": None, "completed": True,
                             "done": [r["id"] for r in results]}, indent=2),
                 root=ROOT, tmp_prefix=".trace-")
-        except Exception:
-            pass
+        except Exception as e:
+            # v3.8.46 (round-29 P2): this swallowed the guarded-write failure,
+            # so a run whose .substrate was a symlink OUT of the repo mutated
+            # outside and still printed ok. safe_mkdir now refuses before
+            # creating anything, and the refusal is reported rather than
+            # discarded — an evals runner that cannot record its own result
+            # must not claim the result is recorded.
+            # v3.8.46 in-release (security-auditor WARN): failing the run on
+            # ANY trace-write error hard-fails a legitimately read-only
+            # checkout for an infrastructure reason, with a message about
+            # malicious tasks that has nothing to do with what happened. Only
+            # a REFUSAL — containment, or an unsafe ancestor — is a security
+            # event, and that is now a distinct exception type rather than a
+            # string match. Everything else is reported and the run stands.
+            metrics["trace_write_failed"] = str(e)
+            if isinstance(e, _GuardRefusal):
+                print(f"substrate-evals: BLOCK: the trace path is not contained "
+                      f"in the repo — {e}", file=sys.stderr)
+                metrics["passed"] = False
+            else:
+                print(f"substrate-evals: could not write the run trace: {e}",
+                      file=sys.stderr)
 
     if "--report" in argv:
         try:

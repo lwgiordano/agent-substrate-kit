@@ -1,6 +1,6 @@
 ---
 purpose: Agent context inventory, harness scanning, budgets, and doc drift.
-last_human_reviewed: 2026-08-26
+last_human_reviewed: 2026-08-27
 covers:
   - agentsync.sh
   - manage.sh
@@ -117,6 +117,13 @@ CLAIM EXPANSION refresh; an expired lease is reclaimable by any agent, and ONLY
 via an explicit RECLAIM — a foreign CLAIM/HEARTBEAT/RELEASE on a lapsed lease is
 a reported no-op, not a silent takeover). Advisory only — coordination state is
 never a gate input.
+
+The harness scan applies the same leaf rules to the surfaces it inventories. A
+governed prompt file that is a symlink, a FIFO/socket/device, or a HARD LINK
+sharing an inode with a file outside the repo is a BLOCK rather than an ordinary
+regular file: `is_symlink()` is False and `is_file()` is True for a hard link, so
+without an explicit `st_nlink > 1` check an outside alias stays writable while
+the scan reports ok. A surface whose link count cannot be read fails closed.
 
 `agentsync.sh` is the transport: it appends a one-line entry to the bus and
 pull/pushes the branch so two agent checkouts share work. As a governed root

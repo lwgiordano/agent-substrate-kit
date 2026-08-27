@@ -82,6 +82,18 @@ MEM = ROOT / ".substrate" / "memory"
 EVENTS = MEM / "events.jsonl"
 ZERO = "0" * 64
 
+# v3.8.46 (round-29 P1, found by the gate once os.path.join(ROOT, ...) was
+# classified as repo-derived): the signature hasher below read every tracked
+# file with a bare open(fp, "rb") after an lstat said S_ISREG — stat-then-open,
+# so a hard link passes both and an ancestor can be swapped between them. This
+# is the MEMORY CHAIN's own signature; a hash taken over bytes the guard never
+# approved is the one thing it must not produce.
+try:
+    from _doc_common import safe_read_bytes as _safe_read_bytes
+except Exception:  # pragma: no cover - stripped install
+    def _safe_read_bytes(path, root=None, max_bytes=None, tail_bytes=None):
+        return None
+
 try:
     from _doc_common import safe_read_text as _safe_read_text
 except Exception:  # pragma: no cover - inline mirror for a stripped install
@@ -426,8 +438,22 @@ def _raw_tracked_hash():
                 h.update(f"|link:{len(target)}:".encode())
                 h.update(target)
             elif stat.S_ISREG(lst.st_mode):
-                with open(fp, "rb") as fh:
-                    content = fh.read()
+                # Guarded read (v3.8.46): O_NOFOLLOW|O_NONBLOCK, fstat S_ISREG
+                # and st_nlink == 1 on the OPENED fd, and a live-parent check —
+                # the lstat above proves nothing about what open() would get.
+                # None means unreadable or unsafe; the outer handler turns that
+                # into a None signature, which is the fail-closed contract.
+                content = _safe_read_bytes(fp, ROOT, max_bytes=None)
+                if content is None:
+                    # Fail closed — but SAY SO. The outer handler turns this
+                    # into a None signature, and a chain that goes None without
+                    # explanation is indistinguishable from a bug (in-release
+                    # auditor WARN). A tracked file with st_nlink > 1 is the
+                    # likely cause and it is not obvious from the outside.
+                    print("memory-log: refusing to hash a tracked file that is "
+                          f"not a private regular file (symlink/hard link/FIFO): {fp}",
+                          file=sys.stderr)
+                    raise OSError(f"unsafe or unreadable tracked file: {fp}")
                 # Fold the PERMISSION BITS in too (v3.8.20 / memory:255): a 0644->0755 flip on a
                 # tracked-but-ignored path is invisible to the temp-index write-tree (add -A skips
                 # ignored paths) and to a bytes-only raw hash; and under core.filemode=false the

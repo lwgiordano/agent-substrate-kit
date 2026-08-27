@@ -534,6 +534,100 @@ shape.** If an allowlist entry silently starts covering more code than the
 reviewer read, it has become the thing it was supposed to prevent. Count the
 matches and fail when the count moves.
 
+## Round 9 — v3.8.46 (round-29): the guard ran after the mutation
+
+Round 29's three P2s are the most important findings of the round, above two of
+its P1s. Three call sites created a directory with a raw `mkdir(parents=True)`
+and *then* wrote into it with a guarded writer. The guard did its job and
+refused — and the directory had already been created, outside the repo, through
+a symlinked ancestor. `substrate_audit` left `<outside>/audits/<stamp>/`;
+`run_substrate_evals` left `<outside>/traces/` **and printed `ok`**, because it
+swallowed the guarded-write failure with `except: pass`.
+
+The damning part is the allowlist. Each of those three raw mkdirs carried an
+exemption I had written, and each reason said the same thing:
+
+> "creates `.substrate/traces` **immediately before** a `safe_atomic_write` into
+> it; that writer re-validates containment and anchors to the parent fd"
+
+That states the wrong order, in my own words, three times, and it was reviewed
+three times. The guarded writer's containment is *irrelevant* to a directory
+that already exists by the time it runs. A control placed after the mutation is
+a report.
+
+`safe_mkdir()` now builds on `open_dir_chain(create=True)` — the descent that
+never resolves a multi-component path — so every component is created inside the
+tree or not at all. The three exemptions were deleted rather than reworded, and
+the swallowed failure is now reported (the final trace failure marks the run
+failed: an evals runner that cannot record its own result must not claim it did).
+
+### Four P1s in the gate, and they were one design error
+
+Aliases were learned *during* the same ordered visit that scans function bodies,
+and kept in flat module-wide dicts. That single choice produced three separate
+escapes: a function using an alias bound by a **later** import line was dropped
+entirely (valid Python — the import runs before the call does); a nested `import
+os as io` clobbered a sibling function's module-level `import shutil as io`; and
+the v3.8.45 star-import shadow fix collected def names with `ast.walk`, so an
+unrelated **nested** `def copy` suppressed a real `from shutil import *` call.
+
+That last one deserves naming plainly: it is the `ast.walk` scope-collapse
+mistake an auditor caught in v3.8.44, in a different function, which I fixed
+there and then reintroduced two releases later in code written to fix something
+else. Knowing a bug class is not the same as having a habit that prevents it.
+
+Binding structure is a property of the module's *shape*, not of the order a
+walker happens to reach things, so it is now resolved in a pre-pass with module
+scope kept separate from function scope.
+
+The fourth P1 was smaller and more embarrassing: `os.path.join(ROOT, ...)` was
+not in the transparent-wrapper list. That list was the wrappers I happened to
+think of — `str`, `Path`, `fspath`, `resolve` — and `os.path.join` is the most
+ordinary way anyone builds a path. Adding it immediately surfaced a real
+unguarded read **in the memory chain's own signature hasher**: every tracked
+file was read with a bare `open(fp, "rb")` after an `lstat` said `S_ISREG`.
+Stat-then-open, so a hard link passes both checks. A signature computed over
+bytes the guard never approved is the one thing a memory chain must not produce.
+
+### Four in-release findings, three of them BLOCKs in the new code
+
+- **The binding pre-pass had two blind scopes.** `_scope_body` walked
+  body/orelse/finalbody and handler bodies, but `match`/`case` keeps its
+  statements under `.cases[i].body` — so an import inside a case was invisible
+  and the call using it produced neither a finding nor an `unresolved` line.
+  And `_descend` passed the scope path through unchanged for a `ClassDef`, so a
+  method's key collided with a same-named module-level function and whichever
+  the walk reached **last** overwrote the other's bindings: an order-dependent
+  silent fail-open. Both were in the pass written *to make binding resolution
+  correct*.
+- **A fallback for one import disarmed another.** The `safe_mkdir` try/except
+  was spliced into the `safe_atomic_write`/`safe_read_text` one, so on an
+  install that had the reader but not the mkdir, the successfully imported
+  reader was overwritten by a `None` stub — and the sandbox lock is read through
+  it, so a tier that should have been REQUIRED silently became optional. There
+  is now a test that reads the AST of every guarded-helper fallback and asserts
+  no handler defines a stub for a helper its own `try` did not import.
+- **Failing the run on any trace-write error was too broad.** A read-only
+  checkout would hard-fail for an infrastructure reason, under a message about
+  malicious tasks. Only a refusal is a security event, so refusals are now a
+  distinct exception type (`GuardRefusal`, subclassing `OSError` so every
+  existing contract holds) rather than a string match.
+- **A `None` memory signature said nothing about why.** Fail-closed is right;
+  fail-closed and silent is a chain break nobody can diagnose, so the refusal
+  now names the file and the reason.
+
+**Carry-forward rule, part 11 — order is part of the guard.** "Guarded write"
+does not make a sequence safe; the *first* operation that touches the filesystem
+is the one that needs the guard. When reviewing an exemption, read the reason as
+a claim about ordering and check it against the code — three reasons here
+described the wrong order and survived three reviews.
+
+**Carry-forward rule, part 12 — a fixed bug class is not a fixed habit.** The
+`ast.walk` scope collapse was found, understood, documented and fixed, and then
+written again two releases later by the same author in new code. Bug classes
+recur through the people who know about them, so the check has to live in the
+tool, not in the memory of whoever last read the postmortem.
+
 ## (Optional) Reproduction
 
 In a disposable repo: `ln victim.txt AGENT_BUS.md` then

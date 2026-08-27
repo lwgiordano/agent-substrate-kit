@@ -6,7 +6,7 @@ asserts:
   - scripts/_doc_common.py::locked_atomic_append
   - scripts/session_handoff.py::_safe_history_line
   - scripts/session_handoff.py::_rejected_block
-last_human_reviewed: 2026-08-26
+last_human_reviewed: 2026-08-27
 covers:
   - manage.sh
   - scripts/_doc_common.py
@@ -80,15 +80,38 @@ re-resolved by path: a parent swapped while an appender waits on the lock now
 fails closed instead of redirecting the write, and the bytes land in the inode
 that was locked or nowhere.
 
-`safe_atomic_write` is the write-side counterpart: it opens the parent
-`O_DIRECTORY|O_NOFOLLOW`, re-validates that the path still names the opened
-inode, and then creates, writes, and `os.replace`s entirely through that
-directory fd using basenames. Replacing the directory entry breaks a hard link
-and never writes through a symlinked leaf, and anchoring to the fd means a
-parent swapped after the guard cannot redirect the write. Where a guarded stat
-is followed by an open, the opened fd is re-verified against the inode the stat
-approved — statting a path and then opening it by name is check-then-use however
-well the stat is guarded.
+`safe_atomic_write` is the write-side counterpart, and how it reaches the parent
+is the load-bearing part. It never resolves a multi-component path: `open_dir_chain`
+opens the ROOT once and descends ONE COMPONENT AT A TIME with
+`O_DIRECTORY|O_NOFOLLOW` and `dir_fd=`, then the temp file is created, written and
+`os.replace`d entirely through that fd using basenames. A dev/ino re-validation
+after a whole-path open cannot work — by the time it runs the kernel has already
+followed a swapped intermediate ancestor and the comparison approves the rerouted
+directory against itself. Descending component by component removes the window
+instead of checking for it, which makes containment a property of how the work is
+done rather than a test performed beforehand.
+
+Anchoring to a fd has one limit, and it is checked rather than assumed: the fd
+says nothing about whether that inode is still REACHABLE at the requested path. A
+parent renamed after capture leaves the write landing in a detached directory
+while the live target is untouched, so `dir_fd_still_live` re-descends AFTER the
+operation and compares identities; a mismatch is a refusal, not a success. The
+same applies to reads, which return None rather than detached bytes.
+
+`safe_mkdir` completes the set. A raw `mkdir(parents=True)` followed by a guarded
+write creates the directory through a symlinked ancestor and only then gets
+refused — the mutation has already happened outside the repo. Building the mkdir
+on the same descent means every component is created inside the tree or not at
+all. Order is part of the guard: the FIRST operation that touches the filesystem
+is the one that needs it.
+
+Where a guarded stat is followed by an open, the opened fd is re-verified against
+the inode the stat approved — statting a path and then opening it by name is
+check-then-use however well the stat is guarded. The memory chain's own signature
+hasher reads every tracked file through the guarded reader for exactly this
+reason: an `lstat` reporting `S_ISREG` is passed by a hard link too, and a
+signature computed over bytes the guard never approved is the one thing a chain
+must not produce.
 
 Readers carry the same guarantees as writers. `safe_read_text` is the read-side
 counterpart — containment, `O_NOFOLLOW | O_NONBLOCK`, `S_ISREG`, single link,

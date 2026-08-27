@@ -66,7 +66,7 @@
         "scripts/session_handoff.py",
         "scripts/todo_state_hook.py"
       ],
-      "last_human_reviewed": "2026-08-26",
+      "last_human_reviewed": "2026-08-27",
       "path": "docs/knowledge/03_memory_sessions.md",
       "purpose": "Tamper-evident memory, session restore, completion, and append-only logs."
     },
@@ -92,7 +92,7 @@
         "scripts/setup_branch_protection.sh",
         "scripts/substrate_profile.py"
       ],
-      "last_human_reviewed": "2026-08-26",
+      "last_human_reviewed": "2026-08-27",
       "path": "docs/knowledge/04_policy_governance.md",
       "purpose": "Command policy, hooks, sandboxing, and local or remote governance."
     },
@@ -125,7 +125,7 @@
         "scripts/run_substrate_evals.py",
         "scripts/substrate_audit.py"
       ],
-      "last_human_reviewed": "2026-08-26",
+      "last_human_reviewed": "2026-08-27",
       "path": "docs/knowledge/05_evals_assurance.md",
       "purpose": "Behavioral evals, deterministic validators, audits, and assurance limits."
     },
@@ -164,7 +164,7 @@
         "scripts/session_handoff.py",
         "scripts/todo_state_hook.py"
       ],
-      "last_human_reviewed": "2026-08-26",
+      "last_human_reviewed": "2026-08-27",
       "path": "docs/knowledge/07_agent_context_governance.md",
       "purpose": "Agent context inventory, harness scanning, budgets, and doc drift."
     }

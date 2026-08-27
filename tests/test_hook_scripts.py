@@ -5363,7 +5363,9 @@ def test_harness_blocks_non_regular_governed_surface(tmp_path) -> None:
     p = subprocess.run([sys.executable, "scripts/check_agent_harness.py"],
                        cwd=repo, capture_output=True, text=True, timeout=30, env=_HERMETIC_ENV)
     assert p.returncode == 1, (p.returncode, (p.stdout + p.stderr)[-300:])
-    assert "not a regular file" in (p.stdout + p.stderr)
+    # v3.8.46 widened this to name hard links as well ("not a private regular
+    # file (fifo/socket/device, or a hard link sharing an outside inode)").
+    assert "regular file" in (p.stdout + p.stderr)
 
 
 def test_harness_blocks_empty_scan_root(tmp_path) -> None:
@@ -6007,6 +6009,280 @@ def test_raw_io_gate_catches_every_round28_evasion(tmp_path) -> None:
     assert "Traceback" not in out
 
 
+def test_raw_io_gate_resolves_bindings_by_scope_not_by_walk_order(tmp_path) -> None:
+    """round-29 P1 x4 — one design error wearing four hats.
+
+    Aliases were learned DURING the same ordered visit that scans bodies, and
+    kept in flat module-wide dicts. So a function using an alias bound by a
+    LATER import line was dropped (valid Python — the import runs before the
+    call does); a nested `import os as io` clobbered a sibling's module-level
+    `import shutil as io`; and the v3.8.45 star-import shadow fix collected def
+    names with `ast.walk`, so an unrelated NESTED `def copy` suppressed a real
+    `from shutil import *` call — the ast.walk scope-collapse mistake caught in
+    v3.8.44 elsewhere, reintroduced by code written to fix something else.
+
+    The fourth: `os.path.join(ROOT, ...)` was not a recognised path
+    constructor, so the most ordinary way anyone builds a path passed the
+    build. Binding structure is now resolved in a PRE-PASS, module scope apart
+    from function scope.
+    """
+    if not (SCRIPTS / "check_raw_file_io.py").exists():
+        return
+    cases = {
+        "late_import": ('def f():\n'
+                        '    remove_file(ROOT / "docs" / "d")\n'
+                        'from os import unlink as remove_file\n'),
+        "nested_alias": ('import shutil as io\n'
+                         'def earlier():\n'
+                         '    import os as io\n'
+                         'def f(tmp_path):\n'
+                         '    io.copy(tmp_path / "s", ROOT / "docs" / "d")\n'),
+        "join": ('def f():\n'
+                 '    p = os.path.join(ROOT, "docs", "d")\n'
+                 '    open(p, "w").write("x")\n'),
+    }
+    for label, body in cases.items():
+        p, _ = _gate_probe(tmp_path, label, body)
+        out = p.stdout + p.stderr
+        assert p.returncode == 1, f"{label} evaded the gate: {out}"
+        assert "round27_probe.py" in out, f"{label} blocked for another reason: {out}"
+
+    # Star import with an unrelated NESTED def of the same name must still fire.
+    import shutil as _sh
+    star = tmp_path / "starnested"
+    star.mkdir()
+    _sh.copytree(SCRIPTS, star / "scripts", ignore=_sh.ignore_patterns("__pycache__"))
+    (star / "scripts" / "round29_star.py").write_text(
+        'from pathlib import Path\n'
+        'from shutil import *\n'
+        'ROOT = Path(__file__).resolve().parent.parent\n'
+        'def f(tmp_path):\n'
+        '    copy(tmp_path / "s", ROOT / "docs" / "d")\n'
+        'def outer():\n'
+        '    def copy(a, b):\n'
+        '        pass\n', encoding="utf-8")
+    ps = subprocess.run([sys.executable, "-I", str(SCRIPTS / "check_raw_file_io.py"),
+                         "--root", str(star)], capture_output=True, text=True, timeout=120)
+    assert ps.returncode == 1 and "round29_star.py" in (ps.stdout + ps.stderr), \
+        f"a nested def suppressed a real star-import call: {ps.stdout + ps.stderr}"
+
+    # ...and a MODULE-level def of the same name still legitimately shadows it.
+    shadow = tmp_path / "starmodule"
+    shadow.mkdir()
+    _sh.copytree(SCRIPTS, shadow / "scripts", ignore=_sh.ignore_patterns("__pycache__"))
+    (shadow / "scripts" / "round29_shadow.py").write_text(
+        'from pathlib import Path\n'
+        'from shutil import *\n'
+        'ROOT = Path(__file__).resolve().parent.parent\n'
+        'def copy(a, b):\n'
+        '    return (a, b)\n'
+        'def f(tmp_path):\n'
+        '    copy(tmp_path / "s", ROOT / "docs" / "d")\n', encoding="utf-8")
+    pm = subprocess.run([sys.executable, "-I", str(SCRIPTS / "check_raw_file_io.py"),
+                         "--root", str(shadow)], capture_output=True, text=True, timeout=120)
+    assert pm.returncode == 0, \
+        f"a module-level def shadowing a star import false-positived: {pm.stdout + pm.stderr}"
+
+
+def test_raw_io_gate_binding_prepass_has_no_blind_scopes(tmp_path) -> None:
+    """v3.8.46 in-release — BOTH auditors, BLOCK, in the pre-pass written to
+    make binding resolution correct.
+
+    `_scope_body` walked body/orelse/finalbody and handler bodies, but
+    `match`/`case` keeps its statements under `.cases[i].body`, so an import
+    inside a case was invisible and the call using it produced NEITHER a
+    finding NOR an unresolved line. And `_descend` passed the scope path
+    through unchanged for a ClassDef, so a method's key collided with a
+    same-named module-level function and whichever the walk reached LAST
+    overwrote the other's bindings — an order-dependent silent fail-open.
+    """
+    if not (SCRIPTS / "check_raw_file_io.py").exists():
+        return
+    cases = {
+        "match_case": ('def f(x):\n'
+                       '    match x:\n'
+                       '        case 1:\n'
+                       '            import shutil as sh\n'
+                       '            return sh.rmtree(ROOT / "docs")\n'),
+        # module-level def first, class method second
+        "class_after": ('def helper():\n'
+                        '    import shutil as sh\n'
+                        '    sh.copytree(ROOT / "docs", ROOT / "d2")\n'
+                        'class Widget:\n'
+                        '    def helper(self):\n'
+                        '        return 1\n'),
+        # ...and the other order, since the bug was order-dependent
+        "class_before": ('class Widget:\n'
+                         '    def helper(self):\n'
+                         '        return 1\n'
+                         'def helper():\n'
+                         '    import shutil as sh\n'
+                         '    sh.copytree(ROOT / "docs", ROOT / "d2")\n'),
+    }
+    for label, body in cases.items():
+        p, _ = _gate_probe(tmp_path, label, body)
+        out = p.stdout + p.stderr
+        assert p.returncode == 1, f"{label} produced no output at all: {out}"
+        assert "round27_probe.py" in out, f"{label} blocked for another reason: {out}"
+
+
+def test_evals_fails_only_on_a_containment_refusal(tmp_path) -> None:
+    """v3.8.46 in-release (security-auditor WARN): failing the whole evals run
+    on ANY trace-write error hard-fails a legitimately read-only checkout for
+    an infrastructure reason. Only a REFUSAL is a security event, and that is a
+    distinct exception type rather than a string match."""
+    import importlib
+    dc = importlib.import_module("_doc_common")
+    assert issubclass(dc.GuardRefusal, OSError), "must keep existing except OSError contracts"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (repo / ".substrate").symlink_to(outside)
+    with pytest.raises(dc.GuardRefusal):
+        dc.safe_mkdir(repo / ".substrate" / "traces", root=repo)
+    # An ordinary IO failure is NOT a refusal: a plain OSError must not be one.
+    assert not isinstance(OSError("disk full"), dc.GuardRefusal)
+
+
+def test_import_fallbacks_never_disarm_each_other() -> None:
+    """v3.8.46 in-release (security-auditor BLOCK): the safe_mkdir try/except
+    was spliced INTO the safe_atomic_write/safe_read_text one, so on an install
+    that had safe_read_text but not safe_mkdir the successfully imported reader
+    was overwritten by a None stub — and the sandbox lock is read through it, so
+    a tier that should have been REQUIRED silently became optional.
+
+    Pin the shape: no guarded-helper fallback may define a stub for a helper
+    whose own import succeeded in a different try block.
+    """
+    import ast as _ast
+    for name in ("run_substrate_evals.py", "substrate_audit.py",
+                 "run_security_scanners.py", "memory_log.py", "update_manifest.py"):
+        f = SCRIPTS / name
+        if not f.exists():
+            continue
+        tree = _ast.parse(f.read_text(encoding="utf-8"))
+        for node in tree.body:
+            if not isinstance(node, _ast.Try):
+                continue
+            imported = {a.asname or a.name
+                        for st in node.body if isinstance(st, _ast.ImportFrom)
+                        for a in st.names}
+            for handler in node.handlers:
+                defined = {st.name for st in handler.body
+                           if isinstance(st, (_ast.FunctionDef, _ast.AsyncFunctionDef))}
+                stray = {d for d in defined if d.startswith("_safe_") and d not in imported}
+                assert not stray, (
+                    f"{name}: fallback block defines {sorted(stray)} but its try only "
+                    f"imports {sorted(imported)} — a fallback for one helper must not "
+                    "overwrite another that imported successfully")
+
+
+def test_raw_io_gate_follows_governed_paths_into_varargs(tmp_path) -> None:
+    """round-29 P2 x2: a governed path collected into `*args`/`**kwargs` is
+    reached by SUBSCRIPT, and a literal `sink(**{"p": governed})` left the
+    callee's parameter unseeded — both left the write as a passing
+    `unresolved` line rather than a violation."""
+    if not (SCRIPTS / "check_raw_file_io.py").exists():
+        return
+    cases = {
+        "varargs": ('def sink(*args):\n    args[0].write_text("x")\n'
+                    'def f():\n    sink(ROOT / "docs" / "d")\n'),
+        "kwargs": ('def sink(**kwargs):\n    kwargs["p"].write_text("x")\n'
+                   'def f():\n    sink(p=ROOT / "docs" / "d")\n'),
+        "literal_starstar": ('def sink(p):\n    p.write_text("x")\n'
+                             'def f():\n    sink(**{"p": ROOT / "docs" / "d"})\n'),
+    }
+    for label, body in cases.items():
+        p, _ = _gate_probe(tmp_path, label, body)
+        out = p.stdout + p.stderr
+        assert p.returncode == 1, f"{label} evaded the gate: {out}"
+        assert "write_text" in out, out
+
+
+def test_guarded_mkdir_refuses_before_creating_anything(tmp_path) -> None:
+    """round-29 P2 x3 — the class this round is really about.
+
+    Three call sites created a directory with a raw `mkdir(parents=True)` and
+    THEN wrote into it with a guarded writer. The guard refused correctly; the
+    directory had already been created outside the repo through a symlinked
+    ancestor. The exemption reasons written for those three said "creates X
+    immediately before a safe_atomic_write into it" — the wrong order, stated
+    in my own words, three times. A guard that runs after the mutation is a
+    report, not a control.
+    """
+    import importlib
+    dc = importlib.import_module("_doc_common")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (repo / "ai").symlink_to(outside)
+    with pytest.raises(OSError, match="refusing to create"):
+        dc.safe_mkdir(repo / "ai" / "audits" / "stamp", root=repo)
+    assert not (outside / "audits").exists(), "created a directory outside the repo"
+    # The ordinary case still works, including missing intermediate components.
+    dc.safe_mkdir(repo / "docs" / "deep" / "nest", root=repo)
+    assert (repo / "docs" / "deep" / "nest").is_dir()
+    dc.safe_mkdir(repo / "docs" / "deep" / "nest", root=repo)   # idempotent
+
+
+def test_report_writers_create_nothing_outside_the_repo(tmp_path) -> None:
+    """The same three sites, end to end: a symlinked ancestor must leave the
+    outside tree untouched, and the refusal must be reported rather than
+    swallowed (the evals runner printed `ok` while mutating outside)."""
+    import shutil as _sh
+    for tool, link, args in (
+        ("substrate_audit.py", "ai", ["--write-report", "--mode", "quick"]),
+        ("run_substrate_evals.py", ".substrate", ["--fast"]),
+    ):
+        if not (SCRIPTS / tool).exists():
+            continue
+        repo = tmp_path / f"r_{tool}"
+        repo.mkdir()
+        _sh.copytree(SCRIPTS, repo / "scripts", ignore=_sh.ignore_patterns("__pycache__"))
+        outside = tmp_path / f"o_{tool}"
+        outside.mkdir()
+        (repo / link).symlink_to(outside)
+        p = subprocess.run([sys.executable, "-I", f"scripts/{tool}", *args],
+                           cwd=str(repo), capture_output=True, text=True, timeout=300)
+        assert not any(outside.iterdir()), \
+            f"{tool} created {list(outside.iterdir())} outside the repo"
+        if tool == "run_substrate_evals.py":
+            assert "could not write" in (p.stdout + p.stderr), \
+                f"{tool} swallowed the containment refusal: {p.stdout[-400:]}"
+
+
+def test_harness_scanner_refuses_a_hard_linked_governed_surface(tmp_path) -> None:
+    """round-29 P3: a HARD LINK is a regular file — is_symlink() False,
+    is_file() True — so a governed prompt surface hard-linked to an outside
+    file scanned as ordinary and the harness returned ok, leaving AGENTS.md
+    writable through an alias the scan never sees. Every newer reader refuses
+    st_nlink > 1; this is the oldest one and still did not."""
+    if not (SCRIPTS / "check_agent_harness.py").exists():
+        return
+    import shutil as _sh
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _sh.copytree(SCRIPTS, repo / "scripts", ignore=_sh.ignore_patterns("__pycache__"))
+    (repo / ".substrate").mkdir()
+    (repo / ".substrate" / "config").write_text('SUBSTRATE_PROFILE="standard"\n',
+                                                encoding="utf-8")
+    outside = tmp_path / "outside_agents.md"
+    outside.write_text("# outside\n", encoding="utf-8")
+    os.link(outside, repo / "AGENTS.md")
+    p = subprocess.run([sys.executable, "-I", "scripts/check_agent_harness.py"],
+                       cwd=str(repo), capture_output=True, text=True, timeout=120)
+    assert p.returncode != 0, "a hard-linked AGENTS.md scanned as an ordinary file"
+    assert "hard link" in (p.stdout + p.stderr)
+    # A normal private file is still fine — the refusal must not cost the scan.
+    (repo / "AGENTS.md").unlink()
+    (repo / "AGENTS.md").write_text("# fine\n", encoding="utf-8")
+    ok = subprocess.run([sys.executable, "-I", "scripts/check_agent_harness.py"],
+                        cwd=str(repo), capture_output=True, text=True, timeout=120)
+    assert ok.returncode == 0, f"false positive on a private file: {ok.stdout + ok.stderr}"
+
+
 def test_raw_io_gate_scans_trees_that_become_scripts(tmp_path) -> None:
     """v3.8.45 follow-on, caught by a STRICT CONSUMER'S OWN GATE the first CI run
     after the templates were wired — which is the entire argument for wiring
@@ -6217,9 +6493,13 @@ def test_raw_io_allowlist_does_not_silently_cover_extra_sites(tmp_path) -> None:
     _sh.copytree(SCRIPTS, root / "scripts", ignore=_sh.ignore_patterns("__pycache__"))
     src = root / "scripts" / "run_substrate_evals.py"
     text = src.read_text(encoding="utf-8")
-    # A THIRD site under an entry reviewed for two.
+    # A THIRD site under an entry reviewed for two. (v3.8.46: the TRACES.mkdir
+    # exemption this used to plant against was DELETED — that site is guarded
+    # now — so the over-count is exercised against the surviving two-site
+    # copytree exemption instead.)
     text += ('\n\ndef _round28_extra():\n'
-             '    TRACES.mkdir(parents=True, exist_ok=True)\n')
+             '    import shutil as _sh2\n'
+             '    _sh2.copytree(SCRIPTS, TRACES / "x")\n')
     src.write_text(text, encoding="utf-8")
     p = subprocess.run([sys.executable, "-I", str(SCRIPTS / "check_raw_file_io.py"),
                         "--root", str(root)], capture_output=True, text=True, timeout=120)

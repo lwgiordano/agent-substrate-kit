@@ -35,6 +35,7 @@ try:
 except Exception:
     ROOT = Path.cwd()
 import json
+import stat
 
 from _doc_common import read_lock as _dc_read_lock
 from _doc_common import safe_read_text as _dc_safe_read_text
@@ -97,7 +98,24 @@ def _shell_danger_patterns():
     file is caught earlier by check_harness_patterns.py.)"""
     try:
         p = Path(__file__).resolve().parent / "harness_patterns.json"
-        data = json.loads(p.read_text(encoding="utf-8"))
+        # v3.8.47 (round-30 P2, found by the sweep — the reported instance was
+        # in check_agent_harness): the SAME raw read of the same pattern file,
+        # in a second loader. A FIFO here hangs this hook instead of failing it.
+        _fd = os.open(str(p), os.O_RDONLY
+                      | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+        try:
+            _st = os.fstat(_fd)
+            if not stat.S_ISREG(_st.st_mode) or _st.st_nlink > 1:
+                raise OSError("pattern source is not a private regular file")
+            _chunks = []
+            while True:
+                _b = os.read(_fd, 1 << 20)
+                if not _b:
+                    break
+                _chunks.append(_b)
+        finally:
+            os.close(_fd)
+        data = json.loads(b"".join(_chunks).decode("utf-8"))
         entries = data["shell_danger"]
         return [(label, re.compile(rx)) for label, rx in entries]
     except Exception as e:

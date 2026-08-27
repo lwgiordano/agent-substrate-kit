@@ -32,7 +32,7 @@
         "scripts/update_manifest.py",
         "scripts/write_install_json.py"
       ],
-      "last_human_reviewed": "2026-08-26",
+      "last_human_reviewed": "2026-08-27",
       "path": "docs/knowledge/01_install_adoption.md",
       "purpose": "Installation and adoption across new and existing repositories."
     },
@@ -50,7 +50,7 @@
         "scripts/verify_release.py",
         "scripts/write_install_json.py"
       ],
-      "last_human_reviewed": "2026-08-26",
+      "last_human_reviewed": "2026-08-27",
       "path": "docs/knowledge/02_upgrade_integrity.md",
       "purpose": "Upgrade provenance, authority floors, transactions, and postconditions."
     },

@@ -113,17 +113,30 @@ def _claude_strict_sandbox(root: Path) -> bool:
     sandbox.enabled=true AND allowUnsandboxedCommands=false (strict mode). Honest
     detection of the host's enforcement CONFIG (the PreToolUse hook cannot read the
     runtime sandbox state — Claude exposes no sandbox field/env var to hooks)."""
-    for p in (root / ".claude" / "settings.json",
-              root / ".claude" / "settings.local.json",
-              Path.home() / ".claude" / "settings.json"):
+    # v3.8.47 (round-30 P2, surfaced when loop targets started inheriting their
+    # iterable's origin): these were read raw. The two IN-REPO settings files
+    # are read with containment against `root`; the user's home settings file
+    # is outside any repo, so it gets the leaf guards and no containment root.
+    # Split rather than passing a conditional root variable — the wrong-root
+    # invariant test rightly rejects that shape, and it is the shape that
+    # produced four silent regressions in v3.8.43.
+    def _strict(raw):
+        if raw is None:
+            return False
         try:
-            if not p.is_file():
-                continue
-            sb = json.loads(p.read_text(encoding="utf-8")).get("sandbox", {})
-            if isinstance(sb, dict) and sb.get("enabled") is True and sb.get("allowUnsandboxedCommands") is False:
-                return True
+            sb = json.loads(raw).get("sandbox", {})
         except Exception:
-            continue
+            return False
+        return (isinstance(sb, dict) and sb.get("enabled") is True
+                and sb.get("allowUnsandboxedCommands") is False)
+
+    for p in (root / ".claude" / "settings.json",
+              root / ".claude" / "settings.local.json"):
+        if _strict(_safe_read_text(p, root, max_bytes=8 << 20)):
+            return True
+    home = Path.home() / ".claude" / "settings.json"
+    if _strict(_dc_safe_read_text(home, None, max_bytes=8 << 20)):
+        return True
     return False
 
 

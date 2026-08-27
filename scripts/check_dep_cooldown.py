@@ -97,10 +97,10 @@ def _npm_direct(root: Path):
         return []
     try:
         names = set()
-        d = json.loads(pj.read_text(encoding="utf-8"))
+        d = json.loads(_safe_read_text(pj, root, max_bytes=64 << 20) or "{}")
         for grp in ("dependencies", "devDependencies"):
             names.update((d.get(grp) or {}).keys())
-        lock = json.loads(pl.read_text(encoding="utf-8"))
+        lock = json.loads(_safe_read_text(pl, root, max_bytes=256 << 20) or "{}")
         pkgs = lock.get("packages", {})
         out = []
         for n in sorted(names):
@@ -123,7 +123,7 @@ def _py_direct(root: Path):
     except Exception:
         return []  # no TOML parser → skip ecosystem (handled as "no deps found")
     try:
-        proj = tomllib.loads(pp.read_text(encoding="utf-8"))
+        proj = tomllib.loads(_safe_read_text(pp, root, max_bytes=64 << 20) or "")
         names = set()
         for dep in (proj.get("project", {}).get("dependencies") or []):
             m = re.match(r"^([A-Za-z0-9._-]+)", dep)
@@ -131,7 +131,7 @@ def _py_direct(root: Path):
                 names.add(m.group(1).lower().replace("_", "-"))
         poetry = proj.get("tool", {}).get("poetry", {}).get("dependencies", {})
         names.update(k.lower().replace("_", "-") for k in poetry if k.lower() != "python")
-        lock = tomllib.loads(ul.read_text(encoding="utf-8"))
+        lock = tomllib.loads(_safe_read_text(ul, root, max_bytes=256 << 20) or "")
         out = []
         for pkg in lock.get("package", []):
             nm = str(pkg.get("name", "")).lower().replace("_", "-")

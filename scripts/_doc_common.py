@@ -752,6 +752,18 @@ def safe_mkdir(path, root=None, mode: int = 0o755) -> None:
     try:
         if mode != 0o755:
             os.fchmod(fd, mode & INHERIT_MODE_MASK)
+        # v3.8.47 (round-30 P2): the DETACHED-PARENT class, in the one primitive
+        # that did not get the check written for it. dir_fd_still_live has
+        # existed since v3.8.45 for reads, writes and appends; safe_mkdir was
+        # added a release later and captured a parent fd without it, so a
+        # concurrent rename mid-descent let the directory be created in the
+        # moved-away tree while the live path stayed absent — and this returned
+        # normally. Adding a fourth fd-capturing primitive without the check the
+        # other three already had is the same defect as writing the check late.
+        if not dir_fd_still_live(root, Path(path), fd):
+            raise GuardRefusal(
+                f"directory parent was renamed during the mkdir — {path} was NOT "
+                "created at the path requested")
     finally:
         os.close(fd)
 

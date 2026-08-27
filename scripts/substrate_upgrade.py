@@ -158,7 +158,16 @@ def _exec_module_from_source(path: Path):
     """Compile and execute a module from its SOURCE BYTES, bypassing the bytecode cache entirely,
     and register it in sys.modules under its stem so sibling imports bind to it (v3.8.25)."""
     name = path.stem
-    code = compile(path.read_bytes(), str(path), "exec")
+    # v3.8.47 (round-30 P2, found by the sweep): this COMPILES AND EXECUTES
+    # the bytes it reads. Reading code to run through an unguarded path is
+    # the highest-value instance of this class in the kit — a symlinked or
+    # hard-linked engine module would execute outside bytes with the
+    # upgrader's privileges.
+    _src = _safe_read_bytes(path, max_bytes=None)
+    if _src is None:
+        raise OSError(f"refusing to execute a module from an unsafe or "
+                      f"unreadable source: {path}")
+    code = compile(_src, str(path), "exec")
     mod = types.ModuleType(name)
     mod.__file__ = str(path)
     sys.modules[name] = mod

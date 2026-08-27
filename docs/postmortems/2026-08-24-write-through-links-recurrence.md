@@ -628,6 +628,99 @@ written again two releases later by the same author in new code. Bug classes
 recur through the people who know about them, so the check has to live in the
 tool, not in the memory of whoever last read the postmortem.
 
+## Round 10 — v3.8.47 (round-30): one correct idea, applied to one of three
+
+Round 29 moved IMPORT resolution out of the ordered walk and into a pre-pass,
+because learning bindings in traversal order is not the same as knowing what
+Python binds. Round 30 showed the fix stopped one third of the way:
+
+- **ASSIGNMENT aliases were still learned during the walk**, so a module-level
+  `op = open` written *after* the function that uses it was dropped — the module
+  initialises completely before that function is ever called.
+- **The pre-pass used a LIFO stack**, so `if True: import os as io` followed by
+  `import shutil as io` resolved to whichever the stack happened to pop last.
+  Later binding wins at runtime; the enumeration has to be in document order.
+- **A class BODY EXECUTES.** Treating `ClassDef` as a namespace to skip made
+  `class C: import shutil as io; io.copy(...)` — real I/O at definition time —
+  vanish entirely.
+
+Three symptoms, one root cause, and the root cause was a fix applied to one of
+the three binding forms it should have covered.
+
+The same shape appeared twice more in the same release. `dir_fd_still_live` was
+written in v3.8.45 for reads, writes and appends; v3.8.46 added a **fourth**
+fd-capturing primitive, `safe_mkdir`, and did not give it the check that already
+existed for exactly this — so a rename mid-descent created the directory in the
+moved-away tree while the live path stayed absent, and it returned normally. And
+the all-operand `os.path.join` classification added in v3.8.46 was wired into the
+ASSIGNMENT path only, so an inline `open(os.path.join("/tmp", ROOT, ...))` still
+passed.
+
+### Origins do not have to say ROOT
+
+`open("docs/relative.txt", "w")`, `Path.cwd() / "docs" / x`, and
+`Path(__file__).resolve().parent.parent / "docs" / x` are the checkout as plainly
+as `ROOT` is — and the last is how half these scripts spell their own root.
+Treating only the blessed symbol as governed was the same "list of the forms I
+thought of" that `os.path.join` exposed one round earlier. Widening it surfaced
+four more real sites, including `substrate_upgrade._exec_module_from_source`,
+which **compiles and executes** the bytes it reads.
+
+The first cut of that widening was far too broad: it counted any bare relative
+string literal as a path, which made `raw.replace("Z", "+00:00")` a governed
+write — 32 false positives, which is a gate nobody keeps switched on. A literal
+counts as a path only where the call is unambiguously file I/O; `Path` methods
+share names with `str` methods, and that ambiguity is not resolvable without
+types.
+
+### Scanning the audit channel without punishing the auditor
+
+`AGENT_BUS.md` is read by agents and was outside the harness scan. Adding it
+verbatim **blocked immediately** — on the round-30 finding that reported the gap,
+because that finding quotes the attack phrase it tested. A gate that fails the
+build when an auditor accurately quotes the string they used is worse than the
+hole it closes.
+
+So the bus is scanned, with inline-code spans treated as evidence rather than
+instruction **on that surface only**. An unquoted injection line on the bus still
+blocks; the carve-out does not extend to `AGENTS.md` or any other governed
+surface, and a test pins all three behaviours.
+
+### Two in-release BLOCKs, both in the round's own new work
+
+- **The evidence carve-out was per-FILE where it should have been
+  per-PATTERN-CLASS.** Blanking inline-code spans on the bus ran once, before
+  all three pattern classes matched, so it exempted quoted credentials and a
+  quoted pipe-to-shell command as well as the injection phrase it was written
+  for.
+  The justification — an auditor quoting the string they tested — applies to the
+  injection class alone. A narrow exception implemented one level too coarse is
+  a general bypass, and it was a bypass on the surface that had just been added
+  to the scan.
+- **Loop-target binding classified only the first element.** `for p in [td,
+  ROOT / "x"]` bound the target FIXTURE for the whole body — and a
+  fixture-classified write is not even reported as unresolved, so a governed
+  write inside that loop produced neither a finding nor an unresolved line. The
+  multi-operand fix in the same release already knew the answer: classify every
+  element and let governed dominate.
+
+The wrong-root invariant test also caught the fix for `check_exfil_guard`
+passing a conditional `_r` instead of the function's own `root`. That test exists
+because four wrong-root regressions escaped in v3.8.43, and it did its job on the
+first run.
+
+**Carry-forward rule, part 13 — when a fix generalises, check every sibling of
+the thing you fixed.** Import bindings, assignment bindings and class-body
+bindings are one problem; reads, writes, appends and mkdirs are one problem;
+assignment operands and inline operands are one problem. Fixing the reported
+member and stopping is how a root cause survives as three separate findings in
+the next round.
+
+**Carry-forward rule, part 14 — a control that punishes accurate reporting will
+be removed.** When a gate covers the channel people use to report on the gate,
+it needs an explicit, narrow, tested distinction between describing an attack and
+performing one — or the gate loses to the reporting, and usually silently.
+
 ## (Optional) Reproduction
 
 In a disposable repo: `ln victim.txt AGENT_BUS.md` then

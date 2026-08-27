@@ -18,7 +18,8 @@ Two scan classes:
             SECRET + SHELL_DANGER  (no injection-phrase scan)
 """
 from __future__ import annotations
-import json, re, sys
+import json
+import os, stat, re, sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 try:
@@ -29,9 +30,40 @@ except Exception:
 from _substrate_surfaces import (CONTEXT_GLOBS, CODE_GLOBS, HARNESS_SKIP_GLOBS, HARNESS_ALLOWLIST,
                                  OWNED_DIRS, OPTIONAL_DIRS, GOVERNED_DIRS, GOVERNED_OPTIONAL_DIRS,
                                  _SKILL_ROOTS)
+def _guarded_json_bytes(p):
+    """Read a governed JSON data file WITHOUT following a link or blocking.
+
+    v3.8.47 (round-30 P2): this ran a raw read_text() at MODULE IMPORT, so a
+    FIFO harness_patterns.json HUNG the scanner instead of failing it — the
+    fifth time a component of this system carried the class it polices. Kept
+    inline and dependency-free because this module is AST-pinned and must not
+    grow an import.
+    """
+    fd = os.open(str(p), os.O_RDONLY
+                 | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink > 1:
+            raise OSError(f"pattern source is not a private regular file: {p}")
+        chunks = []
+        while True:
+            b = os.read(fd, 1 << 20)
+            if not b:
+                break
+            chunks.append(b)
+    finally:
+        os.close(fd)
+    return b"".join(chunks)
+
+
+# Surfaces where inline-code spans are quoted EVIDENCE rather than
+# instructions. Deliberately a one-element set: the coordination bus.
+EVIDENCE_QUOTING_SURFACES = {'AGENT_BUS.md'}
+
+
 def _load_patterns():
     p=Path(__file__).resolve().parent/'harness_patterns.json'
-    data=json.loads(p.read_text(encoding='utf-8'))
+    data=json.loads(_guarded_json_bytes(p).decode('utf-8'))
     def comp(key): return [(label,re.compile(rx)) for label,rx in data.get(key,[])]
     return comp('secret'), comp('shell_danger'), comp('injection')
 SECRET, SHELL_DANGER, INJECTION = _load_patterns()
@@ -109,13 +141,34 @@ def main():
                 break  # deeper components are under the link; one finding per chain
     for p in sorted(context|code):
         text=p.read_text(encoding='utf-8', errors='replace'); rel=p.relative_to(ROOT).as_posix()
+        # v3.8.47 (round-30 P3): the bus is an agent-read surface AND the audit
+        # channel. Scanning it verbatim BLOCKS on an auditor accurately quoting
+        # the string they tested — verified: adding it to CONTEXT_GLOBS failed
+        # immediately on the round-30 finding that reported this very gap, whose
+        # repro names the phrase in backticks. A gate that punishes accurate
+        # reporting is worse than the hole. Inline-code spans are EVIDENCE, so
+        # they are blanked (length-preserving, to keep line numbers honest)
+        # before matching — on this surface only. An UNQUOTED injection line on
+        # the bus still blocks, and no other governed surface gets the carve-out.
+        # v3.8.47 in-release (auditor BLOCK): the first cut blanked the text
+        # ONCE, before all three pattern classes ran, so the carve-out also
+        # exempted quoted credentials and quoted shell-danger commands. The
+        # justification only ever applied to the INJECTION class — an auditor
+        # quoting the phrase they tested. A live credential or a pipe-to-shell
+        # command in backticks is not evidence of anything and must still
+        # block, so the blanked copy feeds the injection class ALONE.
+        evidence_text=text
+        if rel in EVIDENCE_QUOTING_SURFACES:
+            evidence_text=re.sub(r'`[^`\n]*`', lambda m: ' '*len(m.group(0)), text)
         if rel in HARNESS_ALLOWLIST:
             pats=list(SECRET)  # the pattern DATA file: secrets only
         else:
             pats=list(SECRET)+list(SHELL_DANGER)
             if p in context: pats+=list(INJECTION)
+        _inj_ids={id(rx) for _l,rx in INJECTION}
         for label,rx in pats:
-            for m in rx.finditer(text): findings.append((label,rel,text.count('\n',0,m.start())+1))
+            src=evidence_text if id(rx) in _inj_ids else text
+            for m in rx.finditer(src): findings.append((label,rel,src.count('\n',0,m.start())+1))
     # v3.8.42 (round-25 P3): this script imports _substrate_root — which it
     # cannot itself verify — BEFORE discovering surfaces, so a poisoned helper
     # returning an empty directory made a standalone run print "ok (0 files

@@ -233,6 +233,17 @@ ALLOWLIST: dict[str, str] = {
         "refuse_linked_leaf() runs on the immediately preceding line and routes "
         "an unsafe leaf to the existing None path, so this read only happens on "
         "a private regular file",
+    "_doc_common.py:cfg.os.open":
+        "IS the guarded reader for .substrate/config in _code_suffixes() — "
+        "O_NOFOLLOW|O_NONBLOCK, S_ISREG, bounded — and it runs at MODULE "
+        "IMPORT, so it cannot call the helpers defined later in this same file",
+    "check_agent_harness.py:p.os.open":
+        "IS the guarded reader for harness_patterns.json — O_NOFOLLOW|O_NONBLOCK "
+        "plus fstat S_ISREG and st_nlink==1; kept inline because this module is "
+        "AST-pinned and must not gain an import",
+    "check_substrate_config.py:p.os.open":
+        "same inline guarded reader for the same pattern file in the config "
+        "hook, which must stay import-light because it runs on every tool call",
     "command_policy.py:cfg.os.open":
         "IS the guarded reader — inline O_NOFOLLOW|O_NONBLOCK open plus fstat "
         "S_ISREG/st_nlink and a bounded read, kept inline because this module is "
@@ -287,6 +298,11 @@ def _base_symbol(node: ast.AST) -> str | None:
         if isinstance(node, ast.Subscript):
             node = node.value
             continue
+        # `(p := ROOT / "x").write_text(...)` — the receiver IS the assignment
+        # expression, so the origin is its value (round-30 P2).
+        if isinstance(node, ast.NamedExpr):
+            node = node.value
+            continue
         if isinstance(node, ast.Name):
             return node.id
         if isinstance(node, ast.Attribute):
@@ -333,25 +349,32 @@ def _scope_body(node):
     Imports inside `if`/`try` at module level still bind module-wide, but a
     nested def/class is its own namespace and must not leak outward.
     """
-    stack = list(getattr(node, "body", []))
-    stack += list(getattr(node, "orelse", [])) + list(getattr(node, "finalbody", []))
-    while stack:
-        n = stack.pop()
-        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            continue        # its own namespace
-        yield n
-        for f in ("body", "orelse", "finalbody"):
-            stack += list(getattr(n, f, []) or [])
-        for h in getattr(n, "handlers", []) or []:
-            stack += list(getattr(h, "body", []) or [])
-        # `match`/`case` keeps its statements under .cases[i].body, which is
-        # neither body nor orelse. v3.8.46 in-release (both auditors, BLOCK):
-        # an import inside a case was invisible to the binding pre-pass, so the
-        # call using it produced NEITHER a finding NOR an unresolved line — the
-        # silent drop this file's own docstring calls a bug in the gate, in the
-        # very pass written to make binding resolution correct.
-        for c in getattr(n, "cases", []) or []:
-            stack += list(getattr(c, "body", []) or [])
+    # v3.8.47 (round-30 P1): this walked with a LIFO stack, so statements came
+    # back in an order unrelated to the source. `if True: import os as io`
+    # followed by `import shutil as io` resolved to whichever the stack popped
+    # last, which is not what Python binds. Later binding wins at runtime, so
+    # the enumeration has to be in DOCUMENT order — collect, then sort by
+    # position. `match`/`case` keeps its statements under .cases[i].body, which
+    # is neither body nor orelse (v3.8.46 in-release).
+    out: list = []
+
+    def _collect(stmts):
+        for n in stmts or []:
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                continue        # its own namespace
+            out.append(n)
+            for f in ("body", "orelse", "finalbody"):
+                _collect(getattr(n, f, None))
+            for h in getattr(n, "handlers", []) or []:
+                _collect(getattr(h, "body", None))
+            for c in getattr(n, "cases", []) or []:
+                _collect(getattr(c, "body", None))
+
+    _collect(getattr(node, "body", []))
+    _collect(getattr(node, "orelse", []))
+    _collect(getattr(node, "finalbody", []))
+    yield from sorted(out, key=lambda n: (getattr(n, "lineno", 0),
+                                          getattr(n, "col_offset", 0)))
 
 
 def _collect_bindings(tree: ast.AST):
@@ -382,9 +405,53 @@ def _collect_bindings(tree: ast.AST):
         n.name for n in getattr(tree, "body", [])
         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)))
 
+    # v3.8.47 in-release: the ALL-CAPS "module-level path constant" convention
+    # fires on any shouty name, and once loop targets inherit their iterable's
+    # classification that reached string constants too — `_KIT_TOKENS =
+    # ("./manage.sh", "manage.sh")` made `s.replace(tok, ...)`, an ordinary
+    # STRING replace, look like Path.replace on a governed path. A name whose
+    # module-level value is plainly a string literal (or a tuple/list of them)
+    # is not a path constant.
+    literal_strs: set[str] = set()
+    for n in getattr(tree, "body", []):
+        if not (isinstance(n, ast.Assign) and len(n.targets) == 1
+                and isinstance(n.targets[0], ast.Name)):
+            continue
+        v = n.value
+        if isinstance(v, ast.Constant) and isinstance(v.value, str):
+            literal_strs.add(n.targets[0].id)
+        elif isinstance(v, (ast.Tuple, ast.List, ast.Set)) and v.elts and all(
+                isinstance(e, ast.Constant) and isinstance(e.value, str) for e in v.elts):
+            literal_strs.add(n.targets[0].id)
+
     def _own(node):
         mods: dict[str, str] = {}
         funcs: dict[str, str] = {}
+        bound: dict[str, str] = {}
+        # v3.8.47 (round-30 P1): ASSIGNMENT aliases were still learned during
+        # the ordered body walk, so `def f(): op(ROOT / "x", "w")` with a
+        # module-level `op = open` written LATER in the file was dropped — the
+        # module initialises fully before f() is ever called. v3.8.46 moved
+        # import resolution into this pre-pass and left assignment resolution
+        # behind: one correct idea applied to one of the binding forms.
+        for n in _scope_body(node):
+            if isinstance(n, ast.Assign) and len(n.targets) == 1 \
+                    and isinstance(n.targets[0], ast.Name):
+                tgt, val = n.targets[0].id, n.value
+                if isinstance(val, ast.Name) and val.id in BUILTIN_IO:
+                    funcs.setdefault(tgt, "open")
+                elif (isinstance(val, ast.Attribute)
+                      and isinstance(val.value, ast.Name)
+                      and (val.value.id, val.attr) in FUNC_IO):
+                    funcs.setdefault(tgt, f"{val.value.id}.{val.attr}")
+                elif isinstance(val, ast.Attribute) and val.attr in PATH_IO_METHODS:
+                    bound.setdefault(tgt, f"{_base_symbol(val.value) or '?'}|{val.attr}")
+                elif (isinstance(val, ast.Call) and isinstance(val.func, ast.Name)
+                      and val.func.id == "getattr" and len(val.args) >= 2
+                      and isinstance(val.args[1], ast.Constant)
+                      and isinstance(val.args[1].value, str)):
+                    bound.setdefault(
+                        tgt, f"{_base_symbol(val.args[0]) or '?'}|{val.args[1].value}")
         for n in _scope_body(node):
             if isinstance(n, ast.Import):
                 for a in n.names:
@@ -399,44 +466,61 @@ def _collect_bindings(tree: ast.AST):
                                 funcs.setdefault(fname, f"{mod}.{fname}")
                     elif (n.module, a.name) in FUNC_IO:
                         funcs[a.asname or a.name] = f"{n.module}.{a.name}"
-        return mods, funcs
+        return mods, funcs, bound
 
-    effective: dict[tuple[str, ...], tuple[dict, dict]] = {}
-    root_mods, root_funcs = _own(tree)
-    effective[()] = (root_mods, root_funcs)
+    effective: dict[tuple[str, ...], tuple[dict, dict, dict]] = {}
+    root_mods, root_funcs, root_bound = _own(tree)
+    effective[()] = (root_mods, root_funcs, root_bound)
 
-    def _descend(node, path, mods, funcs):
+    def _descend(node, path, mods, funcs, bound):
         for n in ast.iter_child_nodes(node):
             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                own_m, own_f = _own(n)
+                own_m, own_f, own_b = _own(n)
                 m2 = {**mods, **own_m}
                 f2 = {**funcs, **own_f}
+                b2 = {**bound, **own_b}
                 sub = (*path, n.name)
-                effective[sub] = (m2, f2)
-                _descend(n, sub, m2, f2)
+                effective[sub] = (m2, f2, b2)
+                _descend(n, sub, m2, f2, b2)
             elif isinstance(n, ast.ClassDef):
                 # The class name is part of the scope path. Passing `path`
                 # through unchanged made a method's key collide with a
                 # same-named module-level function, and whichever the walk
                 # reached LAST overwrote the other's bindings — an
                 # order-dependent silent fail-open (v3.8.46 in-release BLOCK).
-                _descend(n, (*path, n.name), mods, funcs)
+                #
+                # v3.8.47 (round-30 P1): a class BODY EXECUTES. `class C:
+                # import shutil as io; io.copy(...)` runs at definition time,
+                # and treating the class purely as a namespace to skip meant
+                # that raw I/O vanished entirely. The body gets its own
+                # bindings, exactly like a function's.
+                own_m, own_f, own_b = _own(n)
+                cm, cf = {**mods, **own_m}, {**funcs, **own_f}
+                cb = {**bound, **own_b}
+                sub = (*path, n.name)
+                effective[sub] = (cm, cf, cb)
+                _descend(n, sub, cm, cf, cb)
             else:
-                _descend(n, path, mods, funcs)
+                _descend(n, path, mods, funcs, bound)
 
-    _descend(tree, (), root_mods, root_funcs)
-    return effective, module_defs
+    _descend(tree, (), root_mods, root_funcs, root_bound)
+    return effective, module_defs, frozenset(literal_strs)
 
 
 class _ScopeResolver(ast.NodeVisitor):
     """Resolve path-bearing names to GOVERNED / FIXTURE within each scope."""
 
     def __init__(self, seed: dict[str, set[str]] | None = None,
-                 bindings: dict | None = None) -> None:
+                 bindings: dict | None = None,
+                 literal_strs: frozenset[str] = frozenset()) -> None:
+        self._literal_strs = literal_strs
+        # Set only while classifying an operand of an unambiguous file-I/O
+        # call, so a bare relative string counts as a path there and nowhere.
+        self._literal_ok = False
         # Import bindings resolved up front by _collect_bindings, keyed by
         # scope path: module-level imports bind everywhere regardless of
         # textual order, a function's own imports bind only inside it.
-        self._bindings = bindings if bindings is not None else {(): ({}, {})}
+        self._bindings = bindings if bindings is not None else {(): ({}, {}, {})}
         self.findings: list[tuple[int, str, str]] = []   # (line, base, method)
         self.unresolved: list[tuple[int, str, str]] = []
         # Calls to module-local helpers carrying a governed path, recorded so
@@ -485,6 +569,23 @@ class _ScopeResolver(ast.NodeVisitor):
         if node.args.kwarg is not None:
             params.append(node.args.kwarg.arg)
         self._push(params)
+        # v3.8.47 (round-30 P2): a governed DEFAULT binds the parameter for
+        # every call that omits it — `def f(p=ROOT / "docs" / "x")` writes to
+        # the checkout with no caller involvement at all — and defaults were
+        # never classified. Positional and keyword-only defaults both.
+        _defaults = list(node.args.defaults) + [
+            d for d in node.args.kw_defaults if d is not None]
+        _posnames = [a.arg for a in (node.args.posonlyargs + node.args.args)]
+        for _name, _d in zip(_posnames[len(_posnames) - len(node.args.defaults):],
+                             node.args.defaults):
+            _k = self._classify_expr(_d)
+            if _k:
+                self._scopes[-1][_name] = _k
+        for _a, _d in zip(node.args.kwonlyargs, node.args.kw_defaults):
+            if _d is not None:
+                _k = self._classify_expr(_d)
+                if _k:
+                    self._scopes[-1][_a.arg] = _k
         # A parameter this helper is CALLED with a governed path through is
         # governed inside the body. Governed wins over the fixture-name
         # heuristic: over-reporting is the safe direction here.
@@ -559,6 +660,14 @@ class _ScopeResolver(ast.NodeVisitor):
     def _funcs(self) -> dict:
         return self._bindings.get(tuple(self._fnstack), self._bindings[()])[1]
 
+    def _bound(self) -> dict:
+        return self._bindings.get(tuple(self._fnstack), self._bindings[()])[2]
+
+    def _bound_of(self, name: str):
+        # Walker-recorded binding first (an assignment earlier in THIS body),
+        # then the scope-resolved one from the pre-pass.
+        return self._scopes[-1].get(f"@bound:{name}") or self._bound().get(name)
+
     def _mod_of(self, name: str) -> str:
         return self._mods().get(name, name)
 
@@ -568,6 +677,70 @@ class _ScopeResolver(ast.NodeVisitor):
     def visit_Assign(self, node: ast.Assign) -> None:  # noqa: N802
         for t in node.targets:
             self._bind(t, node.value)
+            # v3.8.47 (round-30 P2): DESTRUCTURING. `p, _ = ROOT / "x", 1`
+            # binds p just as plainly as `p = ROOT / "x"`, and only plain
+            # Name targets were tracked. Pair element-wise where the shapes
+            # match; otherwise let every element inherit the whole value, which
+            # over-reports rather than dropping.
+            if isinstance(t, (ast.Tuple, ast.List)):
+                vals = (node.value.elts
+                        if isinstance(node.value, (ast.Tuple, ast.List))
+                        and len(node.value.elts) == len(t.elts)
+                        else [node.value] * len(t.elts))
+                for el, v in zip(t.elts, vals):
+                    self._bind(el, v)
+        self.generic_visit(node)
+
+    def visit_For(self, node: ast.For) -> None:  # noqa: N802
+        """`for p in [ROOT / "x"]: p.write_text(...)` — the loop target takes
+        the iterable's origin (round-30 P2).
+
+        v3.8.47 in-release (checklist BLOCK): the first cut classified only
+        `elts[0]`. `for p in [td, ROOT / "x"]` therefore bound the target
+        FIXTURE for the whole body, and a fixture-classified write is not even
+        reported as unresolved — so a governed write inside that loop produced
+        NEITHER a finding NOR an unresolved line. Every element is classified
+        and governed dominates, exactly as the multi-operand join fix does; the
+        loop variable is each element in turn, so anything less is a guess
+        about which iteration matters.
+        """
+        src = node.iter
+        kind = ""
+        if isinstance(src, (ast.List, ast.Tuple, ast.Set)) and src.elts:
+            kinds = [self._classify_expr(e) for e in src.elts]
+            kind = ("governed" if "governed" in kinds
+                    else next((k for k in kinds if k), ""))
+            src = src.elts[0]
+        else:
+            kind = self._classify_expr(src)
+        targets = ([node.target] if not isinstance(node.target, (ast.Tuple, ast.List))
+                   else list(node.target.elts))
+        for tgt in targets:
+            if isinstance(tgt, ast.Starred):
+                tgt = tgt.value
+            if isinstance(tgt, ast.Name) and kind:
+                if self._scopes[-1].get(tgt.id) == "governed" and kind != "governed":
+                    continue        # governed is sticky
+                self._scopes[-1][tgt.id] = kind
+            else:
+                self._bind(tgt, src)
+        self.generic_visit(node)
+
+    visit_AsyncFor = visit_For  # type: ignore[assignment]
+
+    def visit_NamedExpr(self, node: ast.NamedExpr) -> None:  # noqa: N802
+        # `(p := ROOT / "x").write_text(...)` (round-30 P2).
+        self._bind(node.target, node.value)
+        self.generic_visit(node)
+
+    def visit_Match(self, node: ast.Match) -> None:  # noqa: N802
+        # `match ROOT / "x":` / `case p:` captures the subject (round-30 P2).
+        for case in node.cases:
+            pat = case.pattern
+            if isinstance(pat, ast.MatchAs) and pat.name and pat.pattern is None:
+                kind = self._classify_expr(node.subject)
+                if kind:
+                    self._scopes[-1][pat.name] = kind
         self.generic_visit(node)
 
     def visit_AnnAssign(self, node: ast.AnnAssign) -> None:  # noqa: N802
@@ -583,6 +756,15 @@ class _ScopeResolver(ast.NodeVisitor):
 
     # --- classification -------------------------------------------------
     def _classify_expr(self, expr: ast.AST) -> str:
+        # v3.8.47 (round-30 P2): an origin does not have to say ROOT to BE the
+        # checkout. A bare relative literal resolves against the process's cwd,
+        # `Path.cwd()` is the checkout for every tool here, and
+        # `Path(__file__).resolve().parent.parent` is how half these scripts
+        # spell their own repo root. Treating only the blessed symbol as
+        # governed is the same "list of the forms I thought of" that
+        # os.path.join exposed one round earlier.
+        if self._is_repo_relative(expr, allow_literal=self._literal_ok):
+            return "governed"
         # os.path.join takes MANY path operands and the last absolute one wins
         # at runtime, so following argument 0 alone can miss a governed path in
         # a later position (in-release auditor WARN). Classify every operand
@@ -605,9 +787,57 @@ class _ScopeResolver(ast.NodeVisitor):
             return env[base]
         if base in GOVERNED_BASES:
             return "governed"
-        if base.isupper() and len(base) > 2:
+        if base.isupper() and len(base) > 2 and base not in self._literal_strs:
             return "governed"      # module-level path constant by convention
         return ""
+
+    @staticmethod
+    def _is_repo_relative(expr: ast.AST, allow_literal: bool = False) -> bool:
+        """True for path origins that are the checkout without naming ROOT.
+
+        `allow_literal` is only set where a bare relative STRING is
+        unambiguously a path — the operand of `open()` or an `os`/`shutil`
+        function. Path methods share names with str methods (`replace`,
+        `join`), so a literal there is usually not a path at all: the first cut
+        of this rule made `raw.replace("Z", "+00:00")` a governed write, and 32
+        such false positives is a gate nobody would keep switched on.
+        """
+        node = expr
+        for _ in range(64):
+            if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+                node = node.left
+                continue
+            if isinstance(node, ast.Call):
+                f = node.func
+                # Path.cwd() / os.getcwd() — the process's own checkout.
+                if isinstance(f, ast.Attribute) and f.attr in {"cwd", "getcwd"}:
+                    return True
+                # Path(__file__)... — a script naming its own tree.
+                if (isinstance(f, ast.Name) and f.id == "Path" and node.args
+                        and isinstance(node.args[0], ast.Name)
+                        and node.args[0].id == "__file__"):
+                    return True
+                if isinstance(f, ast.Attribute) and f.attr in {
+                        "resolve", "absolute", "expanduser", "parent", "joinpath"}:
+                    node = f.value
+                    continue
+                return False
+            if isinstance(node, ast.Attribute) and node.attr in {"parent", "parents"}:
+                node = node.value
+                continue
+            if isinstance(node, ast.Subscript):
+                node = node.value
+                continue
+            if isinstance(node, ast.NamedExpr):
+                node = node.value
+                continue
+            # A bare RELATIVE string literal resolves against cwd — but only
+            # where the surrounding call proves it is a path.
+            if allow_literal and isinstance(node, ast.Constant) and isinstance(node.value, str):
+                v = node.value
+                return bool(v) and not v.startswith(("/", "~")) and "://" not in v
+            return False
+        return False
 
     # --- call inspection ------------------------------------------------
     def visit_Call(self, node: ast.Call) -> None:  # noqa: N802
@@ -652,6 +882,19 @@ class _ScopeResolver(ast.NodeVisitor):
                     opaque = True
             return out, opaque
 
+        # v3.8.47 (round-30 P2): operands resolved through _base_symbol alone,
+        # so the all-operand os.path.join logic added in v3.8.46 only ever
+        # protected paths that had been ASSIGNED to a name — an inline
+        # `open(os.path.join("/tmp", ROOT, "docs", "x"), "w")` still passed.
+        # Candidates now carry the expression so classification sees what
+        # assignment classification sees.
+        exprs: dict[int, ast.AST] = {}
+
+        def _cand(expr, label):
+            b = _base_symbol(expr)
+            exprs[len(cands)] = expr
+            cands.append((b, label))
+
         if isinstance(fn, ast.Attribute):
             if isinstance(fn.value, ast.Name) and (
                     self._mod_of(fn.value.id), fn.attr) in FUNC_IO:
@@ -660,19 +903,23 @@ class _ScopeResolver(ast.NodeVisitor):
                 npaths = 2 if (mod, fn.attr) in TWO_PATH_FUNCS else 1
                 ops, opaque = _operands(npaths)
                 for a in ops:
-                    cands.append((_base_symbol(a), label))
+                    _cand(a, label)
                 if opaque:
                     cands.append((None, label))
             elif fn.attr in PATH_IO_METHODS:
-                cands.append((_base_symbol(fn.value), fn.attr))
+                # The RECEIVER is an operand too — routed through _cand so it
+                # gets the same expression-level classification the arguments
+                # get (round-30 P2: `(Path.cwd() / "docs" / "x").write_text()`
+                # resolved only through _base_symbol and passed).
+                _cand(fn.value, fn.attr)
                 if fn.attr in TWO_PATH_METHODS:
                     ops, opaque = _operands(1)
                     for a in ops:
-                        cands.append((_base_symbol(a), fn.attr))
+                        _cand(a, fn.attr)
                     if opaque:
                         cands.append((None, fn.attr))
-        elif isinstance(fn, ast.Name) and f"@bound:{fn.id}" in self._scopes[-1]:
-            _b, _a = self._scopes[-1][f"@bound:{fn.id}"].split("|", 1)
+        elif isinstance(fn, ast.Name) and self._bound_of(fn.id):
+            _b, _a = self._bound_of(fn.id).split("|", 1)
             cands.append((_b, _a))
         elif isinstance(fn, ast.Name) and (
                 fn.id in BUILTIN_IO or self._func_of(fn.id) is not None):
@@ -683,7 +930,7 @@ class _ScopeResolver(ast.NodeVisitor):
             npaths = 2 if label in TWO_PATH_LABELS else 1
             ops, opaque = _operands(npaths)
             for a in ops:
-                cands.append((_base_symbol(a), label))
+                _cand(a, label)
             if opaque:
                 cands.append((None, label))
         elif isinstance(fn, ast.Call):
@@ -710,8 +957,15 @@ class _ScopeResolver(ast.NodeVisitor):
                             kw[key.value] = self._classify_expr(val)
             if "governed" in pos or "governed" in kw.values():
                 self.local_calls.append((tuple(self._fnstack), fn.id, pos, kw))
-        for base, method in cands:
+        for _i, (base, method) in enumerate(cands):
             kind = self._classify_base(base)
+            if kind != "governed" and _i in exprs:
+                prev = self._literal_ok
+                self._literal_ok = ("." in method or method == "open")
+                try:
+                    kind = self._classify_expr(exprs[_i]) or kind
+                finally:
+                    self._literal_ok = prev
             if kind == "governed":
                 self.findings.append((node.lineno, base or "?", method))
             elif kind != "fixture":
@@ -779,9 +1033,9 @@ def _resolve_module(tree: ast.AST) -> _ScopeResolver:
     _params = sum(len(n.args.posonlyargs) + len(n.args.args) + len(n.args.kwonlyargs) + 1
                   for n in ast.walk(tree)
                   if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)))
-    bindings, _module_defs = _collect_bindings(tree)
+    bindings, _module_defs, literal_strs = _collect_bindings(tree)
     seed: dict[tuple[str, ...], set[str]] = {}
-    r = _ScopeResolver(seed, bindings)
+    r = _ScopeResolver(seed, bindings, literal_strs)
     r.visit(tree)
     for _ in range(_params + 1):
         grew = False
@@ -820,7 +1074,7 @@ def _resolve_module(tree: ast.AST) -> _ScopeResolver:
                 grew = True
         if not grew:
             break
-        r = _ScopeResolver(seed, bindings)
+        r = _ScopeResolver(seed, bindings, literal_strs)
         r.visit(tree)
     return r
 

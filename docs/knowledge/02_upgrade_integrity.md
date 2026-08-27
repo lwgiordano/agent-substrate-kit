@@ -3,7 +3,7 @@ purpose: Upgrade provenance, authority floors, transactions, and postconditions.
 asserts:
   - scripts/substrate_upgrade.py::_exec_module_from_source
   - scripts/substrate_upgrade.py::_apply_capability_floor
-last_human_reviewed: 2026-08-26
+last_human_reviewed: 2026-08-27
 covers:
   - bootstrap.sh
   - manage.sh
@@ -35,8 +35,12 @@ dependency closure are pinned before use.
 
 Private loaders read, compile, and execute the verified source bytes directly.
 They do not use normal import bytecode lookup, so ignored unchecked `.pyc` files
-cannot substitute different executable code for a hashed source file. Temporary
-module bindings and import paths are restored after verification.
+cannot substitute different executable code for a hashed source file. That read
+is itself guarded (v3.8.47): it is the highest-value read in the kit, because
+the bytes it returns are compiled and RUN, so a symlinked or hard-linked engine
+module would execute outside code with the upgrader's privileges. An unsafe or
+unreadable source refuses rather than executing. Temporary module bindings and
+import paths are restored after verification.
 
 Finalizers and canonical-config validation run the kit's copies against the
 target root. Target-controlled helper replacements therefore remain data being

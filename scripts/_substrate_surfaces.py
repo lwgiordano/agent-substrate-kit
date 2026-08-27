@@ -23,6 +23,12 @@ from __future__ import annotations
 # --- CONTEXT surfaces: agent reads these AS instructions/knowledge ---
 CONTEXT_GLOBS = [
     "AGENTS.md", "CLAUDE.md", "DESIGN.md",
+    # v3.8.47 (round-30 P3): the bus is coordination prose that agents
+    # READ, so injected instructions posted there reach model context the
+    # same way HISTORY.md would. It is scanned with one narrow carve-out
+    # (see EVIDENCE_QUOTING_SURFACES in check_agent_harness): it is also
+    # the audit channel, where an attack string must be quotable.
+    "AGENT_BUS.md",
     ".claude/**/*.md", ".codex/**/*.md", ".codex/**/*.toml", ".agents/**/*.md",
     ".mcp.json",
     ".github/copilot-instructions.md", ".github/instructions/**/*.md",

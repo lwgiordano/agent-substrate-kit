@@ -4,7 +4,7 @@ asserts:
   - bootstrap.sh::_safe_mkdir_p
   - bootstrap.sh::wappend
   - scripts/run_python_gate.sh::_ruff_args
-last_human_reviewed: 2026-08-26
+last_human_reviewed: 2026-08-27
 covers:
   - bootstrap.sh
   - manage.sh

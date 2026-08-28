@@ -309,3 +309,9 @@ This file is `merge=union` in `.gitattributes` so concurrent branch entries comb
 **Intent:** Close Round-31 and in-release review gaps as classes: raw I/O alias/origin coverage, guarded harness and policy source reads, fail-closed dependency evidence, review ownership for context surfaces, and pinned stripped-install fallback inventories.
 **Knowledge:** Run git fetch --unshallow before HISTORY SHA checks in shallow clones. AGENT_BUS legacy evidence is exact line plus content hash only; broad timestamp-era carve-outs are rejected. write_install_json fallback mirrors install-owned surfaces but not governed project-authored knowledge directories.
 
+## 2026-08-28T04:55:26Z — NO_SESSION — b360cc5
+**Summary:** Preserve the pre-rebase v3.8.48 code SHA recorded in HISTORY
+**Files:** docs/HISTORY.md
+**Intent:** Keep the append-only HISTORY entry valid after a late remote bus commit forced code/history commits to move; the bridge makes the originally recorded code SHA reachable in fresh clones without rewriting published history.
+**Knowledge:** Do not rebase after appending HISTORY for a local commit: if remote bus prose moves, merge instead so recorded commit SHAs remain reachable. This bridge has ours-strategy file content and exists only to preserve ancestry for the documented v3.8.48 code commit.
+

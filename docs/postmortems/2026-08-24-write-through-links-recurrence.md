@@ -721,6 +721,65 @@ be removed.** When a gate covers the channel people use to report on the gate,
 it needs an explicit, narrow, tested distinction between describing an attack and
 performing one — or the gate loses to the reporting, and usually silently.
 
+## Round 11 — v3.8.49: the gate prescribed a remedy it had never implemented
+
+Not an audit round. This one surfaced by being HIT, which is why it is worth
+recording: v3.8.48's HISTORY entry named a pre-rebase SHA that never landed, and
+`check-history-sha` went red on the release commit.
+
+The trigger was mundane — generate the entry, then amend the commit, and the
+recorded SHA dies. The defect underneath was not. `docs/HISTORY.md` is
+append-only by hard rule, so the only permitted remedy for a wrong SHA is a
+further entry, and the gate printed exactly that: *"Fix by appending a
+'Correction' entry that names the right SHA."* It then ignored the entry. The
+marker was counted and `continue`d past with no pairing to what it corrected, so
+following the printed instruction changed nothing. The entry could not be edited
+and the correction did not clear it: **the branch was red by every route the
+tooling allowed.**
+
+Two things are worth keeping from how this was found and fixed.
+
+First, the report was blocked by the thing it reported. The URGENT bus post
+about the red gate was staged by `agentsync` and then REFUSED by the pre-commit
+hook — because `check-history-sha` was red in that same tree. Part 14 predicted
+a gate that punishes accurate reporting; this is that shape again, one release
+later, from a different gate. It cost nothing only because the other agent fixed
+the branch independently first.
+
+Second, the sweep found the class was already half-solved. `AGENT_BUS.md` has the
+identical shape — append-only record, gate over it, additive-only remedy — and
+v3.8.48 had just given it exactly this hatch (legacy line-and-content-hash
+evidence pairs). `docs/REJECTED.md` is append-only but has no content gate, so it
+cannot deadlock. `check_doc_drift`'s advice was tested empirically by following
+it, and it works. So the class has two members, one of which was fixed by someone
+else a release earlier without either of us noticing they were the same problem.
+
+The fix pairs `Correction-of-<sha>` with the entry it supersedes, and is
+deliberately narrow so the hatch cannot become a silencer: it clears only the
+unresolvable-SHA finding, never the future-dated one; a correction naming a SHA
+no entry references is itself drift; and a correction naming a SHA that RESOLVES
+is itself drift. The gate had NO regression coverage before this round, which is
+most of why the advice went eight releases without anyone discovering it was a
+no-op. Six tests now exist, and each was verified to fail for its own reason by
+disabling the pairing and each guard in turn — which caught two of them
+originally passing on the future-dated heuristic rather than on the guard under
+test.
+
+**Carry-forward rule, part 15 — a control that names a remedy must implement
+it.** Printed remediation advice is part of the control's contract, not a comment.
+If a gate tells the operator what to do, a test must follow that exact
+instruction and assert the finding clears; otherwise the advice is decoration and
+the first person to trust it is stuck. Three of the last five rounds were this
+shape: v3.8.45's gate shipped to consumers as an inert file, v3.8.46's guard ran
+after the mutation it was meant to prevent, and this one prescribed a no-op.
+
+**Carry-forward rule, part 16 — the escape hatch for an append-only record is
+part of the gate's design, not an afterthought.** Any validator over a record
+that cannot be edited needs an additive remedy the validator honours, plus
+fail-closed guards so the remedy cannot retire a live finding. Ask it when the
+gate is written: *what does someone do when this fires and the evidence is
+immutable?* If the answer is "edit the record", the gate is unshippable.
+
 ## (Optional) Reproduction
 
 In a disposable repo: `ln victim.txt AGENT_BUS.md` then

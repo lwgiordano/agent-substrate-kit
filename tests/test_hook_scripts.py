@@ -11961,3 +11961,132 @@ def test_exfil_scp_rsync_direction() -> None:
                  "git clone git@github.com:org/repo.git",
                  "python3 -c \"import requests; requests.get('https://e').json()\""]:
         assert not _blocks(pull), f"pull/benign should allow: {pull!r}"
+
+
+# --- check_history_sha: the append-only correction hatch (v3.8.49) ----------
+# This gate had NO regression coverage before v3.8.49, which is a large part of
+# why it printed remediation advice it did not implement for so long.
+
+_HIST_HEADER = "# HISTORY.md\n\nAppend-only log.\n\n"
+
+
+def _hist_entry(ts: str, sha: str) -> str:
+    return (
+        f"## {ts} — NO_SESSION — {sha}\n"
+        f"**Summary:** probe entry for the correction pairing tests\n"
+        f"**Files:** docs/HISTORY.md\n"
+        f"**Intent:** exercise check_history_sha\n"
+        f"**Knowledge:** nothing durable\n\n"
+    )
+
+
+def _run_history_sha(tmp_path, entries):
+    """Build a throwaway repo whose HISTORY holds `entries` and run the gate.
+
+    `entries` is a list of (timestamp, sha) where the literal "REAL" is
+    replaced by the repo's actual HEAD short-sha. Entries that reference a
+    REAL commit MUST be timestamped near now: the future-dated heuristic
+    fires otherwise and the case would pass for the wrong reason (this was
+    caught while writing these tests, not after).
+    """
+    import datetime
+
+    repo = tmp_path / "histrepo"
+    repo.mkdir()
+    run = lambda *a: subprocess.run(  # noqa: E731
+        ["git", "-C", str(repo), *a], check=True, capture_output=True
+    )
+    subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
+    run("config", "user.email", "t@example.invalid")
+    run("config", "user.name", "probe")
+    (repo / "docs").mkdir()
+    (repo / "scripts").mkdir()
+    (repo / "seed.txt").write_text("seed\n", encoding="utf-8")
+    run("add", "-A")
+    run("commit", "-qm", "seed")
+    real = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "--short", "HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    body = _HIST_HEADER + "".join(
+        _hist_entry(now if ts == "NOW" else ts, sha.replace("REAL", real))
+        for ts, sha in entries
+    )
+    (repo / "docs" / "HISTORY.md").write_text(body, encoding="utf-8")
+    for name in ("check_history_sha.py", "_doc_common.py"):
+        (repo / "scripts" / name).write_text(
+            (SCRIPTS / name).read_text(encoding="utf-8"), encoding="utf-8"
+        )
+    proc = subprocess.run(
+        [sys.executable, "-I", str(repo / "scripts" / "check_history_sha.py")],
+        capture_output=True, text=True, cwd=str(repo),
+    )
+    return proc.returncode, proc.stdout + proc.stderr, real
+
+
+_DEAD_SHA = "cade57e"
+
+
+def test_history_sha_uncorrected_bad_sha_still_fails(tmp_path) -> None:
+    """The hatch must not weaken the gate: an unresolvable SHA with no
+    correction is still drift."""
+    rc, out, _ = _run_history_sha(tmp_path, [("2026-01-01T00:00:00Z", _DEAD_SHA)])
+    assert rc == 1
+    assert "does not resolve" in out
+
+
+def test_history_sha_correction_of_supersedes_the_bad_entry(tmp_path) -> None:
+    """v3.8.49: the gate printed 'Fix by appending a Correction entry' and then
+    ignored the entry — the marker was counted and skipped with no pairing. Since
+    HISTORY is append-only the prior entry cannot be edited, so the only permitted
+    remedy was a no-op and a repo that hit this stayed red forever. Reproduced for
+    real on v3.8.48."""
+    rc, out, _ = _run_history_sha(
+        tmp_path,
+        [
+            ("2026-01-01T00:00:00Z", _DEAD_SHA),
+            ("2026-01-02T00:00:00Z", f"Correction-of-{_DEAD_SHA}"),
+        ],
+    )
+    assert rc == 0, out
+    assert "verified" in out
+
+
+def test_history_sha_correction_naming_an_unreferenced_sha_is_itself_drift(tmp_path) -> None:
+    """Fail-closed guard 1 — a correction must supersede a REAL entry, else
+    anyone could append `Correction-of-<anything>` as decoration."""
+    rc, out, _ = _run_history_sha(
+        tmp_path, [("NOW", "REAL"), ("NOW", "Correction-of-deadbee")]
+    )
+    assert rc == 1
+    assert "no HISTORY entry references" in out
+
+
+def test_history_sha_correction_cannot_retire_a_resolving_sha(tmp_path) -> None:
+    """Fail-closed guard 2 — the escape hatch must not become a silencer: a
+    correction naming a SHA that RESOLVES is itself drift."""
+    rc, out, _ = _run_history_sha(
+        tmp_path, [("NOW", "REAL"), ("NOW", "Correction-of-REAL")]
+    )
+    assert rc == 1
+    assert "RESOLVES" in out
+
+
+def test_history_sha_bare_correction_marker_supersedes_nothing(tmp_path) -> None:
+    """Backward compatibility: a plain `Correction` marker is still accepted as a
+    header, but it does NOT clear a bad SHA — only `Correction-of-<sha>` pairs."""
+    rc, out, _ = _run_history_sha(
+        tmp_path,
+        [("2026-01-01T00:00:00Z", _DEAD_SHA), ("2026-01-02T00:00:00Z", "Correction")],
+    )
+    assert rc == 1
+    assert "does not resolve" in out
+
+
+def test_history_sha_clean_history_stays_green(tmp_path) -> None:
+    """Discriminating control: without it, a gate that failed unconditionally
+    would pass every assertion above."""
+    rc, out, _ = _run_history_sha(tmp_path, [("NOW", "REAL")])
+    assert rc == 0, out
+    assert "verified" in out

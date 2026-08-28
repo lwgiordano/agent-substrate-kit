@@ -125,7 +125,7 @@
         "scripts/run_substrate_evals.py",
         "scripts/substrate_audit.py"
       ],
-      "last_human_reviewed": "2026-08-27",
+      "last_human_reviewed": "2026-08-28",
       "path": "docs/knowledge/05_evals_assurance.md",
       "purpose": "Behavioral evals, deterministic validators, audits, and assurance limits."
     },

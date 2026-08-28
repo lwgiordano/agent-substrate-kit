@@ -66,6 +66,13 @@ _BUG_FIX_SUBJECT_PATTERNS: tuple[re.Pattern[str], ...] = (
     # Loose: `fix` or `bug` as a word followed by a colon within
     # the first 60 chars (catches "2026-04-29 pass-2: 3 fixes")
     re.compile(r"^.{0,60}\b(fix|bug)(es|ed|ing|fix|fixes)?\b.{0,30}:", re.IGNORECASE),
+    # v3.8.38 (round-21 P2): a VERSION-prefixed AUDIT-REMEDIATION release
+    # (`vX.Y.Z: remediate ... N findings`) is a batch of bug fixes and must
+    # carry a postmortem or an explicit opt-out — the old heuristics missed it
+    # because the colon follows the version, not a `fix`/`bug` token. Scoped to
+    # remediation/finding language so ordinary FEATURE releases
+    # (`v3.8.35: bus claim leases ...`) do NOT trip.
+    re.compile(r"^v?\d+\.\d+\.\d+:.*(\bremediat\w*|\d+\s+findings?\b)", re.IGNORECASE),
 )
 
 

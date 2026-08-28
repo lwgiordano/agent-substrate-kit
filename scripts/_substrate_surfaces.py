@@ -23,12 +23,21 @@ from __future__ import annotations
 # --- CONTEXT surfaces: agent reads these AS instructions/knowledge ---
 CONTEXT_GLOBS = [
     "AGENTS.md", "CLAUDE.md", "DESIGN.md",
+    # v3.8.47 (round-30 P3): the bus is coordination prose that agents
+    # READ, so injected instructions posted there reach model context the
+    # same way HISTORY.md would. It is scanned with one narrow carve-out
+    # (see EVIDENCE_QUOTING_SURFACES in check_agent_harness): it is also
+    # the audit channel, where an attack string must be quotable.
+    "AGENT_BUS.md",
     ".claude/**/*.md", ".codex/**/*.md", ".codex/**/*.toml", ".agents/**/*.md",
     ".mcp.json",
     ".github/copilot-instructions.md", ".github/instructions/**/*.md",
     ".github/skills/**/*.md",
-    "docs/HISTORY.md", "docs/README.md", "docs/ARCHITECTURE.md", "docs/INTENT.md",
+    "docs/HISTORY.md", "docs/REJECTED.md", "docs/README.md", "docs/ARCHITECTURE.md",
+    "docs/INTENT.md",
     "docs/knowledge/**/*.md", "docs/decisions/**/*.md", "docs/postmortems/**/*.md",
+    # Plans/specs are operational instructions consumed directly by agents.
+    "docs/superpowers/**/*.md",
     # auditor-reference material — read by checklist-auditor / ultrareview
     "docs/blind-spot-checklists/**/*.md", "docs/templates/**/*.md",
     # UI design system — AGENTS.md tells agents to read these on UI work.
@@ -60,7 +69,13 @@ CONTEXT_GLOBS = [
 _SKILL_RESOURCE_EXTS = ("sh", "py", "js", "ts", "json", "yml", "yaml", "toml")
 _SKILL_ROOTS = (".claude/skills", ".agents/skills", ".github/skills")
 CODE_GLOBS = [
-    "manage.sh", "pytest.ini", ".pre-commit-config.yaml", ".gitattributes", ".gitignore",
+    # Root EXECUTION surfaces the agent/CI actually runs. manage.sh was scanned,
+    # but bootstrap/agentsync/package_release were NOT (round-20 P1) — a
+    # pipe-to-shell payload dropped into package_release.sh passed the harness
+    # scan clean. All four are shell the substrate executes, so all four are
+    # content-scanned. (v3.8.37)
+    "manage.sh", "bootstrap.sh", "agentsync.sh", "package_release.sh",
+    "pytest.ini", ".pre-commit-config.yaml", ".gitattributes", ".gitignore",
     # .substrate/config is read by manage.sh/CI as gate commands — it is
     # an execution surface and MUST be scanned for shell-danger (it is
     # parsed as data, never sourced, but its command values still run).
@@ -95,16 +110,24 @@ HARNESS_ALLOWLIST = {"scripts/harness_patterns.json"}
 # Directories owned recursively (a trailing-slash CODEOWNERS rule covers them).
 OWNED_DIRS = [
     "scripts", "tests", ".claude", ".codex", ".agents",
-    "docs/knowledge", "docs/decisions", "docs/blind-spot-checklists", "docs/templates",
+    "docs/decisions", "docs/blind-spot-checklists", "docs/templates",
     ".github/hooks", ".github/instructions", ".github/workflows",
 ]
 OWNED_FILES = [
-    "AGENTS.md", "CLAUDE.md", "DESIGN.md", "manage.sh", "pytest.ini", ".pre-commit-config.yaml",
+    # Root execution surfaces are content-scanned (CODE_GLOBS) AND review-gated
+    # (v3.8.37) — a scanned-but-unowned script could be replaced without a
+    # CODEOWNER seeing it. bootstrap/agentsync/package_release join manage.sh.
+    "AGENTS.md", "CLAUDE.md", "DESIGN.md", "AGENT_BUS.md", "manage.sh", "bootstrap.sh",
+    "agentsync.sh", "package_release.sh", "pytest.ini", ".pre-commit-config.yaml",
     ".gitattributes", ".gitignore", ".github/copilot-instructions.md",
     ".github/dependabot.yml", ".substrate/config", ".substrate/required_profile",
-    "docs/HISTORY.md", "docs/README.md", "docs/ARCHITECTURE.md", "docs/INTENT.md",
+    "docs/HISTORY.md", "docs/REJECTED.md", "docs/README.md", "docs/ARCHITECTURE.md", "docs/INTENT.md",
+    # The generated consumer guide and installed scaffold are substrate-owned;
+    # project-authored knowledge siblings are governed context, not provenance.
+    "docs/knowledge/00_substrate.md", "docs/knowledge/_template.md",
 ]
-# Optional agent-control surfaces: required-owned ONLY when present.
+# Optional substrate-owned surfaces: required-owned ONLY when present and part
+# of the installed machinery baseline when present.
 # .substrate/trust/* are the release/upgrade TRUST ANCHORS — owned-when-present so a PR can't
 # swap a verification key/identity without CODEOWNER review (v3.7.13; sigstore_identity v3.7.20).
 # They are ALSO frozen by trusted-base (the release root of trust).
@@ -116,6 +139,14 @@ OPTIONAL_FILES = [".mcp.json", ".substrate/trust/minisign.pub",
 # module's contract that both surface classes are required-owned. Owned-when-present
 # (not unconditionally) so a consumer that strips templates/ is not falsely failed.
 OPTIONAL_DIRS = [".github/skills", "docs/postmortems", "design-system", "templates"]
+# Project-authored agent context that must always receive CODEOWNER review but
+# must NOT become substrate install ownership/drift. Knowledge exists in every
+# install, while Superpowers plans/specs are optional adoption surfaces.
+GOVERNED_DIRS = ["docs/knowledge"]
+# Project-authored agent context that still requires CODEOWNER review when
+# present, but must NOT become substrate install ownership/drift. Keeping this
+# distinct prevents a normal plan edit from blocking a later kit upgrade.
+GOVERNED_OPTIONAL_DIRS = ["docs/superpowers"]
 # NOTE: the substrate-init installer (installer/) carries a COPY of the trust key, but the
 # authoritative anchor is .substrate/trust/minisign.pub (OPTIONAL_FILES, owned + frozen). The
 # installer copy is guarded against drift by test_installer_vendored_pubkey_matches_kit rather
@@ -159,7 +190,7 @@ def audit_trigger_paths():
             paths.add(g.rsplit("/", 1)[0] + "/**")
         else:
             paths.add(g)
-    for d in OWNED_DIRS + OPTIONAL_DIRS:
+    for d in OWNED_DIRS + OPTIONAL_DIRS + GOVERNED_DIRS + GOVERNED_OPTIONAL_DIRS:
         paths.add(d + "/**")
     for f in OWNED_FILES + OPTIONAL_FILES:
         paths.add(f)

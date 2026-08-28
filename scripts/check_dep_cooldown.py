@@ -28,6 +28,32 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+def _repo_root():
+    """Repo root for containment checks in functions that take no root param."""
+    try:
+        from _substrate_root import substrate_root as _sr2
+        return _sr2()
+    except Exception:
+        return Path.cwd()
+
+
+# v3.8.43 (round-26): shared guarded file-IO helpers. Fallbacks fail CLOSED —
+# a reader yields None (no usable content) and a writer RAISES; neither
+# degrades to an unguarded operation.
+
+try:
+    from _doc_common import safe_read_text as _safe_read_text
+except Exception:  # pragma: no cover - stripped install
+    def _safe_read_text(path, root=None, max_bytes=None, tail_bytes=None):
+        return None
+
+try:
+    from _doc_common import safe_atomic_write as _safe_atomic_write
+except Exception:  # pragma: no cover - stripped install
+    def _safe_atomic_write(*a, **k):
+        raise OSError("safe_atomic_write unavailable — refusing an unguarded write")
+from _doc_common import read_lock as _dc_read_lock  # noqa: E402
 try:
     from _substrate_root import substrate_root as _sr
     _DEFAULT_ROOT = _sr()
@@ -39,8 +65,11 @@ _TIMEOUT = 8
 
 def _cfg_int(root: Path, key: str) -> int:
     cfg = root / ".substrate" / "config"
-    if cfg.is_file():
-        for ln in cfg.read_text(encoding="utf-8", errors="replace").splitlines():
+    if _present(cfg):
+        raw = _safe_read_text(cfg, root, max_bytes=1 << 20)
+        if raw is None:
+            raise ValueError(f".substrate/config exists but is unreadable or unsafe")
+        for ln in raw.splitlines():
             ln = ln.split("#", 1)[0].strip()
             if ln.startswith(key + "="):
                 v = ln.split("=", 1)[1].strip().strip("\"'")
@@ -51,27 +80,54 @@ def _cfg_int(root: Path, key: str) -> int:
 def _required(root: Path, argv) -> bool:
     if "--require" in argv:
         return True
-    p = root / ".substrate" / "required_dep_cooldown"
-    try:
-        return p.is_file() and p.read_text(encoding="utf-8").strip() == "1"
-    except Exception:
-        return False
+    # v3.8.36: canonical fail-closed lock read (Codex round-19) — a present
+    # lock that is malformed (symlink/dir/unreadable/undecodable/garbage)
+    # means the tier IS required; only a genuinely absent lock or a valid
+    # '0' leaves it optional.
+    state, val, _reason = _dc_read_lock(root / ".substrate" / "required_dep_cooldown", {"0", "1"}, root=root)
+    if state == "bad":
+        return True
+    return state == "ok" and val == "1"
 
 
 # ---- direct-dependency discovery (DIRECT only for v1; transitive is a later mode) ----
+
+def _present(path: Path) -> bool:
+    try:
+        return path.exists() or path.is_symlink()
+    except OSError:
+        return True
+
+
+def _read_manifest(path: Path, root: Path, label: str, max_bytes: int) -> str | None:
+    """Read a manifest/lock only when it is safely readable.
+
+    `safe_read_text(...) is None` means "present but not trusted" just as much
+    as it can mean absent, and required cooldown cannot turn that into an empty
+    dependency set. Check presence first so absent files keep the historical
+    ecosystem-not-present skip while FIFO/hard-link/symlink surfaces fail closed.
+    """
+    if not _present(path):
+        return None
+    raw = _safe_read_text(path, root, max_bytes=max_bytes)
+    if raw is None:
+        raise ValueError(f"{label} exists but is unreadable or not a private regular file: {path.name}")
+    return raw
 
 def _npm_direct(root: Path):
     """(name, version) for direct npm deps: names from package.json, resolved versions
     from package-lock.json (v2/v3 `packages` map). No lockfile → cannot resolve → []."""
     pj, pl = root / "package.json", root / "package-lock.json"
-    if not pj.is_file() or not pl.is_file():
+    pj_raw = _read_manifest(pj, root, "npm manifest", 64 << 20)
+    pl_raw = _read_manifest(pl, root, "npm lockfile", 256 << 20)
+    if pj_raw is None or pl_raw is None:
         return []
     try:
         names = set()
-        d = json.loads(pj.read_text(encoding="utf-8"))
+        d = json.loads(pj_raw)
         for grp in ("dependencies", "devDependencies"):
             names.update((d.get(grp) or {}).keys())
-        lock = json.loads(pl.read_text(encoding="utf-8"))
+        lock = json.loads(pl_raw)
         pkgs = lock.get("packages", {})
         out = []
         for n in sorted(names):
@@ -87,14 +143,16 @@ def _py_direct(root: Path):
     """Direct python deps: names from pyproject.toml (PEP 621 project.dependencies +
     poetry), resolved versions from uv.lock. Needs tomllib (3.11+) + uv.lock."""
     pp, ul = root / "pyproject.toml", root / "uv.lock"
-    if not pp.is_file() or not ul.is_file():
+    pp_raw = _read_manifest(pp, root, "python manifest", 64 << 20)
+    ul_raw = _read_manifest(ul, root, "python lockfile", 256 << 20)
+    if pp_raw is None or ul_raw is None:
         return []
     try:
         import tomllib
     except Exception:
         return []  # no TOML parser → skip ecosystem (handled as "no deps found")
     try:
-        proj = tomllib.loads(pp.read_text(encoding="utf-8"))
+        proj = tomllib.loads(pp_raw)
         names = set()
         for dep in (proj.get("project", {}).get("dependencies") or []):
             m = re.match(r"^([A-Za-z0-9._-]+)", dep)
@@ -102,7 +160,7 @@ def _py_direct(root: Path):
                 names.add(m.group(1).lower().replace("_", "-"))
         poetry = proj.get("tool", {}).get("poetry", {}).get("dependencies", {})
         names.update(k.lower().replace("_", "-") for k in poetry if k.lower() != "python")
-        lock = tomllib.loads(ul.read_text(encoding="utf-8"))
+        lock = tomllib.loads(ul_raw)
         out = []
         for pkg in lock.get("package", []):
             nm = str(pkg.get("name", "")).lower().replace("_", "-")
@@ -118,11 +176,12 @@ def _go_direct(root: Path):
     """Direct Go deps: go.mod `require` lines NOT marked `// indirect`. go.mod carries
     the resolved version inline."""
     gm = root / "go.mod"
-    if not gm.is_file():
+    gm_raw = _read_manifest(gm, root, "go manifest", 8 << 20)
+    if gm_raw is None:
         return []
     try:
         out, in_block = [], False
-        for ln in gm.read_text(encoding="utf-8").splitlines():
+        for ln in gm_raw.splitlines():
             s = ln.strip()
             if s.startswith("require ("):
                 in_block = True
@@ -200,9 +259,17 @@ def main(argv) -> int:
     ap.add_argument("--json", action="store_true")
     a, _unknown = ap.parse_known_args(argv)
     root = Path(a.root)
-    days = a.days if a.days is not None else _cfg_int(root, "SUBSTRATE_DEP_COOLDOWN")
-    required = _required(root, argv)
+    try:
+        days = a.days if a.days is not None else _cfg_int(root, "SUBSTRATE_DEP_COOLDOWN")
+        required = _required(root, argv)
+    except ValueError as e:
+        print(f"dep-cooldown: BLOCK — {e}", file=sys.stderr)
+        return 2
     if days <= 0:
+        if required:
+            print("dep-cooldown: BLOCK — required_dep_cooldown=1 but SUBSTRATE_DEP_COOLDOWN=0",
+                  file=sys.stderr)
+            return 2
         if a.json:
             print(json.dumps({"cooldown_days": days, "enabled": False}))
         else:
@@ -219,7 +286,7 @@ def main(argv) -> int:
     cache = {}
     if cache_path.is_file():
         try:
-            cache = json.loads(cache_path.read_text(encoding="utf-8"))
+            cache = json.loads(_safe_read_text(cache_path, root, max_bytes=8 << 20) or "{}")
         except Exception:
             cache = {}
     now = datetime.now(timezone.utc)
@@ -255,7 +322,8 @@ def main(argv) -> int:
     if cache_dirty:
         try:
             cache_path.parent.mkdir(parents=True, exist_ok=True)
-            cache_path.write_text(json.dumps(cache, indent=2, sort_keys=True), encoding="utf-8")
+            _safe_atomic_write(cache_path,
+                               json.dumps(cache, indent=2, sort_keys=True), root=root)
         except Exception:
             pass
 

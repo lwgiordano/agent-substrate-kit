@@ -31,7 +31,38 @@ import sys
 import tempfile
 import types
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+# v3.8.43 (round-26): shared guarded file-IO helpers. Fallbacks fail CLOSED —
+# a reader yields None (no usable content) and a writer RAISES; neither
+# degrades to an unguarded operation.
+
+try:
+    from _doc_common import safe_read_text as _safe_read_text
+except Exception:  # pragma: no cover - stripped install
+    def _safe_read_text(path, root=None, max_bytes=None, tail_bytes=None):
+        return None
+
+try:
+    from _doc_common import safe_atomic_write as _safe_atomic_write
+except Exception:  # pragma: no cover - stripped install
+    def _safe_atomic_write(*a, **k):
+        raise OSError("safe_atomic_write unavailable — refusing an unguarded write")
+
+try:
+    from _doc_common import refuse_linked_leaf as _refuse_linked_leaf
+except Exception:  # pragma: no cover - stripped install
+    def _refuse_linked_leaf(path):
+        return "guard unavailable"
+
+try:
+    from _doc_common import safe_read_bytes as _safe_read_bytes
+except Exception:  # pragma: no cover - stripped install
+    def _safe_read_bytes(path, root=None, max_bytes=None, tail_bytes=None):
+        return None
+from _doc_common import read_lock as _dc_read_lock  # noqa: E402
 
 
 def _load_verify(root: Path | None = None):
@@ -81,6 +112,11 @@ def _load_verify(root: Path | None = None):
                 except Exception as e:
                     raise SystemExit(f"upgrade: refusing — cannot hash {_rel} to check it against "
                                      f"the drift baseline: {e}")
+                if _got is None:
+                    raise SystemExit(
+                        f"upgrade: refusing — {_rel} is missing or is an unsafe leaf "
+                        "(symlink/hard link/FIFO), so it cannot be checked against the "
+                        "drift baseline.")
                 if _got != _want:
                     raise SystemExit(
                         f"upgrade: refusing — {_rel} does not match the drift baseline, so source "
@@ -122,7 +158,16 @@ def _exec_module_from_source(path: Path):
     """Compile and execute a module from its SOURCE BYTES, bypassing the bytecode cache entirely,
     and register it in sys.modules under its stem so sibling imports bind to it (v3.8.25)."""
     name = path.stem
-    code = compile(path.read_bytes(), str(path), "exec")
+    # v3.8.47 (round-30 P2, found by the sweep): this COMPILES AND EXECUTES
+    # the bytes it reads. Reading code to run through an unguarded path is
+    # the highest-value instance of this class in the kit — a symlinked or
+    # hard-linked engine module would execute outside bytes with the
+    # upgrader's privileges.
+    _src = _safe_read_bytes(path, max_bytes=None)
+    if _src is None:
+        raise OSError(f"refusing to execute a module from an unsafe or "
+                      f"unreadable source: {path}")
+    code = compile(_src, str(path), "exec")
     mod = types.ModuleType(name)
     mod.__file__ = str(path)
     sys.modules[name] = mod
@@ -137,13 +182,28 @@ PRESERVE_FILES = [
     ".substrate/config", ".substrate/required_profile", ".substrate/required_sandbox",
     ".substrate/required_remote_governance", ".substrate/sandbox.json",
     ".github/dependabot.yml",
-    "docs/ARCHITECTURE.md", "docs/INTENT.md", "docs/HISTORY.md", "docs/README.md",
+    "docs/ARCHITECTURE.md", "docs/INTENT.md", "docs/HISTORY.md", "docs/REJECTED.md",
+    "docs/README.md",
 ]
 PRESERVE_DIRS = ["design-system", "docs/decisions", "docs/postmortems"]
 
 # Never drift-check the provenance file itself — it is rewritten every upgrade and is
 # excluded from its own baseline (see write_install_json._BASELINE_EXCLUDE). v3.7.16 P1.
 _DRIFT_EXCLUDE = {".substrate/install.json"}
+
+def _retired_knowledge_baseline_entry(rel: str, coverage: set[str] | None) -> bool:
+    """Whether NEW-kit ownership retires an old recursive knowledge entry.
+
+    Coverage comes from the selected kit's canonical provenance writer. None is
+    fail-closed: if that trusted calculation cannot run, no old entry is retired.
+    Restricting migration to the intentionally mixed knowledge directory avoids
+    treating unrelated inventory mistakes as authorization to ignore drift.
+    """
+    return (
+        coverage is not None
+        and rel.startswith("docs/knowledge/")
+        and rel not in coverage
+    )
 
 
 def _run(cmd, cwd=None, env=None):
@@ -154,7 +214,7 @@ def _load_install_json(root: Path) -> dict | None:
     p = root / ".substrate" / "install.json"
     if p.is_file():
         try:
-            data = json.loads(p.read_text(encoding="utf-8"))
+            data = json.loads(_safe_read_text(p, root, max_bytes=8 << 20) or "null")
         except Exception:
             return None
         # install.json is agent-writable and drift-EXCLUDED, so a hostile/garbled shape
@@ -199,7 +259,7 @@ def _parse_config_text(text: str) -> dict:
 def _parse_config(root: Path) -> dict:
     try:
         return _parse_config_text(
-            (root / ".substrate" / "config").read_text(encoding="utf-8", errors="replace"))
+            _safe_read_text(root / ".substrate" / "config", root, max_bytes=1 << 20) or "")
     except Exception:
         return {}
 
@@ -255,9 +315,19 @@ def _profile_alias(ans: dict) -> str:
     return base
 
 
-def _sha256(p: Path) -> str:
+def _sha256(p: Path, root: Path | None = None) -> str | None:
+    """Guarded hash: None when the leaf is absent or unsafe (link/FIFO/escape).
+
+    v3.8.44 (round-27, surfaced by the gate's new interprocedural pass): this
+    was a raw read_bytes() on whatever path it was handed, and every caller
+    compares the result to a baseline hash. Hashing OUTSIDE bytes through a
+    planted link makes a tampered file compare clean, which is the one thing a
+    drift check must not do. None is never equal to a recorded hash, so an
+    unreadable leaf now reads as DRIFT rather than as a match.
+    """
     import hashlib
-    return hashlib.sha256(p.read_bytes()).hexdigest()
+    raw = _safe_read_bytes(p, root, max_bytes=None)
+    return None if raw is None else hashlib.sha256(raw).hexdigest()
 
 
 def _resolve_kit(src: Path, root: Path, allow_unverified: bool, tmp: Path) -> tuple[Path, str, str | None]:
@@ -299,7 +369,8 @@ def _resolve_kit(src: Path, root: Path, allow_unverified: bool, tmp: Path) -> tu
     raise SystemExit("upgrade: extracted archive has no bootstrap.sh")
 
 
-def _drifted(root: Path, baseline: dict | None, kit: Path | None = None) -> list[str]:
+def _drifted(root: Path, baseline: dict | None, kit: Path,
+             coverage: set[str]) -> list[str]:
     """Machinery files whose local hash differs from the baseline (user edited a substrate
     file). Preserve-set files are excluded — they are expected to differ. When `kit` is given,
     completeness is also cross-checked against the NEW kit's exact overwrite set (v3.8.19)."""
@@ -314,13 +385,15 @@ def _drifted(root: Path, baseline: dict | None, kit: Path | None = None) -> list
     for rel, want in owned.items():
         if not isinstance(rel, str) or not isinstance(want, str):
             continue
+        if _retired_knowledge_baseline_entry(rel, coverage):
+            continue
         if rel in preserve or rel in _DRIFT_EXCLUDE or any(rel.startswith(d + "/") for d in PRESERVE_DIRS):
             continue
         p = root / rel
         # is_file()/_sha256 follow symlinks — but a symlinked owned dest is a hard tamper
         # condition handled by _unsafe_owned_dests (abort), so here we only compare regular
         # files' content.
-        if p.is_file() and not p.is_symlink() and _sha256(p) != want:
+        if p.is_file() and not p.is_symlink() and _sha256(p, root) != want:
             out.append(rel)
     # Completeness cross-check (v3.8.15 / P2): the owned map is agent-writable, so an attacker
     # can EDIT an owned file AND DELETE its entry so the hash loop above never sees it. Scan the
@@ -328,7 +401,15 @@ def _drifted(root: Path, baseline: dict | None, kit: Path | None = None) -> list
     # but that has NO baseline hash is UNVERIFIABLE -> flag as drift (needs --force). (Project
     # files legitimately never live under scripts/ — it is substrate-reserved by the hard rules —
     # so this does not false-flag a well-behaved repo.)
-    ownkeys = set(owned)
+    # Only a well-formed path/hash pair vouches for content. A null/list hash is
+    # skipped by the comparison loop above and must stay absent here too; counting
+    # its key as vouched lets forged provenance suppress the completeness check.
+    ownkeys = {
+        rel for rel, want in owned.items()
+        if isinstance(rel, str)
+        and isinstance(want, str)
+        and not _retired_knowledge_baseline_entry(rel, coverage)
+    }
     for d in _COMPLETENESS_SCAN_DIRS:
         base = root / d
         if not base.is_dir():
@@ -368,49 +449,46 @@ def _drifted(root: Path, baseline: dict | None, kit: Path | None = None) -> list
     # dormant .substrate/ staged templates) are NOT flagged — the baseline never hashed those,
     # so "unvouched" is their normal state and flagging them would false-drift every upgrade
     # (a pre-existing coverage gap, documented, not a regression).
-    if kit is not None:
-        coverage = _baseline_coverage(root, kit)
-        if coverage is not None:
-            for rel in _kit_overwrite_set(kit):
-                if rel in preserve or rel in _DRIFT_EXCLUDE or any(rel.startswith(pd + "/") for pd in PRESERVE_DIRS):
-                    continue
-                p = root / rel
-                if p.is_file() and not p.is_symlink() and rel in coverage and rel not in ownkeys:
-                    out.append(rel)   # render target the baseline should vouch for, but doesn't
-            # v3.8.20/v3.8.21 (P2, findings upgrade:350 + upgrade:296): the leaf set above misses
-            # DELETION effects. bootstrap replaces skill dirs WHOLESALE (`rm -rf` + `cp -R`), so
-            # ANYTHING under one of those dirs that is not vouched by the baseline is silently
-            # destroyed — a local FILE (350) or a local SYMLINK / other non-regular entry (296,
-            # which the earlier is_file-only scan skipped even though rm -rf deletes it too). The
-            # whole subtree dies, so the rule is not "in the render overwrite set" but simply
-            # "present + unvouched": any entry under a replaced dir whose path the baseline does
-            # not vouch for is drift (needs --force). After a clean install every kit skill file
-            # IS in ownkeys, so a well-behaved repo is not flagged; ephemeral build artifacts are
-            # skipped so they never force --force.
-            for d in _kit_replaced_dirs(kit):
-                base = root / d
-                # v3.8.22 (upgrade:298): if the replaced-dir ROOT is itself a symlink, bootstrap's
-                # `rm -rf "$dest"` deletes the link and `cp -R` writes a fresh dir — so the operator's
-                # symlink is destroyed. The v3.8.21 scan `continue`d on a symlinked base and missed it;
-                # flag the root itself as drift (needs --force) unless the baseline already vouches it.
-                if base.is_symlink():
-                    if d not in preserve and d not in ownkeys \
-                       and not any(d.startswith(pd + "/") for pd in PRESERVE_DIRS):
-                        out.append(d)
-                    continue
-                if not base.is_dir():
-                    continue
-                for p in sorted(base.rglob("*")):
-                    if p.is_dir() and not p.is_symlink():
-                        continue   # a real subdir carries no content of its own; its entries are walked
-                    relp = p.relative_to(root)
-                    if any(part in _SYMLINK_SCAN_SKIP for part in relp.parts):
-                        continue   # __pycache__/.pytest_cache/... — build noise, never force --force
-                    rel = relp.as_posix()
-                    if rel in preserve or rel in _DRIFT_EXCLUDE or any(rel.startswith(pd + "/") for pd in PRESERVE_DIRS):
-                        continue
-                    if rel not in ownkeys:
-                        out.append(rel)   # present under a wholesale-replaced dir, unvouched -> would be DELETED
+    for rel in _kit_overwrite_set(kit):
+        if rel in preserve or rel in _DRIFT_EXCLUDE or any(rel.startswith(pd + "/") for pd in PRESERVE_DIRS):
+            continue
+        p = root / rel
+        if p.is_file() and not p.is_symlink() and rel in coverage and rel not in ownkeys:
+            out.append(rel)   # render target the baseline should vouch for, but doesn't
+    # v3.8.20/v3.8.21 (P2, findings upgrade:350 + upgrade:296): the leaf set above misses
+    # DELETION effects. bootstrap replaces skill dirs WHOLESALE (`rm -rf` + `cp -R`), so
+    # ANYTHING under one of those dirs that is not vouched by the baseline is silently
+    # destroyed — a local FILE (350) or a local SYMLINK / other non-regular entry (296,
+    # which the earlier is_file-only scan skipped even though rm -rf deletes it too). The
+    # whole subtree dies, so the rule is not "in the render overwrite set" but simply
+    # "present + unvouched": any entry under a replaced dir whose path the baseline does
+    # not vouch for is drift (needs --force). After a clean install every kit skill file
+    # IS in ownkeys, so a well-behaved repo is not flagged; ephemeral build artifacts are
+    # skipped so they never force --force.
+    for d in _kit_replaced_dirs(kit):
+        base = root / d
+        # v3.8.22 (upgrade:298): if the replaced-dir ROOT is itself a symlink, bootstrap's
+        # `rm -rf "$dest"` deletes the link and `cp -R` writes a fresh dir — so the operator's
+        # symlink is destroyed. The v3.8.21 scan `continue`d on a symlinked base and missed it;
+        # flag the root itself as drift (needs --force) unless the baseline already vouches it.
+        if base.is_symlink():
+            if d not in preserve and d not in ownkeys \
+               and not any(d.startswith(pd + "/") for pd in PRESERVE_DIRS):
+                out.append(d)
+            continue
+        if not base.is_dir():
+            continue
+        for p in sorted(base.rglob("*")):
+            if p.is_dir() and not p.is_symlink():
+                continue   # a real subdir carries no content of its own; its entries are walked
+            relp = p.relative_to(root)
+            if any(part in _SYMLINK_SCAN_SKIP for part in relp.parts):
+                continue   # __pycache__/.pytest_cache/... — build noise, never force --force
+            rel = relp.as_posix()
+            if rel in preserve or rel in _DRIFT_EXCLUDE or any(rel.startswith(pd + "/") for pd in PRESERVE_DIRS):
+                continue
+            if rel not in ownkeys:
+                out.append(rel)   # present under a wholesale-replaced dir, unvouched -> would be DELETED
     return sorted(set(out))
 
 
@@ -421,21 +499,74 @@ def _baseline_coverage(root: Path, kit: Path) -> set[str] | None:
     import` resolves to the target's (possibly locally-modified) module and RUNS its top-level
     code — during `upgrade --plan`, before drift is even refused. Exec the kit's file in an
     isolated module and restore sys.path so a kit-side `sys.path.insert` has no lasting effect.
-    None if unavailable (the kit-set completeness scan is then skipped; other scans still run)."""
-    src = kit / "scripts" / "write_install_json.py"
-    if not src.is_file():
+    None if unavailable; the caller treats that as a hard pre-render failure."""
+    scripts = kit / "scripts"
+    surfaces_src = scripts / "_substrate_surfaces.py"
+    src = scripts / "write_install_json.py"
+    if not surfaces_src.is_file() or not src.is_file():
         return None
     _saved_path = list(sys.path)
+    _saved_mods = {
+        name: sys.modules.get(name)
+        for name in ("_substrate_surfaces", "write_install_json")
+    }
     try:
         sys.path.insert(0, str(src.parent))
         # Compile from source rather than importlib (v3.8.25): same bytecode-cache bypass as the
         # verifier loader, so a planted `__pycache__` .pyc can never stand in for the kit's source.
+        surfaces = _exec_module_from_source(surfaces_src)
         mod = _exec_module_from_source(src)   # trusted kit code, never the target's
-        return set(mod.owned_files(root))
+        raw = mod.owned_files(root)
+        # Treat this as a security oracle, not an arbitrary iterable. Validate
+        # both serialization shape and exact parity with the inventory constants
+        # the selected kit's writer imported. Empty, absolute, parent-traversing,
+        # duplicate, or irrelevant-only results are unavailable coverage.
+        if not isinstance(raw, list) or not raw:
+            return None
+
+        def _valid_rel(rel) -> bool:
+            if not isinstance(rel, str) or not rel or "\\" in rel:
+                return False
+            posix = PurePosixPath(rel)
+            return not posix.is_absolute() and ".." not in posix.parts \
+                and rel == posix.as_posix()
+
+        if not all(_valid_rel(rel) for rel in raw) or raw != sorted(set(raw)):
+            return None
+        groups = [getattr(mod, name, None) for name in (
+            "OWNED_FILES", "OPTIONAL_FILES", "OWNED_DIRS", "OPTIONAL_DIRS",
+        )]
+        skip = getattr(mod, "COVERAGE_SKIP_PARTS", None)
+        canonical_groups = [getattr(surfaces, name, None) for name in (
+            "OWNED_FILES", "OPTIONAL_FILES", "OWNED_DIRS", "OPTIONAL_DIRS",
+        )]
+        canonical_skip = getattr(surfaces, "COVERAGE_SKIP_PARTS", None)
+        if groups != canonical_groups or skip != canonical_skip:
+            return None
+        if any(not isinstance(group, list) or not all(_valid_rel(x) for x in group)
+               for group in groups):
+            return None
+        if not isinstance(skip, set) or not all(isinstance(x, str) for x in skip):
+            return None
+        expected = {rel for rel in groups[0] + groups[1] if (root / rel).is_file()}
+        for rel in groups[2] + groups[3]:
+            base = root / rel
+            if not base.is_dir():
+                continue
+            for path in base.rglob("*"):
+                if path.is_file() and not any(part in skip for part in path.parts):
+                    expected.add(path.relative_to(root).as_posix())
+        coverage = set(raw)
+        return coverage if coverage == expected else None
     except Exception:
         return None
     finally:
         sys.path[:] = _saved_path   # undo any sys.path.insert the kit module did at import
+        for name, previous in _saved_mods.items():
+            if previous is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = previous
 
 
 _COMPLETENESS_SCAN_DIRS = ("scripts",)
@@ -529,7 +660,8 @@ def _kit_overwrite_set(kit: Path) -> set[str]:
     # Direct-write regenerated files (force-overwritten by bootstrap's redirection sites).
     out.update((".substrate/config", ".substrate/required_profile", ".substrate/required_sandbox",
                 ".substrate/required_remote_governance", ".substrate/sandbox.json",
-                "docs/HISTORY.md", "docs/README.md", "docs/knowledge/00_substrate.md",
+                "docs/HISTORY.md", "docs/REJECTED.md", "docs/README.md",
+                "docs/knowledge/00_substrate.md",
                 ".github/dependabot.yml"))
     return out
 
@@ -552,7 +684,8 @@ _SYMLINK_SCAN_SKIP = {".git", "venv", ".venv", "node_modules", "__pycache__",
                       ".pytest_cache", ".ruff_cache", ".mypy_cache"}
 
 
-def _unsafe_owned_dests(root: Path, baseline: dict | None) -> list[str]:
+def _unsafe_owned_dests(root: Path, baseline: dict | None,
+                        coverage: set[str]) -> list[str]:
     """Destinations a render `cp`/`sed >` would FOLLOW to write outside the repo (P1).
     bootstrap's copy()/render() follow a symlinked destination, and they write to EVERY
     rendered path — not just the ones the OLD baseline recorded — so a v3.8.11 check of
@@ -574,7 +707,10 @@ def _unsafe_owned_dests(root: Path, baseline: dict | None) -> list[str]:
             bad.append(rel)
 
     owned = baseline.get("owned_file_sha256", {}) if isinstance(baseline, dict) else {}
-    for rel in [r for r in owned if isinstance(r, str)] + list(PRESERVE_FILES):
+    for rel in [
+        r for r in owned
+        if isinstance(r, str) and not _retired_knowledge_baseline_entry(r, coverage)
+    ] + list(PRESERVE_FILES):
         p = root / rel
         try:
             if p.is_symlink():
@@ -648,31 +784,43 @@ def _read_cfg_profile(root: Path) -> str:
     return _parse_config(root).get("SUBSTRATE_PROFILE", "standard")
 
 
+def _read_lock_or_refuse(root: Path, name: str, allowed: set, absent: str) -> str:
+    """Read a frozen `.substrate/<name>` lock for render authority (v3.8.33).
+
+    ABSENT file → `absent` (no lock was ever pinned). PRESENT but unreadable or
+    holding a value outside `allowed` → REFUSE THE UPGRADE. The old readers
+    fell back to the LOWEST tier on any error, so an unreadable lock let the
+    render silently drop a required tier — the same 'trust anchor may not fail
+    open' class as v3.8.25. SystemExit surfaces as a nonzero refusal.
+
+    v3.8.36: delegates to the canonical reader — is_file() treated a DIRECTORY
+    lock as absent (Codex reproduced a --plan run sailing past a
+    required_sandbox/ directory) and followed symlinked locks; both now refuse."""
+    state, val, reason = _dc_read_lock(root / ".substrate" / name, allowed, root=root)
+    if state == "absent":
+        return absent
+    if state == "bad":
+        raise SystemExit(
+            f"substrate-upgrade: refusing — .substrate/{name}: {reason}; a malformed "
+            f"lock must not lower the render authority. Fix the lock and re-run.")
+    return val
+
+
 def _read_required_profile(root: Path) -> str:
-    try:
-        v = (root / ".substrate" / "required_profile").read_text(encoding="utf-8").strip()
-        return v if v in _PROF_RANK else "starter"
-    except Exception:
-        return "starter"
+    return _read_lock_or_refuse(root, "required_profile", set(_PROF_RANK), "starter")
 
 
 def _read_required_remote_governance(root: Path) -> str:
     """The frozen remote-governance lock. "1" means the repo REQUIRES remote
     governance (the trusted-base workflow), so the render must never turn it off
     regardless of what the agent-writable install.json/config claims (v3.8.7)."""
-    try:
-        return (root / ".substrate" / "required_remote_governance").read_text(encoding="utf-8").strip()
-    except Exception:
-        return ""
+    return _read_lock_or_refuse(root, "required_remote_governance", {"0", "1"}, "")
 
 
 def _read_required_sandbox(root: Path) -> str:
     """The frozen egress-containment lock. "1" means the repo REQUIRES the sandbox,
     so the render must never turn it off regardless of provenance/config (v3.8.8)."""
-    try:
-        return (root / ".substrate" / "required_sandbox").read_text(encoding="utf-8").strip()
-    except Exception:
-        return ""
+    return _read_lock_or_refuse(root, "required_sandbox", {"0", "1"}, "")
 
 
 def _authority_snapshot(root: Path) -> dict:
@@ -681,10 +829,31 @@ def _authority_snapshot(root: Path) -> dict:
     (_resolve_kit can be slow / involve verification), so re-comparing this snapshot
     just before the write catches a lock/config change mid-run that would otherwise
     render a stale, inconsistent state (v3.8.10 / P1 TOCTOU)."""
+    # v3.8.36: VALIDATE the locks before snapshotting them (Codex round-19 —
+    # the render answers derive from these bytes, and the refusing readers were
+    # never on this path, so a directory/symlink/undecodable lock sailed into
+    # `--plan`/render as "no lock"). A "bad" lock state refuses the upgrade
+    # here, before any derivation; the byte snapshot below is unchanged and
+    # still backs the pre-write TOCTOU re-compare.
+    _lock_domains = {"required_profile": set(_PROF_RANK),
+                     "required_remote_governance": {"0", "1"},
+                     "required_sandbox": {"0", "1"}}
+    for rel, dom in _lock_domains.items():
+        state, _v, reason = _dc_read_lock(root / ".substrate" / rel, dom, root=root)
+        if state == "bad":
+            raise SystemExit(
+                f"substrate-upgrade: refusing — .substrate/{rel}: {reason}; a malformed "
+                f"lock must not enter the render authority. Fix the lock and re-run.")
     snap = {}
     for rel in ("config", "required_profile", "required_remote_governance", "required_sandbox"):
+        # v3.8.43 (round-26): snapshotting THROUGH a link would capture outside
+        # bytes as the pre-render state of a trust anchor. None is the existing
+        # "no usable value" path, so an unsafe leaf takes it.
         try:
-            snap[rel] = (root / ".substrate" / rel).read_bytes()
+            if _refuse_linked_leaf(root / ".substrate" / rel) is not None:
+                snap[rel] = None
+            else:
+                snap[rel] = (root / ".substrate" / rel).read_bytes()
         except Exception:
             snap[rel] = None
     return snap
@@ -699,18 +868,18 @@ def _apply_profile_ratchet(root: Path, target: str) -> None:
     strict lock)."""
     cfg = root / ".substrate" / "config"
     try:
-        lines = cfg.read_text(encoding="utf-8").splitlines()
+        lines = (_safe_read_text(cfg, root, max_bytes=1 << 20) or "").splitlines()
         for i, line in enumerate(lines):
             if line.startswith("SUBSTRATE_PROFILE="):
                 lines[i] = f'SUBSTRATE_PROFILE="{target}"'
                 break
         else:
             lines.append(f'SUBSTRATE_PROFILE="{target}"')
-        cfg.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        _safe_atomic_write(cfg, "\n".join(lines) + "\n", root=root)
         req = root / ".substrate" / "required_profile"
         prev = _read_required_profile(root)
         locked = target if _PROF_RANK[target] >= _PROF_RANK.get(prev, 0) else prev
-        req.write_text(locked + "\n", encoding="utf-8")
+        _safe_atomic_write(req, locked + "\n", root=root)
         print(f"upgrade: profile ratcheted to {target} (required_profile lock={locked})")
     except Exception as e:
         print(f"upgrade: WARNING could not apply the profile ratchet: {e}", file=sys.stderr)
@@ -731,11 +900,11 @@ def _apply_capability_floor(root: Path) -> None:
         want = set()
         for lock, key in pairs:
             lp = root / ".substrate" / lock
-            if lp.is_file() and lp.read_text(encoding="utf-8").strip() == "1":
+            if (_safe_read_text(lp, root, max_bytes=1 << 16) or "").strip() == "1":
                 want.add(key)
         if not want:
             return
-        lines = cfg.read_text(encoding="utf-8").splitlines()
+        lines = (_safe_read_text(cfg, root, max_bytes=1 << 20) or "").splitlines()
         seen = set()
         for i, line in enumerate(lines):
             key = line.split("=", 1)[0].strip() if "=" in line else ""
@@ -745,7 +914,7 @@ def _apply_capability_floor(root: Path) -> None:
                 seen.add(key)
         for key in want - seen:
             lines.append(f'{key}="1"')
-        cfg.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        _safe_atomic_write(cfg, "\n".join(lines) + "\n", root=root)
     except Exception as e:
         print(f"upgrade: WARNING could not floor capability config lines: {e}", file=sys.stderr)
 
@@ -762,6 +931,20 @@ def main(argv=None) -> int:
     ap.add_argument("--profile", choices=["standard", "strict"],
                     help="RAISE the governance profile during the upgrade (raise-only)")
     a = ap.parse_args(argv)
+    try:
+        return _main_after_args(a)
+    except SystemExit as e:
+        # v3.8.36: the fail-closed lock readers signal refusal via SystemExit;
+        # at the CLI boundary that is exit code 2, never an uncaught traceback,
+        # even when a lock is truncated mid-run (TOCTOU) so the refusal fires
+        # from a later _authority_snapshot rather than the first read.
+        if isinstance(e.code, int):
+            return e.code
+        print(str(e.code), file=sys.stderr)
+        return 2
+
+
+def _main_after_args(a) -> int:
     root = Path(a.root).resolve()
     src = Path(a.src).resolve()
     if not src.exists():
@@ -826,7 +1009,13 @@ def main(argv=None) -> int:
             print(str(e), file=sys.stderr)
             return 2
         new_ver = (kit / "VERSION").read_text(encoding="utf-8").strip() if (kit / "VERSION").is_file() else "unknown"
-        drift = _drifted(root, baseline, kit=kit)
+        coverage = _baseline_coverage(root, kit)
+        if coverage is None:
+            print("upgrade: refusing — the selected kit cannot establish baseline coverage "
+                  "from scripts/write_install_json.py. No render was attempted; restore a "
+                  "complete kit and re-run.", file=sys.stderr)
+            return 2
+        drift = _drifted(root, baseline, kit, coverage)
 
         print(f"substrate upgrade: {cur_ver} -> {new_ver}  [source: {vnote}]")
         if not baseline:
@@ -865,7 +1054,7 @@ def main(argv=None) -> int:
         # External-write guard (v3.8.11 / P1): refuse if any owned destination is a symlink
         # or resolves outside root — the render's `cp` would FOLLOW it and overwrite a file
         # outside the repo. Hard tamper condition: refused even with --force.
-        unsafe = _unsafe_owned_dests(root, baseline)
+        unsafe = _unsafe_owned_dests(root, baseline, coverage)
         if unsafe:
             print("upgrade: refusing — owned destination(s) are symlinks or resolve outside "
                   f"the repo (a render would write outside root): {', '.join(unsafe[:8])}"
@@ -900,7 +1089,11 @@ def main(argv=None) -> int:
         _lock_names = ("required_profile", "required_remote_governance", "required_sandbox")
         _snap_pre = _authority_snapshot(root)
         _locks_pre = {_n: _lock_from_snapshot(_snap_pre, _n) for _n in _lock_names}
-        r = _run(cmd)
+        # The renderer's process context is the target, not whichever checkout or
+        # shell directory launched the engine. `--target` controls bootstrap's
+        # intended destinations; cwd=root also contains any relative auxiliary
+        # writes made by the selected renderer and matches the finalizer context.
+        r = _run(cmd, cwd=root)
         if r.returncode != 0:
             _restore(root, backup, saved)
             print(f"upgrade: bootstrap --force FAILED; restored preserved files.\n{r.stderr[-1500:]}",
@@ -923,7 +1116,7 @@ def main(argv=None) -> int:
             _want = _lock_ge(_cur or "", _locks_pre.get(_n) or "")
             if _want and _want != _cur:
                 try:
-                    (root / ".substrate" / _n).write_text(_want + "\n", encoding="utf-8")
+                    _safe_atomic_write(root / ".substrate" / _n, _want + "\n", root=root)
                     print(f"upgrade: raise-only reconcile: {_n} {_cur or '(unset)'} -> {_want}",
                           file=sys.stderr)
                     _reconciled = True
@@ -1075,7 +1268,7 @@ def main(argv=None) -> int:
         ij = root / ".substrate" / "install.json"
         try:
             if ij.is_file() and not ij.is_symlink():
-                _pj = json.loads(ij.read_text(encoding="utf-8"))
+                _pj = json.loads(_safe_read_text(ij, root, max_bytes=8 << 20) or "null")
                 prov_ok = isinstance(_pj, dict) and _pj.get("kit_version") == new_ver
         except Exception:
             prov_ok = False

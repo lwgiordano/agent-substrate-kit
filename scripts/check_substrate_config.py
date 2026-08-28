@@ -16,15 +16,29 @@ Run by `manage.sh check` and `release_gate.sh` before the lang gates.
 Exit codes: 0 ok | 1 dangerous value | 2 invalid config syntax.
 """
 from __future__ import annotations
-import re, sys
+import os, re, sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+# v3.8.43 (round-26): shared guarded file-IO helpers. Fallbacks fail CLOSED —
+# a reader yields None (no usable content) and a writer RAISES; neither
+# degrades to an unguarded operation.
+
+try:
+    from _doc_common import safe_read_text as _safe_read_text
+except Exception:  # pragma: no cover - stripped install
+    def _safe_read_text(path, root=None, max_bytes=None, tail_bytes=None):
+        return None
 try:
     from _substrate_root import substrate_root as _sr
     ROOT = _sr()
 except Exception:
     ROOT = Path.cwd()
 import json
+import stat
+
+from _doc_common import read_lock as _dc_read_lock
+from _doc_common import safe_read_text as _dc_safe_read_text
 # Detection is owned by command_policy.py. FAIL CLOSED: if it cannot import
 # (broken/neutered policy module), looks_dangerous_command raises and main()
 # converts that to exit 2 — never silently allow a command value.
@@ -84,7 +98,24 @@ def _shell_danger_patterns():
     file is caught earlier by check_harness_patterns.py.)"""
     try:
         p = Path(__file__).resolve().parent / "harness_patterns.json"
-        data = json.loads(p.read_text(encoding="utf-8"))
+        # v3.8.47 (round-30 P2, found by the sweep — the reported instance was
+        # in check_agent_harness): the SAME raw read of the same pattern file,
+        # in a second loader. A FIFO here hangs this hook instead of failing it.
+        _fd = os.open(str(p), os.O_RDONLY
+                      | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+        try:
+            _st = os.fstat(_fd)
+            if not stat.S_ISREG(_st.st_mode) or _st.st_nlink > 1:
+                raise OSError("pattern source is not a private regular file")
+            _chunks = []
+            while True:
+                _b = os.read(_fd, 1 << 20)
+                if not _b:
+                    break
+                _chunks.append(_b)
+        finally:
+            os.close(_fd)
+        data = json.loads(b"".join(_chunks).decode("utf-8"))
         entries = data["shell_danger"]
         return [(label, re.compile(rx)) for label, rx in entries]
     except Exception as e:
@@ -107,31 +138,39 @@ _COMMAND_KEYS = ("LINT_CMD", "TYPECHECK_CMD", "TEST_CMD")
 _KV = re.compile(r"^([A-Za-z][A-Za-z0-9_ ]*?)\s*=(.*)$")
 
 
+_LOCK_ERRORS: list[str] = []
+
+
+def _read_lock(name: str, allowed: set) -> str | None:
+    """Read a frozen `.substrate/<name>` lock. ABSENT file → None (no lock was
+    ever pinned — bootstrap never wrote one). PRESENT but unreadable, or holding
+    a value outside `allowed`, → recorded in _LOCK_ERRORS so main() FAILS THE
+    GATE (v3.8.33). A present lock proves operator intent, and flipping its
+    permission bits is not content drift (the freeze/CODEOWNERS see edits, not
+    chmod), so an unreadable lock must never be cheaper than a governed edit —
+    the v3.8.25 'a trust anchor may not fail open' class."""
+    # v3.8.36: delegate to the canonical fail-closed reader (O_NOFOLLOW +
+    # fstat S_ISREG + explicit UTF-8 decode) — a SYMLINKED lock is an error,
+    # never read through, and a DIRECTORY lock is an error, never "absent"
+    # (is_file() got both wrong; Codex round-19).
+    state, val, reason = _dc_read_lock(ROOT / ".substrate" / name, allowed, root=ROOT)
+    if state == "bad":
+        _LOCK_ERRORS.append(f".substrate/{name}: {reason} — refusing to treat it as absent")
+        return None
+    return val  # "ok" → value; "absent" → None
+
+
 def _required_profile():
     """The pinned minimum profile (.substrate/required_profile), or None.
     Written by bootstrap; frozen by the trusted-base guard + CODEOWNERS."""
-    p = ROOT / ".substrate" / "required_profile"
-    if not p.is_file():
-        return None
-    try:
-        val = p.read_text(encoding="utf-8").strip()
-    except Exception:
-        return None
-    return val if val in {"starter", "standard", "strict"} else None
+    return _read_lock("required_profile", {"starter", "standard", "strict"})
 
 
 def _required_sandbox():
     """The pinned sandbox requirement (.substrate/required_sandbox): '0'/'1' or None.
     Written by bootstrap when the sandbox tier is selected (→ '1'); frozen by the
     trusted-base guard + CODEOWNERS, exactly like .substrate/required_profile."""
-    p = ROOT / ".substrate" / "required_sandbox"
-    if not p.is_file():
-        return None
-    try:
-        val = p.read_text(encoding="utf-8").strip()
-    except Exception:
-        return None
-    return val if val in {"0", "1"} else None
+    return _read_lock("required_sandbox", {"0", "1"})
 
 
 def _required_remote_governance():
@@ -139,42 +178,21 @@ def _required_remote_governance():
     '0'/'1' or None. Written by bootstrap when the remote tier is selected (→ '1');
     frozen by the trusted-base guard + CODEOWNERS, exactly like .substrate/required_sandbox.
     v3.6.0."""
-    p = ROOT / ".substrate" / "required_remote_governance"
-    if not p.is_file():
-        return None
-    try:
-        val = p.read_text(encoding="utf-8").strip()
-    except Exception:
-        return None
-    return val if val in {"0", "1"} else None
+    return _read_lock("required_remote_governance", {"0", "1"})
 
 
 def _required_dep_cooldown():
     """The pinned dependency-cooldown requirement (.substrate/required_dep_cooldown):
     '0'/'1' or None. When '1', the cooldown tier may not be disabled (flag set to 0).
     Frozen by the trusted-base guard, like the other locks. v3.7.2."""
-    p = ROOT / ".substrate" / "required_dep_cooldown"
-    if not p.is_file():
-        return None
-    try:
-        val = p.read_text(encoding="utf-8").strip()
-    except Exception:
-        return None
-    return val if val in {"0", "1"} else None
+    return _read_lock("required_dep_cooldown", {"0", "1"})
 
 
 def _required_security_scanners():
     """The pinned security-scanner requirement (.substrate/required_security_scanners):
     '0'/'1' or None. When '1', the scanner tier may not be disabled. Frozen by the
     trusted-base guard, like the other locks. v3.7.17."""
-    p = ROOT / ".substrate" / "required_security_scanners"
-    if not p.is_file():
-        return None
-    try:
-        val = p.read_text(encoding="utf-8").strip()
-    except Exception:
-        return None
-    return val if val in {"0", "1"} else None
+    return _read_lock("required_security_scanners", {"0", "1"})
 
 
 def _strip_quotes_checked(raw: str, key: str):
@@ -192,10 +210,66 @@ def _strip_quotes_checked(raw: str, key: str):
 
 def main() -> int:
     cfg = ROOT / ".substrate" / "config"
+    # In-process repeat calls must not inherit a previous run's lock errors
+    # (module-level state; audit finding).
+    _LOCK_ERRORS.clear()
+    # Evaluate every frozen lock FIRST (v3.8.33). Two fail-closed rules:
+    # (1) a lock that exists but cannot be read/parsed fails the gate — an
+    #     unreadable lock must not be cheaper than a governed edit;
+    # (2) an ABSENT config does not bypass the locks — every flag then sits at
+    #     its default, so any pinned minimum above the default is violated.
+    #     Deleting config must not be cheaper than editing it.
+    req = _required_profile()
+    req_sb = _required_sandbox()
+    req_rg = _required_remote_governance()
+    req_dc = _required_dep_cooldown()
+    req_ss = _required_security_scanners()
+    if _LOCK_ERRORS:
+        for e in _LOCK_ERRORS:
+            print(f"check-substrate-config: LOCK ERROR — {e}", file=sys.stderr)
+        print("check-substrate-config: refusing (a present lock that cannot be read is "
+              "treated as tampering, never as 'no lock'); fix the file's contents/permissions",
+              file=sys.stderr)
+        return 2
     if not cfg.is_file():
+        # v3.8.43 (round-26 P2): is_file() is False for a FIFO/socket/device and
+        # for a symlink to nowhere, so a PRESENT-but-unusable config fell into
+        # the "MISSING" branch and every default sailed through. Absent and
+        # tampered must not look alike (round-25 carry-forward 5c): lexists()
+        # distinguishes them, and a present-but-unusable config fails closed with
+        # the same rc 2 the locks use.
+        if os.path.lexists(str(cfg)):
+            print("check-substrate-config: .substrate/config is PRESENT but is not a "
+                  "regular file (symlink/FIFO/socket/device/directory) — treating as "
+                  "tampering, not as 'no config'", file=sys.stderr)
+            return 2
+        violated = []
+        if req == "strict":
+            violated.append("required_profile=strict (default profile is standard)")
+        for lock_val, name in ((req_sb, "required_sandbox"),
+                               (req_rg, "required_remote_governance"),
+                               (req_dc, "required_dep_cooldown"),
+                               (req_ss, "required_security_scanners")):
+            if lock_val == "1":
+                violated.append(f"{name}=1 (the tier defaults to off without config)")
+        if violated:
+            print("check-substrate-config: .substrate/config is MISSING but pinned "
+                  "minimums exist: " + "; ".join(violated), file=sys.stderr)
+            return 2
         return 0
     vals: dict[str, str] = {}
-    for raw in cfg.read_text(encoding="utf-8", errors="replace").splitlines():
+    # v3.8.43 (round-26 P2): a PRESENT config that cannot be safely read is
+    # tampering, not "no config" — the same rule the locks above already apply,
+    # and the round-25 carry-forward "unsafe must not look like absent". A FIFO
+    # config previously HUNG this gate; treating it as absent instead would let
+    # every default through, so it fails closed with the lock-style rc 2.
+    _cfg_text = _dc_safe_read_text(cfg, ROOT, max_bytes=1 << 20)
+    if _cfg_text is None:
+        print("check-substrate-config: .substrate/config is PRESENT but cannot be "
+              "safely read (symlinked, hard-linked, non-regular, routed, or oversize) "
+              "— treating as tampering, not as 'no config'", file=sys.stderr)
+        return 2
+    for raw in _cfg_text.splitlines():
         line = raw
         # drop full-line comments / blanks
         if not line.strip() or line.lstrip().startswith("#"):
@@ -237,7 +311,7 @@ def main() -> int:
     # the trusted-base guard) pins the minimum. A PR flipping strict→standard
     # to disable strict-only hook behavior is blocked here — the gate, the
     # runtime hook profile, and CI all read this same file. (v3.2.20 finding.)
-    req = _required_profile()
+    # (req/req_sb/req_rg/req_dc/req_ss were read before the config parse — v3.8.33.)
     if req is not None:
         order = {"starter": 0, "standard": 1, "strict": 2}
         if order.get(profile, 0) < order.get(req, 0):
@@ -251,7 +325,6 @@ def main() -> int:
     # SUBSTRATE_SANDBOX to 0. And the sandbox POLICY (.substrate/sandbox.json) is
     # SECURITY data, so a malformed policy must FAIL THE GATE here — not only when
     # something happens to invoke the sandbox at runtime.
-    req_sb = _required_sandbox()
     sandbox_on = vals.get("SUBSTRATE_SANDBOX", "0")
     if req_sb == "1" and sandbox_on != "1":
         print('check-substrate-config: SUBSTRATE_SANDBOX must be "1" — containment is a '
@@ -263,7 +336,6 @@ def main() -> int:
     # (written by bootstrap --profile *+remote, CODEOWNED + trusted-base frozen), a PR
     # may not flip SUBSTRATE_REMOTE_GOVERNANCE to 0 to silently drop CODEOWNERS coverage
     # / trusted-base authority. Only enforced when the lock is "1".
-    req_rg = _required_remote_governance()
     remote_gov_on = vals.get("SUBSTRATE_REMOTE_GOVERNANCE", "0")
     if req_rg == "1" and remote_gov_on != "1":
         print('check-substrate-config: SUBSTRATE_REMOTE_GOVERNANCE must be "1" — remote '
@@ -272,7 +344,6 @@ def main() -> int:
         return 2
     # DEPENDENCY-COOLDOWN LOCK (v3.7.2). When .substrate/required_dep_cooldown=1, the
     # cooldown tier may not be silently disabled — SUBSTRATE_DEP_COOLDOWN must be > 0.
-    req_dc = _required_dep_cooldown()
     if req_dc == "1" and vals.get("SUBSTRATE_DEP_COOLDOWN", "0") == "0":
         print('check-substrate-config: SUBSTRATE_DEP_COOLDOWN must be > 0 — the dependency-'
               "cooldown tier is a required minimum (.substrate/required_dep_cooldown=1); "
@@ -280,7 +351,6 @@ def main() -> int:
         return 2
     # SECURITY-SCANNER LOCK (v3.7.17). When .substrate/required_security_scanners=1, the
     # scanner tier may not be silently disabled — SUBSTRATE_SECURITY_SCANNERS must be "1".
-    req_ss = _required_security_scanners()
     if req_ss == "1" and vals.get("SUBSTRATE_SECURITY_SCANNERS", "0") != "1":
         print('check-substrate-config: SUBSTRATE_SECURITY_SCANNERS must be "1" — the scanner '
               "tier is a required minimum (.substrate/required_security_scanners=1); "

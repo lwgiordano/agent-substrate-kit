@@ -10,6 +10,7 @@ is skipped (no bootstrap.sh) inside an installed repo.
 from __future__ import annotations
 
 import re
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -25,6 +26,46 @@ def _kit_root() -> Path | None:
 
 KIT = _kit_root()
 pytestmark = pytest.mark.skipif(KIT is None, reason="not in kit source tree")
+
+KNOWLEDGE_DOCS = {
+    "00_substrate.md": "Entry point for current substrate contracts and functional knowledge.",
+    "01_install_adoption.md": "Installation and adoption across new and existing repositories.",
+    "02_upgrade_integrity.md": "Upgrade provenance, authority floors, transactions, and postconditions.",
+    "03_memory_sessions.md": "Tamper-evident memory, session restore, completion, and append-only logs.",
+    "04_policy_governance.md": "Command policy, hooks, sandboxing, and local or remote governance.",
+    "05_evals_assurance.md": "Behavioral evals, deterministic validators, audits, and assurance limits.",
+    "06_release_distribution.md": "Release packaging, signing, manifests, and artifact verification.",
+    "07_agent_context_governance.md": "Agent context inventory, harness scanning, budgets, and doc drift.",
+}
+
+KNOWLEDGE_ASSERTS = {
+    "bootstrap.sh::_safe_mkdir_p",
+    "bootstrap.sh::wappend",
+    "scripts/_doc_common.py::locked_atomic_append",
+    "scripts/command_policy.py::looks_dangerous_command",
+    "scripts/memory_log.py::_raw_tracked_hash",
+    "scripts/memory_log.py::_write_tree_oid",
+    "scripts/run_python_gate.sh::_ruff_args",
+    "scripts/session_handoff.py::_rejected_block",
+    "scripts/session_handoff.py::_safe_history_line",
+    "scripts/substrate_upgrade.py::_apply_capability_floor",
+    "scripts/substrate_upgrade.py::_exec_module_from_source",
+}
+
+ROOT_ENTRYPOINTS = {"bootstrap.sh", "manage.sh", "package_release.sh", "agentsync.sh"}
+KNOWLEDGE_TOKEN_BUDGET = 3000
+
+
+def _front_matter(path: Path) -> dict:
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "_knowledge_doc_common", KIT / "scripts" / "_doc_common.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    front_matter, _ = module.parse_front_matter(path)
+    return front_matter
 
 
 # Generated toolchain/cache state that is NOT kit source. A leftover .venv
@@ -71,6 +112,84 @@ def _scannable() -> list[Path]:
                 continue
             out.append(p)
     return out
+
+
+def test_source_knowledge_is_functionally_partitioned() -> None:
+    knowledge = KIT / "docs" / "knowledge"
+    docs = {
+        path.name: path
+        for path in knowledge.glob("*.md")
+        if not path.name.startswith("_")
+    }
+    assert set(docs) == set(KNOWLEDGE_DOCS)
+
+    assertion_counts: dict[str, int] = {}
+    covers: set[str] = set()
+    purposes: set[str] = set()
+    for name, path in docs.items():
+        front_matter = _front_matter(path)
+        assert front_matter.get("purpose") == KNOWLEDGE_DOCS[name]
+        # v3.8.33: a VALID review date on/after the split, not a pinned one —
+        # last_human_reviewed exists precisely to be bumped at each review, so
+        # equality with a frozen date made every legitimate review a test failure.
+        reviewed = date.fromisoformat(str(front_matter.get("last_human_reviewed")))
+        assert reviewed >= date(2026, 8, 9), (name, reviewed)
+        purposes.add(str(front_matter.get("purpose")))
+        covers.update(str(item) for item in front_matter.get("covers", []))
+        for assertion in front_matter.get("asserts", []):
+            key = str(assertion)
+            assertion_counts[key] = assertion_counts.get(key, 0) + 1
+        assert round(path.stat().st_size / 4) <= KNOWLEDGE_TOKEN_BUDGET, name
+
+    assert len(purposes) == len(KNOWLEDGE_DOCS)
+    assert set(assertion_counts) == KNOWLEDGE_ASSERTS
+    assert all(count == 1 for count in assertion_counts.values())
+    assert ROOT_ENTRYPOINTS <= covers
+
+    entry = docs["00_substrate.md"].read_text(encoding="utf-8")
+    for sibling in sorted(set(KNOWLEDGE_DOCS) - {"00_substrate.md"}):
+        assert f"]({sibling})" in entry
+    assert "](../../CHANGES_V3.md)" in entry
+    assert "](../HISTORY.md)" in entry
+    for name, path in docs.items():
+        if name != "00_substrate.md":
+            assert "](00_substrate.md)" in path.read_text(encoding="utf-8")
+
+
+def test_source_knowledge_covers_every_discovered_module() -> None:
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "_knowledge_doc_common", KIT / "scripts" / "_doc_common.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    covered = {
+        str(item)
+        for path in (KIT / "docs" / "knowledge").glob("[0-9][0-9]_*.md")
+        for item in _front_matter(path).get("covers", [])
+    }
+    discovered = {path.as_posix() for path in module.iter_code_modules(KIT)}
+    assert discovered <= covered
+
+
+def test_superpowers_execution_docs_are_governed_context() -> None:
+    """Plans/specs drive agent execution and need scanning plus ownership."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "_substrate_surfaces", KIT / "scripts" / "_substrate_surfaces.py"
+    )
+    inventory = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(inventory)
+    assert "docs/superpowers/**/*.md" in inventory.CONTEXT_GLOBS
+    assert "docs/knowledge" in inventory.GOVERNED_DIRS
+    assert "docs/knowledge" not in inventory.OWNED_DIRS
+    assert "docs/superpowers" in inventory.GOVERNED_OPTIONAL_DIRS
+    assert "docs/superpowers" not in inventory.OPTIONAL_DIRS
+    assert {"docs/knowledge/00_substrate.md", "docs/knowledge/_template.md"} <= set(
+        inventory.OWNED_FILES
+    )
 
 
 def test_no_old_product_names() -> None:
@@ -242,7 +361,8 @@ def test_source_root_manage_matches_template() -> None:
     template = (KIT / "templates" / "manage.sh.template").read_text(encoding="utf-8")
     root_manage = KIT / "manage.sh"
     required = ("scripts/check_python_syntax.py", "scripts/check_harness_patterns.py",
-                "scripts/check_policy_code_integrity.py", "scripts/check_harness_smoke.py",
+                "scripts/check_policy_code_integrity.py", "scripts/check_raw_file_io.py",
+                "scripts/check_harness_smoke.py",
                 "scripts/check_hook_smoke.py", "scripts/check_agent_harness.py",
                 "scripts/check_substrate_config.py")
     for r in required:
@@ -253,13 +373,64 @@ def test_source_root_manage_matches_template() -> None:
             assert r in rm, f"source-root manage.sh stale — missing {r}"
 
 
+def test_every_kit_validator_reaches_consumers(tmp_path) -> None:
+    """v3.8.45 (round-28 P1): the hand-maintained list above is the same shape
+    as the defect this whole series is about — it documents parity instead of
+    MECHANIZING it. check_raw_file_io.py was added to the kit's own check and
+    pre-commit in v3.8.43 and to neither template, so every install since then
+    carried the gate as an inert file. A reviewer had to notice; nobody did.
+
+    So derive the expectation instead of restating it: every validator the
+    KIT's own `check` runs must also be wired into the template a consumer
+    gets, in both manage.sh and pre-commit. A new validator now fails this test
+    until it ships to consumers too.
+    """
+    root_manage = KIT / "manage.sh"
+    template = KIT / "templates" / "manage.sh.template"
+    if not (root_manage.exists() and template.exists()):
+        return
+    import re as _re
+
+    def _check_block(text: str) -> str:
+        # The `check)` case arm — from its label to the next top-level arm.
+        m = _re.search(r"\n\s*check\)(.*?)\n\s*[a-z-]+\)", text, _re.S)
+        return m.group(1) if m else ""
+
+    def _validators(text: str) -> set[str]:
+        return set(_re.findall(r"run_py (scripts/check_[a-z_]+\.py)", _check_block(text)))
+
+    kit_validators = _validators(root_manage.read_text(encoding="utf-8"))
+    assert kit_validators, "could not parse the kit's own check block"
+    tmpl_validators = _validators(template.read_text(encoding="utf-8"))
+    missing = sorted(kit_validators - tmpl_validators)
+    assert not missing, (
+        "validators run by the kit but NOT wired into templates/manage.sh.template — "
+        f"consumers would receive them as inert files: {missing}")
+
+    pc_tmpl = KIT / "templates" / "pre-commit-config.yaml.template"
+    if pc_tmpl.exists():
+        pc_text = pc_tmpl.read_text(encoding="utf-8")
+        # Smoke/behavioral validators are deliberately check-only in some
+        # profiles; require pre-commit coverage for the static ones the kit's
+        # own pre-commit runs.
+        kit_pc = KIT / ".pre-commit-config.yaml"
+        if kit_pc.exists():
+            kit_pc_text = kit_pc.read_text(encoding="utf-8")
+            for v in sorted(kit_validators):
+                if v in kit_pc_text:
+                    assert v in pc_text, (
+                        f"{v} runs in the kit's pre-commit but is absent from "
+                        "templates/pre-commit-config.yaml.template")
+
+
 def test_source_root_precommit_has_core_validators() -> None:
     pc = KIT / ".pre-commit-config.yaml"
     if not pc.exists():
         return
     text = pc.read_text(encoding="utf-8")
     for hook_id in ("check-python-syntax", "check-harness-patterns",
-                    "check-policy-code-integrity", "check-harness-smoke",
+                    "check-policy-code-integrity", "check-raw-file-io",
+                    "check-harness-smoke",
                     "check-hook-smoke", "check-substrate-config", "check-agent-harness"):
         assert hook_id in text, f"source-root .pre-commit-config.yaml stale — missing {hook_id}"
 
@@ -298,3 +469,30 @@ def test_doc_consistency_skips_generated_venv(tmp_path) -> None:
     assert _is_generated(fake)
     assert _is_generated(KIT / "dist" / "x.zip")
     assert not _is_generated(KIT / "scripts" / "check_exfil_guard.py")
+
+
+def test_full_suite_watchdog_has_measured_runtime_margin(monkeypatch) -> None:
+    """The session watchdog must not kill a healthy full suite at its measured runtime.
+
+    The exact pre-commit path took 602.85 seconds on the slow supported host. Require
+    two complete measured runs of margin while keeping a finite fail-closed deadline.
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "_substrate_test_conftest", KIT / "tests" / "conftest.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    scheduled = {}
+
+    monkeypatch.setattr(module.faulthandler, "enable", lambda: None)
+    monkeypatch.setattr(
+        module.faulthandler,
+        "dump_traceback_later",
+        lambda seconds, **kwargs: scheduled.update(seconds=seconds, **kwargs),
+    )
+    module.pytest_configure(None)
+
+    assert scheduled["seconds"] >= 2 * 603
+    assert scheduled["exit"] is True

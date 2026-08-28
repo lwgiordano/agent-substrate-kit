@@ -42,7 +42,7 @@ bash /path/to/agent_substrate_kit_v3/bootstrap.sh --profile standard --lang auto
 | 4-field bug-fix commit protocol + postmortem-per-bugfix hooks | — | — | yes |
 | Extras (calibration, stale-phrases, license headers) | — | — | yes |
 
-## Current status (v3.8.27)
+## Current status (v3.8.50)
 
 **Local-first, remote-expandable.** The base is offline-complete (memory,
 hooks, validators, evals, sandbox, release bundle) — no GitHub/CI/token/remote
@@ -164,6 +164,26 @@ Known limitations, by design:
 See `CHANGES_V3.md` for the full per-version remediation history (v3.2.0–v3.5.10).
 See `BENCHMARK.md` for the reproducible block-rate / false-positive-rate result
 (regenerate with `./manage.sh evals --report`).
+
+### One-time v3.8.32 knowledge-boundary migration
+
+Upgrading a pre-v3.8.32 consumer across this boundary must run the **verified new
+kit's** engine against the old repository. The old consumer's `./manage.sh
+upgrade` dispatches its already-installed engine, which cannot know the future
+ownership rule and may falsely report an edited project knowledge sibling as
+machinery drift. From a trusted checkout or an extracted release that you have
+already verified, run:
+
+```bash
+cd /path/to/verified-agent-substrate-kit-v3.8.32
+./manage.sh upgrade --root /path/to/consumer --from . --allow-unverified --write
+```
+
+Here `--allow-unverified` applies only to the already-verified extracted
+directory source; do not use it as a substitute for release verification. After
+this one-time crossing, the consumer's installed v3.8.32 engine handles normal
+future upgrades. A scheduled auto-upgrade installed before v3.8.32 likewise
+needs this manual crossing once.
 
 ## What is new in v3.2 / v3.2.1
 

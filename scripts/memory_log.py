@@ -82,6 +82,60 @@ MEM = ROOT / ".substrate" / "memory"
 EVENTS = MEM / "events.jsonl"
 ZERO = "0" * 64
 
+# v3.8.46 (round-29 P1, found by the gate once os.path.join(ROOT, ...) was
+# classified as repo-derived): the signature hasher below read every tracked
+# file with a bare open(fp, "rb") after an lstat said S_ISREG — stat-then-open,
+# so a hard link passes both and an ancestor can be swapped between them. This
+# is the MEMORY CHAIN's own signature; a hash taken over bytes the guard never
+# approved is the one thing it must not produce.
+try:
+    from _doc_common import safe_read_bytes as _safe_read_bytes
+except Exception:  # pragma: no cover - stripped install
+    def _safe_read_bytes(path, root=None, max_bytes=None, tail_bytes=None):
+        return None
+
+try:
+    from _doc_common import safe_read_text as _safe_read_text
+except Exception:  # pragma: no cover - inline mirror for a stripped install
+    def _safe_read_text(path, root=None, max_bytes=None, tail_bytes=None):
+        """Fail-closed mirror of _doc_common.safe_read_text (v3.8.42): STRICT
+        ancestor containment, then refuse a symlinked/hard-linked/non-regular
+        leaf, and never block on a FIFO. Containment is mirrored here rather
+        than skipped — a fallback that drops the check is exactly the fail-open
+        shape the round-23 audit caught in this file."""
+        if root is not None:
+            try:
+                _p = Path(path).parent
+                _rel = os.path.relpath(str(_p), str(root))
+                if (_rel == os.pardir or _rel.startswith(os.pardir + os.sep)
+                        or os.path.isabs(_rel)):
+                    return None
+                _expected = os.path.normpath(os.path.join(os.path.realpath(str(root)), _rel))
+                if os.path.realpath(str(_p)) != _expected:
+                    return None
+            except (OSError, ValueError):
+                return None
+        try:
+            fd = os.open(str(path), os.O_RDONLY
+                         | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+        except (OSError, ValueError):
+            return None
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode) or st.st_nlink > 1:
+                return None
+            chunks = []
+            while True:
+                b = os.read(fd, 65536)
+                if not b:
+                    break
+                chunks.append(b)
+        except (OSError, ValueError):
+            return None
+        finally:
+            os.close(fd)
+        return b"".join(chunks).decode("utf-8", errors="replace")
+
 _SECRET_PATTERNS = [
     re.compile(r"\bsk-[A-Za-z0-9][A-Za-z0-9_-]{20,}\b"),
     re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b"),
@@ -118,11 +172,49 @@ def _event_hash(prev: str, seq: int, ts: str, etype: str, data) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+class MemoryLogUnsafe(RuntimeError):
+    """events.jsonl is PRESENT but not safe to read (linked/non-regular/routed).
+
+    Distinct from absent: an absent log is a legitimately empty chain, while a
+    present-but-unsafe one is tampering and must never verify as OK (v3.8.42)."""
+
+
+def _events_unsafe_reason() -> str | None:
+    """Reason string if EVENTS exists but must not be read, else None.
+    lstat-based, so it never follows the link it is judging."""
+    try:
+        st = os.lstat(str(EVENTS))
+    except (OSError, ValueError):
+        return None  # absent — a legitimately empty chain
+    if stat.S_ISLNK(st.st_mode):
+        return "events.jsonl is a symlink"
+    if not stat.S_ISREG(st.st_mode):
+        return "events.jsonl is not a regular file (fifo/socket/device)"
+    if st.st_nlink > 1:
+        return "events.jsonl is a hard link (shared inode)"
+    return None
+
+
 def _read_events() -> list[dict]:
-    if not EVENTS.exists():
+    # v3.8.42 (round-25 P2): the READ side had no guard at all — append() was
+    # hardened through rounds 23/24 while this bypassed containment entirely, so
+    # a symlinked/hard-linked events.jsonl made `verify` report an OUTSIDE chain
+    # as OK and `tail`/`tasks` print outside content, and a FIFO hung them.
+    # max_bytes=None is deliberate: a truncated read would FAIL OPEN here (a
+    # short/empty read verifies as a clean chain), so this read is unbounded.
+    # PRESENT-but-unsafe must not degrade to "empty chain" — that would let a
+    # symlinked/FIFO events.jsonl verify as OK, trading a hang for a fail-open.
+    _unsafe = _events_unsafe_reason()
+    if _unsafe is not None:
+        raise MemoryLogUnsafe(_unsafe)
+    text = _safe_read_text(EVENTS, ROOT, max_bytes=None)
+    if text is None:
+        if EVENTS.is_symlink() or os.path.lexists(str(EVENTS)):
+            # containment refused it (routed parent) though the leaf looked fine
+            raise MemoryLogUnsafe("events.jsonl is outside the repo (routed parent)")
         return []
     out = []
-    for line in EVENTS.read_text(encoding="utf-8").splitlines():
+    for line in text.splitlines():
         line = line.strip()
         if not line:
             continue
@@ -135,6 +227,62 @@ def _read_events() -> list[dict]:
 
 def append(etype: str, data) -> int:
     try:
+        # v3.8.40 (round-23 P1): the tamper-evident log must never be routed
+        # outside the repo. A symlinked `.substrate`/`.substrate/memory`
+        # ancestor would send .lock + events.jsonl to an outside inode; the
+        # structured-handoff writer had this guard but memory_log did not.
+        # STRICT containment (no escaping OR in-repo-aliasing ancestor) BEFORE
+        # the mkdir so a refused write creates no outside directory, and refuse
+        # a symlinked leaf so the append never writes through a link.
+        try:
+            from _doc_common import within_root as _within_root
+            contained = _within_root(EVENTS, ROOT)
+        except Exception:
+            # Fallback mirrors _doc_common.within_root STRICTLY and fails
+            # CLOSED: the EVENTS parent (MEM) must resolve to its EXACT lexical
+            # location under realpath(ROOT). A prior version compared
+            # realpath(MEM) to realpath(ROOT/".substrate"/"memory") — the same
+            # expression on both sides, an always-True tautology that fails
+            # OPEN through any symlinked ancestor (round-23 auditor P1).
+            try:
+                _root_real = os.path.realpath(str(ROOT))
+                _rel = os.path.relpath(str(EVENTS.parent), str(ROOT))
+                if _rel == os.pardir or _rel.startswith(os.pardir + os.sep) or os.path.isabs(_rel):
+                    contained = False
+                else:
+                    _expected = os.path.normpath(os.path.join(_root_real, _rel))
+                    contained = os.path.realpath(str(EVENTS.parent)) == _expected
+            except (OSError, ValueError):
+                contained = False
+        if not contained:
+            print("memory-log: refusing append — memory dir escapes the repo "
+                  "(symlinked ancestor)", file=sys.stderr)
+            return 1
+        # v3.8.41 (round-24 P1): refuse a symlinked OR hard-linked leaf. Round-23
+        # checked only is_symlink(), but a hard-linked events.jsonl/.lock is a
+        # regular file that shares an outside inode, so EVENTS.open("a") appends
+        # and lock.open("w") truncates the shared bytes. Route both leaves through
+        # the centralized _doc_common.refuse_linked_leaf (symlink OR st_nlink>1),
+        # with an inline lstat fallback if the import is unavailable.
+        for _leaf in (EVENTS, MEM / ".lock"):
+            try:
+                from _doc_common import refuse_linked_leaf as _rll
+                _reason = _rll(_leaf)
+            except Exception:
+                try:
+                    _lst = os.lstat(str(_leaf))
+                    # v3.8.42 (round-25 P2): non-regular too — a FIFO .lock or
+                    # events.jsonl passed both link checks and then HUNG the
+                    # append on open() instead of failing closed.
+                    _reason = ("is a symlink" if stat.S_ISLNK(_lst.st_mode)
+                               else "is not a regular file (fifo/socket/device)"
+                               if not stat.S_ISREG(_lst.st_mode)
+                               else "is a hard link (shared inode)" if _lst.st_nlink > 1 else None)
+                except (OSError, ValueError):
+                    _reason = None
+            if _reason is not None:
+                print(f"memory-log: refusing append — {_leaf.name} {_reason}", file=sys.stderr)
+                return 1
         MEM.mkdir(parents=True, exist_ok=True)
         lock = MEM / ".lock"
         with lock.open("w") as lf:
@@ -290,8 +438,22 @@ def _raw_tracked_hash():
                 h.update(f"|link:{len(target)}:".encode())
                 h.update(target)
             elif stat.S_ISREG(lst.st_mode):
-                with open(fp, "rb") as fh:
-                    content = fh.read()
+                # Guarded read (v3.8.46): O_NOFOLLOW|O_NONBLOCK, fstat S_ISREG
+                # and st_nlink == 1 on the OPENED fd, and a live-parent check —
+                # the lstat above proves nothing about what open() would get.
+                # None means unreadable or unsafe; the outer handler turns that
+                # into a None signature, which is the fail-closed contract.
+                content = _safe_read_bytes(fp, ROOT, max_bytes=None)
+                if content is None:
+                    # Fail closed — but SAY SO. The outer handler turns this
+                    # into a None signature, and a chain that goes None without
+                    # explanation is indistinguishable from a bug (in-release
+                    # auditor WARN). A tracked file with st_nlink > 1 is the
+                    # likely cause and it is not obvious from the outside.
+                    print("memory-log: refusing to hash a tracked file that is "
+                          f"not a private regular file (symlink/hard link/FIFO): {fp}",
+                          file=sys.stderr)
+                    raise OSError(f"unsafe or unreadable tracked file: {fp}")
                 # Fold the PERMISSION BITS in too (v3.8.20 / memory:255): a 0644->0755 flip on a
                 # tracked-but-ignored path is invisible to the temp-index write-tree (add -A skips
                 # ignored paths) and to a bytes-only raw hash; and under core.filemode=false the
@@ -641,4 +803,9 @@ def main(argv: list[str]) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except MemoryLogUnsafe as e:
+        # v3.8.42: tampering with the log's leaf is a BREAK, not an empty chain.
+        print(f"memory-log: BREAK: {e} — refusing to read", file=sys.stderr)
+        sys.exit(1)

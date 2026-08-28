@@ -16,6 +16,17 @@ from pathlib import Path
 # every other validator+hook, so `doctor` is correct when launched from a
 # subdirectory instead of silently checking the wrong tree. Falls back to cwd.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+# v3.8.43 (round-26 P2): every .substrate/config read in the doctor goes through
+# the canonical guarded reader — a FIFO config used to hang the doctor at
+# _remote_governance() before any check ran. None means "no usable config",
+# which leaves each helper on its existing default.
+try:
+    from _doc_common import safe_read_text as _safe_read_text
+except Exception:  # pragma: no cover - stripped install
+    def _safe_read_text(path, root=None, max_bytes=None, tail_bytes=None):
+        return None
+
 try:
     from _substrate_root import substrate_root as _sr
     ROOT=_sr()
@@ -26,14 +37,14 @@ WARN=['docs/ARCHITECTURE.md','docs/INTENT.md']
 def _codex_hooks_use_canonical_flag():
     p=ROOT/'.codex/config.toml'
     if not p.exists(): return True
-    txt=p.read_text(encoding='utf-8',errors='replace')
+    txt=_safe_read_text(p, ROOT, max_bytes=16 << 20) or ''
     # canonical is `hooks = true`; deprecated alias is `codex_hooks`.
     import re as _re
     return bool(_re.search(r'(?m)^\s*hooks\s*=\s*true', txt))
 def _settings():
     p=ROOT/'.claude/settings.json'
     if not p.exists(): return None
-    try: return json.loads(p.read_text(encoding='utf-8'))
+    try: return json.loads(_safe_read_text(p, ROOT, max_bytes=16 << 20) or 'null')
     except Exception: return None
 def _hooks_wired(cfg):
     if not cfg: return False
@@ -54,8 +65,8 @@ def _hook_findings(cfg):
     return (b,w)
 def _profile():
     cfg=ROOT/'.substrate/config'
-    if cfg.exists():
-        for line in cfg.read_text(encoding='utf-8',errors='replace').splitlines():
+    if True:
+        for line in (_safe_read_text(cfg, ROOT, max_bytes=1 << 20) or '').splitlines():
             if line.strip().startswith('SUBSTRATE_PROFILE='):
                 return line.split('=',1)[1].strip().strip('"\'')
     return 'standard'
@@ -65,8 +76,8 @@ def _remote_governance():
     ORTHOGONAL tier, decoupled from the strict profile — a repo can be
     strict-LOCAL or standard+remote."""
     cfg=ROOT/'.substrate/config'
-    if cfg.exists():
-        for line in cfg.read_text(encoding='utf-8',errors='replace').splitlines():
+    if True:
+        for line in (_safe_read_text(cfg, ROOT, max_bytes=1 << 20) or '').splitlines():
             if line.split('#',1)[0].strip().startswith('SUBSTRATE_REMOTE_GOVERNANCE='):
                 return line.split('=',1)[1].split('#',1)[0].strip().strip('"\'')
     return '0'
@@ -74,20 +85,23 @@ def _dep_cooldown_days():
     """SUBSTRATE_DEP_COOLDOWN (int days, 0=off) from .substrate/config. v3.7.2 — the
     cooldown deep tier. go-live reports it OFFLINE (never runs the networked check)."""
     cfg=ROOT/'.substrate/config'
-    if cfg.exists():
-        for line in cfg.read_text(encoding='utf-8',errors='replace').splitlines():
+    if True:
+        for line in (_safe_read_text(cfg, ROOT, max_bytes=1 << 20) or '').splitlines():
             if line.split('#',1)[0].strip().startswith('SUBSTRATE_DEP_COOLDOWN='):
                 v=line.split('=',1)[1].split('#',1)[0].strip().strip('"\'')
                 return int(v) if v.isdigit() else 0
     return 0
 def _required_remote_governance():
     """.substrate/required_remote_governance ('0'/'1' or None) — the pinned remote-
-    governance minimum, frozen by the trusted-base audit. v3.6.1."""
-    p=ROOT/'.substrate'/'required_remote_governance'
-    if not p.is_file(): return None
-    try: val=p.read_text(encoding='utf-8').strip()
-    except Exception: return None
-    return val if val in {'0','1'} else None
+    governance minimum, frozen by the trusted-base audit. v3.6.1.
+    v3.8.33/36: any PRESENT-but-malformed lock (unreadable, garbage, symlink,
+    directory — the canonical reader decides) reads as '1' — doctor then reports
+    the remote tier as required-but-unproven instead of silently dropping it
+    (fail toward requiring; the gate itself refuses in check_substrate_config)."""
+    from _doc_common import read_lock as _dc_read_lock
+    state, val, _r = _dc_read_lock(ROOT/'.substrate'/'required_remote_governance', {'0','1'}, root=ROOT)
+    if state == 'absent': return None
+    return val if state == 'ok' else '1'
 def _codeowners_path():
     for loc in ('.github/CODEOWNERS','CODEOWNERS','docs/CODEOWNERS'):
         if (ROOT/loc).exists(): return ROOT/loc
@@ -125,7 +139,10 @@ try:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from _substrate_surfaces import (OWNED_DIRS as _SENSITIVE_DIRS,
         OWNED_FILES as _SENSITIVE_FILES, OPTIONAL_FILES as _SENSITIVE_OPTIONAL_FILES,
-        OPTIONAL_DIRS as _SENSITIVE_OPTIONAL_DIRS, COVERAGE_SKIP_PARTS as _COVERAGE_SKIP_PARTS)
+        OPTIONAL_DIRS as _SENSITIVE_OPTIONAL_DIRS,
+        GOVERNED_DIRS as _SENSITIVE_GOVERNED_DIRS,
+        GOVERNED_OPTIONAL_DIRS as _SENSITIVE_GOVERNED_OPTIONAL_DIRS,
+        COVERAGE_SKIP_PARTS as _COVERAGE_SKIP_PARTS)
 except Exception:  # pragma: no cover - fall back if inventory unreadable
     # This fallback MUST mirror _substrate_surfaces EXACTLY — test_doctor_fallback_
     # matches_canonical_inventory fails CI if it drifts. (v3.8.6: the fallback was
@@ -133,10 +150,12 @@ except Exception:  # pragma: no cover - fall back if inventory unreadable
     # design-system/templates optional dirs + trust-anchor optional files — so an
     # import failure would silently DROP those coverage requirements and overstate
     # remote-governance coverage.)
-    _SENSITIVE_DIRS=['scripts','tests','.claude','.codex','.agents','docs/knowledge','docs/decisions','docs/blind-spot-checklists','docs/templates','.github/hooks','.github/instructions','.github/workflows']
-    _SENSITIVE_FILES=['AGENTS.md','CLAUDE.md','DESIGN.md','manage.sh','pytest.ini','.pre-commit-config.yaml','.gitattributes','.gitignore','.github/copilot-instructions.md','.github/dependabot.yml','.substrate/config','.substrate/required_profile','docs/HISTORY.md','docs/README.md','docs/ARCHITECTURE.md','docs/INTENT.md']
+    _SENSITIVE_DIRS=['scripts','tests','.claude','.codex','.agents','docs/decisions','docs/blind-spot-checklists','docs/templates','.github/hooks','.github/instructions','.github/workflows']
+    _SENSITIVE_FILES=['AGENTS.md','CLAUDE.md','DESIGN.md','AGENT_BUS.md','manage.sh','bootstrap.sh','agentsync.sh','package_release.sh','pytest.ini','.pre-commit-config.yaml','.gitattributes','.gitignore','.github/copilot-instructions.md','.github/dependabot.yml','.substrate/config','.substrate/required_profile','docs/HISTORY.md','docs/REJECTED.md','docs/README.md','docs/ARCHITECTURE.md','docs/INTENT.md','docs/knowledge/00_substrate.md','docs/knowledge/_template.md']
     _SENSITIVE_OPTIONAL_FILES=['.mcp.json','.substrate/trust/minisign.pub','.substrate/trust/sigstore_identity.json','.substrate/install.json']
     _SENSITIVE_OPTIONAL_DIRS=['.github/skills','docs/postmortems','design-system','templates']
+    _SENSITIVE_GOVERNED_DIRS=['docs/knowledge']
+    _SENSITIVE_GOVERNED_OPTIONAL_DIRS=['docs/superpowers']
     _COVERAGE_SKIP_PARTS={'__pycache__','venv','node_modules','.pytest_cache','.ruff_cache','.mypy_cache'}
 def _sensitive_files_on_disk():
     """Enumerate the actual privileged files that must be owned, plus the
@@ -148,7 +167,8 @@ def _sensitive_files_on_disk():
     # .github/, repo root, or docs/ (GitHub searches those in order).
     co=_codeowners_path()
     if co is not None: out.append(co.relative_to(ROOT).as_posix())
-    for d in _SENSITIVE_DIRS+_SENSITIVE_OPTIONAL_DIRS:
+    for d in (_SENSITIVE_DIRS+_SENSITIVE_OPTIONAL_DIRS+_SENSITIVE_GOVERNED_DIRS
+              +_SENSITIVE_GOVERNED_OPTIONAL_DIRS):
         base=ROOT/d
         if not base.is_dir(): continue
         for p in base.rglob('*'):
@@ -233,7 +253,7 @@ def _config_tool_warns():
     cfg=ROOT/'.substrate/config'
     if not cfg.exists(): return []
     vals={}
-    for line in cfg.read_text(encoding='utf-8').splitlines():
+    for line in (_safe_read_text(cfg, ROOT, max_bytes=1 << 20) or '').splitlines():
         line=line.split('#',1)[0].strip()
         if '=' in line:
             k,v=line.split('=',1); vals[k.strip()]=v.strip().strip('"\'')
@@ -263,7 +283,7 @@ def _operational_findings():
     # Configured language commands must resolve (empty is fine = gate skipped).
     cfg=ROOT/'.substrate/config'; vals={}
     if cfg.exists():
-        for line in cfg.read_text(encoding='utf-8').splitlines():
+        for line in (_safe_read_text(cfg, ROOT, max_bytes=1 << 20) or '').splitlines():
             line=line.split('#',1)[0].strip()
             if '=' in line:
                 k,v=line.split('=',1); vals[k.strip()]=v.strip().strip('"\'')
@@ -354,7 +374,7 @@ def _go_live(blocks, warns, as_json=False):
     sb_cfg = ''
     cfgp = ROOT / '.substrate' / 'config'
     if cfgp.exists():
-        for ln in cfgp.read_text(encoding='utf-8', errors='replace').splitlines():
+        for ln in (_safe_read_text(cfgp, ROOT, max_bytes=1 << 20) or '').splitlines():
             ln = ln.split('#', 1)[0].strip()
             if ln.startswith('SUBSTRATE_SANDBOX='):
                 sb_cfg = ln.split('=', 1)[1].strip().strip('"\'')
@@ -414,7 +434,7 @@ def _go_live(blocks, warns, as_json=False):
     _ij = ROOT / '.substrate' / 'install.json'
     if _ij.is_file():
         try:
-            _ijv = json.loads(_ij.read_text(encoding='utf-8')).get('kit_version', '?')
+            _ijv = json.loads(_safe_read_text(_ij, ROOT, max_bytes=8 << 20) or '{}').get('kit_version', '?')
         except Exception:
             _ijv = '?'
         ip_status, ip_reason = 'pass', f'installed from kit {_ijv}; `./manage.sh upgrade --from <signed-zip> --plan` to preview an upgrade'
@@ -451,7 +471,7 @@ def _go_live(blocks, warns, as_json=False):
     _ss_cfg = "0"
     _cfgp = ROOT / '.substrate' / 'config'
     if _cfgp.is_file():
-        for _ln in _cfgp.read_text(encoding='utf-8', errors='replace').splitlines():
+        for _ln in (_safe_read_text(_cfgp, ROOT, max_bytes=1 << 20) or '').splitlines():
             _ln = _ln.split('#', 1)[0].strip()
             if _ln.startswith('SUBSTRATE_SECURITY_SCANNERS='):
                 _ss_cfg = _ln.split('=', 1)[1].strip().strip('"\'')
@@ -470,7 +490,7 @@ def _go_live(blocks, warns, as_json=False):
     # Consumers verify ANY tier out of the box via scripts/verify_release.py (multi-backend).
     _rb = "local"
     if _cfgp.is_file():
-        for _ln in _cfgp.read_text(encoding='utf-8', errors='replace').splitlines():
+        for _ln in (_safe_read_text(_cfgp, ROOT, max_bytes=1 << 20) or '').splitlines():
             _ln = _ln.split('#', 1)[0].strip()
             if _ln.startswith('SUBSTRATE_RELEASE_BACKEND='):
                 _rb = _ln.split('=', 1)[1].strip().strip('"\'')
@@ -563,7 +583,7 @@ def main():
         if not (ROOT/r).exists(): blocks.append(f'missing required file: {r}')
     for r in WARN:
         if not (ROOT/r).exists(): warns.append(f'optional/recommended file missing: {r}')
-    if (ROOT/'CLAUDE.md').exists() and '@AGENTS.md' not in (ROOT/'CLAUDE.md').read_text(encoding='utf-8',errors='replace'): blocks.append('CLAUDE.md does not import AGENTS.md')
+    if (ROOT/'CLAUDE.md').exists() and '@AGENTS.md' not in (_safe_read_text(ROOT/'CLAUDE.md', ROOT, max_bytes=8 << 20) or ''): blocks.append('CLAUDE.md does not import AGENTS.md')
     cfg=_settings()
     if not _hooks_wired(cfg): blocks.append('.claude/settings.json missing lifecycle hooks (PreToolUse/PreCompact/SessionStart/PostToolUse)')
     if a.security or full:

@@ -10,14 +10,19 @@ import faulthandler
 import os
 import sys
 
+_FULL_SUITE_WATCHDOG_SECONDS = 1800
+
 
 def pytest_configure(config):
     os.environ.setdefault("SUBSTRATE_LINT_DIRECT", "1")
-    # Watchdog: dump all thread stacks if the session wedges. 600s is far
-    # above the real ~6s runtime, so it only fires on a genuine hang.
+    # Watchdog: dump all thread stacks and fail if the session genuinely wedges.
+    # The full pre-commit suite measured 602.85s on the slow supported host in
+    # v3.8.32; 1800s retains a finite bound with nearly 3x measured margin.
     try:
         faulthandler.enable()
-        faulthandler.dump_traceback_later(600, exit=True, file=sys.stderr)
+        faulthandler.dump_traceback_later(
+            _FULL_SUITE_WATCHDOG_SECONDS, exit=True, file=sys.stderr
+        )
     except Exception:
         pass
 

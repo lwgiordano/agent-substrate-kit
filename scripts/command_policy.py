@@ -23,8 +23,11 @@ Stdlib only.
 """
 from __future__ import annotations
 
+import errno
+import os
 import re
 import shlex
+import stat
 from pathlib import Path
 
 import sys as _sys
@@ -174,10 +177,44 @@ def profile() -> str:
     cfg = _ROOT / ".substrate" / "config"
     configured = "standard"
     if cfg.exists():
+        # v3.8.43 (round-26 P2): a raw read_text here HUNG every consumer of the
+        # policy when .substrate/config was a FIFO — the exfil guard, the config
+        # gate, the completion gate and the doctor all wedged instead of failing
+        # closed. This file decides the runtime profile, so it gets the same
+        # treatment as the required_* locks: O_NOFOLLOW (never follow a symlinked
+        # config), O_NONBLOCK (a FIFO fails fast), S_ISREG + single link (no
+        # shared outside inode), and a bounded read. Kept inline because this
+        # module is AST-pinned. Any refusal raises rather than downgrading.
         try:
-            lines = cfg.read_text(encoding="utf-8").splitlines()
-        except Exception as e:
-            raise CommandPolicyUnavailable(f"could not read .substrate/config: {e}")
+            _fd = os.open(str(cfg), os.O_RDONLY
+                          | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+        except OSError as e:
+            raise CommandPolicyUnavailable(
+                f"could not read .substrate/config ({e.__class__.__name__}) — failing closed")
+        try:
+            _st = os.fstat(_fd)
+            if not stat.S_ISREG(_st.st_mode) or _st.st_nlink > 1:
+                raise CommandPolicyUnavailable(
+                    ".substrate/config is not a private regular file — failing closed")
+            _CFG_MAX = 1 << 20
+            _chunks = []
+            _got = 0
+            while _got < _CFG_MAX:
+                _b = os.read(_fd, min(65536, _CFG_MAX - _got))
+                if not _b:
+                    break
+                _chunks.append(_b)
+                _got += len(_b)
+        except OSError as e:
+            raise CommandPolicyUnavailable(
+                f"could not read .substrate/config ({e.__class__.__name__}) — failing closed")
+        finally:
+            os.close(_fd)
+        try:
+            lines = b"".join(_chunks).decode("utf-8").splitlines()
+        except UnicodeDecodeError as e:
+            raise CommandPolicyUnavailable(
+                f"could not read .substrate/config: {e}") from None
         for line in lines:
             s = line.strip()
             if not s or s.startswith("#"):
@@ -191,15 +228,79 @@ def profile() -> str:
                 break
     # PROFILE LOCK: never run BELOW the pinned minimum, even at the runtime hook
     # boundary (before the gate runs). A downgraded config can't disable strict.
+    # v3.8.36 FAIL CLOSED (Codex round-19): the old read ignored the lock on ANY
+    # error, so undecodable bytes in required_profile silently downgraded the
+    # live hook policy to the config value. A lock that is PRESENT but is a
+    # symlink, a non-regular file, unreadable, undecodable, or out-of-domain now
+    # raises CommandPolicyUnavailable so the hook BLOCKS. Inline (not shared
+    # _doc_common.read_lock): this module is AST-pinned and dependency-light —
+    # the semantics are the same contract by construction, covered by tests.
     req = _ROOT / ".substrate" / "required_profile"
-    if req.exists():
+    order = {"starter": 0, "standard": 1, "strict": 2}
+    # v3.8.37: O_NONBLOCK so a FIFO lock fails fast (not hangs), and a WHOLE
+    # small-bounded read so a padded `b"strict"+spaces+b"starter"` cannot be
+    # truncated into a lowering value (round-20 P1/P2) — same contract as
+    # _doc_common.read_lock, kept inline because this module is AST-pinned.
+    _LOCK_MAX = 64
+    # v3.8.39/40 (round-22/23): O_NOFOLLOW guards the leaf; a symlinked
+    # `.substrate` PARENT routes a lowering lock/config in before the leaf
+    # check. STRICT containment (mirrors _doc_common.within_root): the parent
+    # must resolve to its EXACT lexical location under _ROOT — a symlink that
+    # ESCAPES the repo OR aliases in-repo (`.substrate -> docs`, agent-writable)
+    # both diverge and fail closed. Kept inline because this module is AST-pinned.
+    try:
+        _root_real = os.path.realpath(str(_ROOT))
+        _rel = os.path.relpath(str(req.parent), str(_ROOT))
+        if _rel == os.pardir or _rel.startswith(os.pardir + os.sep) or os.path.isabs(_rel):
+            raise CommandPolicyUnavailable(
+                "required_profile parent is outside the repo — failing closed")
+        _expected = os.path.normpath(os.path.join(_root_real, _rel))
+        if os.path.realpath(str(req.parent)) != _expected:
+            raise CommandPolicyUnavailable(
+                "required_profile parent is a symlink-aliased directory — failing closed")
+    except (OSError, ValueError):
+        raise CommandPolicyUnavailable(
+            "required_profile path unresolvable — failing closed")
+    try:
+        fd = os.open(str(req),
+                     os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    except OSError as e:
+        if e.errno in (errno.ENOENT, errno.ENOTDIR):
+            return configured  # genuinely absent — no lock was pinned
+        raise CommandPolicyUnavailable(
+            f"required_profile lock unreadable ({e.__class__.__name__}) — failing closed")
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise CommandPolicyUnavailable(
+                "required_profile lock is not a regular file — failing closed")
+        # v3.8.41 (round-24 P1): a HARD LINK is a regular file — O_NOFOLLOW and
+        # S_ISREG both pass it — so a hard-linked required_profile lock lowers the
+        # runtime profile from an outside inode. Mirror read_lock's st_nlink>1
+        # rule; fstat on the open fd is TOCTOU-free. Kept inline (AST-pinned).
+        if st.st_nlink > 1:
+            raise CommandPolicyUnavailable(
+                "required_profile lock is a hard link (shared inode) — failing closed")
         try:
-            r = req.read_text(encoding="utf-8").strip()
-        except Exception:
-            r = ""
-        order = {"starter": 0, "standard": 1, "strict": 2}
-        if r in order and order[r] > order.get(configured, 0):
-            return r
+            raw = os.read(fd, _LOCK_MAX + 1)
+        except (OSError, BlockingIOError) as e:
+            raise CommandPolicyUnavailable(
+                f"required_profile lock unreadable ({e.__class__.__name__}) — failing closed")
+    finally:
+        os.close(fd)
+    if len(raw) > _LOCK_MAX:
+        raise CommandPolicyUnavailable(
+            "required_profile lock exceeds 64 bytes — refusing a padded value")
+    try:
+        r = raw.decode("utf-8").strip()
+    except UnicodeDecodeError:
+        raise CommandPolicyUnavailable(
+            "required_profile lock is not valid UTF-8 — failing closed") from None
+    if r not in order:
+        raise CommandPolicyUnavailable(
+            f"required_profile lock holds invalid value {r[:40]!r} — failing closed")
+    if order[r] > order.get(configured, 0):
+        return r
     return configured
 
 

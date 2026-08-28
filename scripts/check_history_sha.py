@@ -14,6 +14,21 @@ What this validator catches (claims it CAN make):
     (allowed: 7-40 hex chars; "WORKING" for bootstrap; "Correction"
     or any text starting with "Correction" for explicit correction
     entries that don't pin a fresh SHA).
+  - Correction entries that supersede nothing: one naming a SHA no
+    entry references, or naming a SHA that RESOLVES (so the entry it
+    claims to correct was never broken). Without these the escape
+    hatch below would be a silencer.
+
+CORRECTING A BAD SHA (v3.8.49). HISTORY is append-only, so a wrong
+SHA cannot be edited out — the remedy has to be additive. Append an
+entry whose third field is `Correction-of-<bad-sha>`; that supersedes
+the unresolvable-SHA finding for exactly that SHA, and the body should
+name the right commit for human readers. This gate PRINTED that advice
+from the start but never implemented the pairing: the marker was
+counted and skipped, so following the printed instruction changed
+nothing and a repo that hit it stayed red with no permitted way out.
+The supersede applies ONLY to "does not resolve" — a future-dated SHA
+is a different finding and is never silenced this way.
   - Commits whose author date is FUTURE relative to the entry
     timestamp — heuristic catch for a future-dated SHA snuck into
     HISTORY (rare but real).
@@ -47,6 +62,16 @@ from pathlib import Path
 _REPO = Path(__file__).resolve().parents[1]
 _HISTORY = _REPO / "docs" / "HISTORY.md"
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+# v3.8.43 (round-26 sweep): HISTORY.md is agent-writable and append-only, so the
+# SHA gate must not read it through a link or block on a FIFO. Found by
+# check_raw_file_io.py, not by an external audit round.
+try:
+    from _doc_common import safe_read_text as _safe_read_text
+except Exception:  # pragma: no cover - stripped install
+    def _safe_read_text(path, root=None, max_bytes=None, tail_bytes=None):
+        return None
+
 # `## <ts> — <token> — <sha|WORKING|Correction...>` with em-dash
 # separators. The token is usually a ULID (uppercase Crockford-32:
 # 0-9 + A-Z minus I,L,O,U) but can also be `NO_SESSION` when
@@ -57,6 +82,15 @@ _HEADER_RE = re.compile(
     re.MULTILINE,
 )
 _SHA_HEX_RE = re.compile(r"^[0-9a-f]{7,40}$")
+# A correction entry that names WHICH SHA it supersedes, so the pairing is
+# machine-checkable rather than operator-readable prose. Separators are
+# liberal (`-`, `_`, `:`, space) because this is hand-typed under pressure,
+# but the target must be a bare hex SHA — anything else stays a plain
+# `Correction` marker, which is still accepted and supersedes nothing.
+_CORRECTION_OF_RE = re.compile(
+    r"^correction[-_: ]*of[-_: ]+(?P<sha>[0-9a-fA-F]{7,40})$",
+    re.IGNORECASE,
+)
 
 
 def _all_commits() -> dict[str, str]:
@@ -134,7 +168,11 @@ def main() -> int:
         print(f"check-history-sha: missing {_HISTORY}", file=sys.stderr)
         return 2
 
-    text = _HISTORY.read_text(encoding="utf-8")
+    text = _safe_read_text(_HISTORY, _REPO, max_bytes=64 << 20)
+    if text is None:
+        print(f"check-history-sha: {_HISTORY} is unreadable or not a private "
+              "regular file", file=sys.stderr)
+        return 2
     headers = list(_HEADER_RE.finditer(text))
     if not headers:
         # Two indistinguishable cases: a bootstrapped repo with no
@@ -174,9 +212,52 @@ def main() -> int:
         )
         return 2
 
+    # PRE-PASS: which SHAs does a Correction entry supersede?
+    #
+    # v3.8.49: this gate printed "Fix by appending a 'Correction' entry that
+    # names the right SHA" and then ignored the entry — a correction marker
+    # was counted and `continue`d past with no pairing to what it corrected.
+    # Because HISTORY is append-only (AGENTS.md hard rule) the prior entry
+    # cannot be edited, so the ONLY permitted remedy was a no-op and a repo
+    # that hit this was red forever. Observed for real on v3.8.48: an entry
+    # named a pre-rebase SHA that never landed, and the branch could not go
+    # green by any route the tooling allowed.
+    #
+    # The pairing is deliberately narrow so the escape hatch cannot become a
+    # silencer: a correction supersedes ONLY the "does not resolve" finding,
+    # never the future-dated one, and a correction that does not correspond
+    # to a real broken entry is itself a finding (see below).
+    #
+    # v3.8.50 (round-32 P2) — the v3.8.49 pre-pass keyed corrections by SHA
+    # ALONE, with no entry-order binding, so it retired matching entries
+    # anywhere in the file. Two ways that silenced a live finding: a
+    # `Correction-of-X` written BEFORE any X entry pre-forgave a bad SHA that
+    # had not been recorded yet, and an X entry appended AFTER a correction
+    # for an earlier X reused the same retirement. HISTORY is append-only and
+    # chronological, so a correction can only speak to what was already
+    # written: superseding is now bound to entry ORDER — a correction at
+    # index j clears an unresolvable entry only at index i < j.
+    #
+    # The same defect, in the same shape, as v3.8.47's binding pre-pass: an
+    # identity-keyed lookup built without the document order that gives the
+    # identity meaning. That one was mine too, two releases earlier.
+    entry_shas = [m.group("sha").strip() for m in headers]
+    corrections: list[tuple[int, str]] = []
+    for idx, marker in enumerate(entry_shas):
+        cm = _CORRECTION_OF_RE.match(marker)
+        if cm:
+            corrections.append((idx, cm.group("sha").lower()))
+
+    def _superseding_correction(i: int, sha_l: str):
+        """The first correction that appears strictly AFTER entry `i`."""
+        for j, target in corrections:
+            if j > i and target == sha_l:
+                return j
+        return None
+
     findings: list[str] = []
     n_sha = n_working = n_correction = 0
-    for m in headers:
+    for entry_i, m in enumerate(headers):
         ts = m.group("ts")
         sha = m.group("sha").strip()
 
@@ -193,6 +274,32 @@ def main() -> int:
         #    we don't enforce that here (operator-readable).
         if sha.lower().startswith("correction"):
             n_correction += 1
+            cm = _CORRECTION_OF_RE.match(sha)
+            if cm:
+                # A correction that supersedes nothing is itself drift: it
+                # would let anyone append `Correction-of-<sha>` and quietly
+                # retire a SHA that was never broken. Both guards fail CLOSED.
+                target = cm.group("sha").lower()
+                # ORDER-BOUND (v3.8.50): only entries written BEFORE this
+                # correction count. A correction cannot pre-forgive a SHA that
+                # has not been recorded yet.
+                matches = [
+                    s for s in entry_shas[:entry_i] if s.lower() == target
+                ]
+                if not matches:
+                    findings.append(
+                        f"{ts}: correction {sha!r} names a SHA that no EARLIER "
+                        "HISTORY entry references. A correction supersedes an "
+                        "entry already written above it — check the SHA, and "
+                        "check that you appended the correction AFTER it."
+                    )
+                elif all(_resolve_commit(s, commits) is not None for s in matches):
+                    findings.append(
+                        f"{ts}: correction {sha!r} names a SHA that RESOLVES, "
+                        "so the entry it corrects was never broken. "
+                        "Corrections supersede unresolvable SHAs only; they "
+                        "cannot retire a live finding."
+                    )
             if args.verbose:
                 print(f"  {ts} {sha} (correction entry; SHA-less by design)")
             continue
@@ -206,12 +313,25 @@ def main() -> int:
             continue
         commit_iso = _resolve_commit(sha, commits)
         if commit_iso is None:
+            corr_j = _superseding_correction(entry_i, sha.lower())
+            if corr_j is not None:
+                # Superseded by a correction appended AFTER this entry — the
+                # documented, append-only remedy, which this gate now actually
+                # honours. Counted on the correction entry itself, not here, so
+                # the summary still reports one correction per correction.
+                if args.verbose:
+                    print(
+                        f"  {ts} {sha} unresolvable but superseded by the "
+                        f"correction at entry {corr_j + 1}"
+                    )
+                continue
             findings.append(
                 f"{ts}: SHA {sha!r} does not resolve to a commit. "
                 "Possible causes: typo, branch deleted, rebase moved the "
                 "commit, or the entry was written before the commit landed. "
-                "Fix by appending a 'Correction' entry that names the right "
-                "SHA — never edit prior entries (AGENTS.md hard rule)."
+                f"Fix by appending an entry whose third field is "
+                f"'Correction-of-{sha}' and whose body names the right SHA — "
+                "never edit prior entries (AGENTS.md hard rule)."
             )
             continue
         # Future-dated SHA heuristic — see module docstring. The

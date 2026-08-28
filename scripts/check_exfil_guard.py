@@ -39,6 +39,16 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+# v3.8.43 (round-26): shared guarded file-IO helpers. Fallbacks fail CLOSED —
+# a reader yields None (no usable content) and a writer RAISES; neither
+# degrades to an unguarded operation.
+
+try:
+    from _doc_common import safe_read_text as _safe_read_text
+except Exception:  # pragma: no cover - stripped install
+    def _safe_read_text(path, root=None, max_bytes=None, tail_bytes=None):
+        return None
 # Detection is owned by command_policy.py. `_looks_dangerous`/`_profile` are
 # re-exported (back-compat for in-process tests) but are NOT defined here —
 # this file is an adapter, not the policy.
@@ -47,6 +57,8 @@ from command_policy import (  # noqa: E402
     looks_dangerous_command as _looks_dangerous,
     profile as _profile,
 )
+from _doc_common import read_lock as _dc_read_lock  # noqa: E402
+from _doc_common import safe_read_text as _dc_safe_read_text  # noqa: E402
 
 
 def _root() -> Path:
@@ -59,14 +71,35 @@ def _root() -> Path:
 
 def _sandbox_required(root: Path) -> bool:
     """Containment is a REQUIRED minimum (so an UNCONTAINED Bash command must be
-    blocked) when .substrate/required_sandbox=1 or SUBSTRATE_SANDBOX="1" in config."""
-    rs = root / ".substrate" / "required_sandbox"
+    blocked) when .substrate/required_sandbox=1 or SUBSTRATE_SANDBOX="1" in config.
+
+    v3.8.33: the LOCK read fails CLOSED. The old single try/except returned
+    False on ANY error, so a present-but-unreadable required_sandbox=1 (chmod —
+    not content drift, so the freeze never sees it) silently allowed uncontained
+    Bash. A lock that EXISTS but cannot be read, or holds a value outside
+    {'0','1'}, now counts as REQUIRED. Config stays best-effort: it is the
+    agent-writable OPT-IN surface, not the authority — an unreadable config
+    simply fails to opt in."""
+    # v3.8.36: canonical fail-closed reader. is_file() FOLLOWED SYMLINKS, so a
+    # lock symlinked to attacker-controlled '0' lowered the containment floor,
+    # and a DIRECTORY lock read as absent (Codex round-19). The canonical
+    # reader refuses both: any "bad" state (symlink/dir/unreadable/undecodable/
+    # out-of-domain) means containment REQUIRED.
+    state, val, _reason = _dc_read_lock(root / ".substrate" / "required_sandbox", {"0", "1"}, root=root)
+    if state == "bad":
+        return True
+    if state == "ok" and val == "1":
+        return True
     try:
-        if rs.is_file() and rs.read_text(encoding="utf-8").strip() == "1":
-            return True
         cfg = root / ".substrate" / "config"
-        if cfg.is_file():
-            for ln in cfg.read_text(encoding="utf-8", errors="replace").splitlines():
+        # v3.8.43 (round-26 P2): a FIFO .substrate/config hung the guard here —
+        # is_file() is True for a FIFO and read_text() then blocks forever.
+        # The shared guarded reader refuses linked/non-regular/routed configs and
+        # never blocks; None means "no usable config", which leaves the caller on
+        # its existing fail-closed default.
+        _cfg_text = _dc_safe_read_text(cfg, root, max_bytes=1 << 20)
+        if _cfg_text is not None:
+            for ln in _cfg_text.splitlines():
                 ln = ln.split("#", 1)[0].strip()
                 if ln.startswith("SUBSTRATE_SANDBOX=") and ln.split("=", 1)[1].strip().strip("\"'") == "1":
                     return True
@@ -80,17 +113,30 @@ def _claude_strict_sandbox(root: Path) -> bool:
     sandbox.enabled=true AND allowUnsandboxedCommands=false (strict mode). Honest
     detection of the host's enforcement CONFIG (the PreToolUse hook cannot read the
     runtime sandbox state — Claude exposes no sandbox field/env var to hooks)."""
-    for p in (root / ".claude" / "settings.json",
-              root / ".claude" / "settings.local.json",
-              Path.home() / ".claude" / "settings.json"):
+    # v3.8.47 (round-30 P2, surfaced when loop targets started inheriting their
+    # iterable's origin): these were read raw. The two IN-REPO settings files
+    # are read with containment against `root`; the user's home settings file
+    # is outside any repo, so it gets the leaf guards and no containment root.
+    # Split rather than passing a conditional root variable — the wrong-root
+    # invariant test rightly rejects that shape, and it is the shape that
+    # produced four silent regressions in v3.8.43.
+    def _strict(raw):
+        if raw is None:
+            return False
         try:
-            if not p.is_file():
-                continue
-            sb = json.loads(p.read_text(encoding="utf-8")).get("sandbox", {})
-            if isinstance(sb, dict) and sb.get("enabled") is True and sb.get("allowUnsandboxedCommands") is False:
-                return True
+            sb = json.loads(raw).get("sandbox", {})
         except Exception:
-            continue
+            return False
+        return (isinstance(sb, dict) and sb.get("enabled") is True
+                and sb.get("allowUnsandboxedCommands") is False)
+
+    for p in (root / ".claude" / "settings.json",
+              root / ".claude" / "settings.local.json"):
+        if _strict(_safe_read_text(p, root, max_bytes=8 << 20)):
+            return True
+    home = Path.home() / ".claude" / "settings.json"
+    if _strict(_dc_safe_read_text(home, None, max_bytes=8 << 20)):
+        return True
     return False
 
 

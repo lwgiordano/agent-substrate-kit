@@ -27,17 +27,21 @@ Exit codes: 0 ok | 1 invalid args | 2 file I/O error.
 from __future__ import annotations
 
 import argparse
-import os
 import re
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 # Explicit local import path so this works under `python -I` (isolated mode
 # does NOT auto-prepend the script dir). Stdlib imports above resolve first.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _doc_common import git_short_sha, repo_root, utc_now_iso
+from _doc_common import (
+    git_short_sha,
+    locked_atomic_append,
+    repo_root,
+    safe_read_text,
+    utc_now_iso,
+)
 
 
 def _other_files_dirty(root: Path) -> list[str]:
@@ -73,6 +77,11 @@ def _other_files_dirty(root: Path) -> list[str]:
     return dirty
 
 SESSION_TOKEN_RE = re.compile(r"^\*\*Session token:\*\*\s+(\S+)\s*$", re.MULTILINE)
+# v3.8.42 (round-25 P2): the token is copied verbatim into an append-only HISTORY
+# header, so it must be a machine-token shape and nothing else. `(\S+)` alone
+# accepts anything non-space — including the U+FFFD run that lossy-decoding
+# undecodable bytes produces — which would embed garbage in the log permanently.
+_SAFE_SESSION_TOKEN_RE = re.compile(r"\A[A-Za-z0-9._:@+-]{1,128}\Z")
 HISTORY_HEADER = """\
 # HISTORY.md — Append-only project changelog
 
@@ -87,9 +96,21 @@ def read_session_token(history_root: Path) -> str:
     session_file = history_root / "docs" / "CURRENT_SESSION.md"
     if not session_file.exists():
         return "NO_SESSION"
-    text = session_file.read_text(encoding="utf-8")
+    # v3.8.41 (round-24 P2): CURRENT_SESSION.md is agent-writable, untrusted
+    # state. A symlinked OR hard-linked leaf would read an OUTSIDE file and copy
+    # its `**Session token:**` value verbatim into the append-only HISTORY entry.
+    # v3.8.42 (round-25 P2): the leaf guard ran but the read that FOLLOWED it was
+    # still a bare read_text — so a FIFO hung and undecodable bytes raised
+    # UnicodeDecodeError out of the CLI. safe_read_text does the guard AND the
+    # read as one operation (O_NOFOLLOW|O_NONBLOCK, S_ISREG, bounded, lossy
+    # decode), so every unsafe shape degrades to NO_SESSION instead.
+    text = safe_read_text(session_file, history_root, max_bytes=256 * 1024)
+    if text is None:
+        return "NO_SESSION"
     m = SESSION_TOKEN_RE.search(text)
-    return m.group(1) if m else "NO_SESSION"
+    if not m or not _SAFE_SESSION_TOKEN_RE.match(m.group(1)):
+        return "NO_SESSION"
+    return m.group(1)
 
 
 def compose_entry(
@@ -112,19 +133,14 @@ def compose_entry(
 
 
 def atomic_append(target: Path, entry: str) -> None:
-    """Read existing file, append entry, write tmp, os.replace."""
-    target.parent.mkdir(parents=True, exist_ok=True)
-    existing = target.read_text(encoding="utf-8") if target.exists() else HISTORY_HEADER
-    new_text = existing + entry
-    fd, tmp_path = tempfile.mkstemp(prefix=".HISTORY.", suffix=".tmp", dir=str(target.parent))
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(new_text)
-        os.replace(tmp_path, target)
-    except Exception:
-        if os.path.exists(tmp_path):
-            os.unlink(tmp_path)
-        raise
+    """Serialized atomic append — see _doc_common.locked_atomic_append.
+
+    v3.8.31: the previous read/mkstemp/replace here was atomic for readers but
+    raced concurrent WRITERS — two simultaneous appends kept only one entry
+    (Codex reproduced it against append_rejected, which had mirrored this
+    function verbatim). Both appenders now share the one flock-serialized
+    implementation."""
+    locked_atomic_append(target, entry, HISTORY_HEADER, ".HISTORY.")
 
 
 def main() -> int:

@@ -14,25 +14,49 @@ Read-only w.r.t. everything except .substrate/install.json. Stdlib only.
 from __future__ import annotations
 
 import argparse
-import contextlib
 import hashlib
 import json
-import os
 import sys
-import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+# v3.8.43 (round-26): shared guarded file-IO helpers. Fallbacks fail CLOSED —
+# a reader yields None (no usable content) and a writer RAISES; neither
+# degrades to an unguarded operation.
+
+try:
+    from _doc_common import refuse_linked_leaf as _refuse_linked_leaf
+    from _doc_common import safe_atomic_write as _safe_atomic_write
+except Exception:  # pragma: no cover - stripped install
+    def _refuse_linked_leaf(path):
+        return "guard unavailable"
+
+    def _safe_atomic_write(*a, **k):
+        raise OSError("safe_atomic_write unavailable — refusing an unguarded write")
 try:
     from _substrate_surfaces import (
         COVERAGE_SKIP_PARTS, OPTIONAL_DIRS, OPTIONAL_FILES, OWNED_DIRS, OWNED_FILES,
     )
 except Exception:  # fail-soft: a baseline is a safety aid, not a gate
-    OWNED_DIRS = ["scripts", "tests", ".claude", ".codex", ".agents", "docs/knowledge",
+    # Keep this fallback in exact parity with the install-owned inventory in
+    # _substrate_surfaces.py. It deliberately does NOT include governed
+    # project-authored knowledge directories, which are CODEOWNER-reviewed
+    # context but not substrate provenance/drift baseline.
+    OWNED_DIRS = ["scripts", "tests", ".claude", ".codex", ".agents",
+                  "docs/decisions", "docs/blind-spot-checklists", "docs/templates",
                   ".github/hooks", ".github/instructions", ".github/workflows"]
-    OWNED_FILES = ["AGENTS.md", "CLAUDE.md", "manage.sh", "pytest.ini",
-                   ".pre-commit-config.yaml", ".substrate/config"]
-    OPTIONAL_FILES, OPTIONAL_DIRS = [".mcp.json"], []
+    OWNED_FILES = ["AGENTS.md", "CLAUDE.md", "DESIGN.md", "AGENT_BUS.md", "manage.sh",
+                   "bootstrap.sh", "agentsync.sh", "package_release.sh", "pytest.ini",
+                   ".pre-commit-config.yaml", ".gitattributes", ".gitignore",
+                   ".github/copilot-instructions.md", ".github/dependabot.yml",
+                   ".substrate/config", ".substrate/required_profile",
+                   "docs/HISTORY.md", "docs/REJECTED.md", "docs/README.md",
+                   "docs/ARCHITECTURE.md", "docs/INTENT.md",
+                   "docs/knowledge/00_substrate.md", "docs/knowledge/_template.md"]
+    OPTIONAL_FILES = [".mcp.json", ".substrate/trust/minisign.pub",
+                      ".substrate/trust/sigstore_identity.json", ".substrate/install.json"]
+    OPTIONAL_DIRS = [".github/skills", "docs/postmortems", "design-system", "templates"]
     COVERAGE_SKIP_PARTS = {"__pycache__", "venv", "node_modules", ".pytest_cache",
                            ".ruff_cache", ".mypy_cache"}
 
@@ -64,6 +88,12 @@ def hash_owned(root: Path) -> dict[str, str]:
     result: dict[str, str] = {}
     for rel in owned_files(root):
         if rel in _BASELINE_EXCLUDE:
+            continue
+        # v3.8.43 (round-26): hashing THROUGH a link records the wrong bytes as
+        # this repo's provenance — an outside file's hash stored as if it were
+        # ours. An owned surface is never legitimately a link, so skip it here
+        # (the harness BLOCKs it separately) rather than attest a false hash.
+        if _refuse_linked_leaf(root / rel) is not None:
             continue
         try:
             result[rel] = hashlib.sha256((root / rel).read_bytes()).hexdigest()
@@ -103,24 +133,16 @@ def main(argv=None) -> int:
     }
     data = build(root, a.version, a.commit, a.source, answers, a.installed_at)
     dest = root / ".substrate" / "install.json"
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    # Write via a same-dir temp + os.replace (v3.8.25 / write_install_json:105): a plain
-    # write_text() writes THROUGH the existing inode, so a HARD-LINKED install.json (nlink>1,
-    # which no symlink check catches) had its outside same-inode twin overwritten with provenance
-    # while the install reported success. Replacing the directory entry breaks any hard link and
-    # never follows a symlink, and is atomic for readers.
-    tmp_path = None
-    try:
-        fd, tmp_path = tempfile.mkstemp(prefix=".install.", suffix=".json.tmp", dir=str(dest.parent))
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(json.dumps(data, indent=2, sort_keys=True) + "\n")
-        os.chmod(tmp_path, 0o644)
-        os.replace(tmp_path, dest)
-        tmp_path = None
-    finally:
-        if tmp_path and os.path.exists(tmp_path):
-            with contextlib.suppress(OSError):
-                os.remove(tmp_path)
+    # v3.8.25 fixed the original instance of this class HERE, with a hand-rolled
+    # same-dir temp + os.replace: a plain write_text() writes THROUGH the existing
+    # inode, so a HARD-LINKED install.json had its outside twin overwritten with
+    # provenance while the install reported success. That reasoning was right and
+    # is now the shared helper's — but this site kept its own copy for eighteen
+    # versions, still resolving dest.parent as a path and chmod'ing by name.
+    # v3.8.44 routes the first instance of the class through the centralized
+    # primitive: component-walk descent, mode set on the temp fd, atomic replace.
+    _safe_atomic_write(dest, json.dumps(data, indent=2, sort_keys=True) + "\n",
+                       root=root, tmp_prefix=".install.", make_parents=True, mode=0o644)
     print(f"write_install_json: wrote {dest.relative_to(root)} "
           f"({len(data['owned_file_sha256'])} owned files, kit {a.version})")
     return 0

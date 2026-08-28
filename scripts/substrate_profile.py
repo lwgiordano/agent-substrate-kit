@@ -37,6 +37,35 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+# v3.8.43 (round-26): shared guarded file-IO helpers. Fallbacks fail CLOSED —
+# a reader yields None (no usable content) and a writer RAISES; neither
+# degrades to an unguarded operation.
+
+try:
+    from _doc_common import safe_atomic_write as _safe_atomic_write
+except Exception:  # pragma: no cover - stripped install
+    def _safe_atomic_write(*a, **k):
+        raise OSError("safe_atomic_write unavailable — refusing an unguarded write")
+
+# v3.8.43 (round-26 P2): the canonical guarded reader. The fallback returns None
+# ("no usable config") rather than an unguarded read, so a stripped install
+# degrades to the caller's fail-closed default instead of blocking on a FIFO.
+try:
+    from _doc_common import safe_read_text as _safe_read_text
+except Exception:  # pragma: no cover - stripped install
+    def _safe_read_text(path, root=None, max_bytes=None, tail_bytes=None):
+        return None
+
+# v3.8.44 (round-27, found by the gate's new interprocedural pass): _sha256()
+# read its argument with a raw read_bytes(), so a governed path handed to it
+# was hashed through whatever the leaf happened to be.
+try:
+    from _doc_common import safe_read_bytes as _safe_read_bytes
+except Exception:  # pragma: no cover - stripped install
+    def _safe_read_bytes(path, root=None, max_bytes=None, tail_bytes=None):
+        return None
+
 try:
     from _substrate_root import substrate_root as _sr
     ROOT = _sr()
@@ -52,8 +81,9 @@ _MARKER = re.compile(r"^\s*# (>>>|<<<) (standard|strict|python-only)$")
 def _read_config(root: Path) -> dict[str, str]:
     cfg: dict[str, str] = {}
     path = root / ".substrate" / "config"
+    # v3.8.43 (round-26 P2): guarded read — a FIFO config must not block a gate.
     try:
-        for line in path.read_text(encoding="utf-8").splitlines():
+        for line in (_safe_read_text(path, root, max_bytes=1 << 20) or "").splitlines():
             m = _KV.match(line.strip())
             if m:
                 cfg[m.group(1)] = m.group(2)
@@ -108,14 +138,21 @@ def render_precommit(template_text: str, profile: str, lang: str, run_prefix: st
     return "\n".join(out) + "\n"
 
 
-def _sha256(p: Path) -> str:
-    return hashlib.sha256(p.read_bytes()).hexdigest()
+def _sha256(p: Path, root: Path | None = None) -> str | None:
+    """Guarded hash: None when the leaf is absent or unsafe (link/FIFO/escape).
+
+    A drift check that hashes through a symlinked or hard-linked
+    .pre-commit-config.yaml compares OUTSIDE bytes to the baseline, so a
+    planted link could make a tampered config read as clean.
+    """
+    raw = _safe_read_bytes(p, root, max_bytes=None)
+    return None if raw is None else hashlib.sha256(raw).hexdigest()
 
 
 def _install_json(root: Path) -> dict | None:
     p = root / ".substrate" / "install.json"
     try:
-        return json.loads(p.read_text(encoding="utf-8"))
+        return json.loads(_safe_read_text(p, root, max_bytes=8 << 20) or "null")
     except Exception:
         return None
 
@@ -129,7 +166,10 @@ def _precommit_drifted(root: Path, baseline: dict | None) -> bool:
     recorded = ((baseline or {}).get("owned_file_sha256") or {}).get(".pre-commit-config.yaml")
     if recorded is None:
         return baseline is None  # no baseline at all -> treat as unknown/drifted
-    return recorded != _sha256(pc)
+    got = _sha256(pc, root)
+    # An unhashable leaf is not "unchanged": treat it as drift so the overwrite
+    # requires --force rather than silently proceeding.
+    return got is None or recorded != got
 
 
 def _plan(target: str, cfg: dict[str, str]) -> None:
@@ -160,7 +200,7 @@ def _write(root: Path, target: str, cfg: dict[str, str], force: bool) -> int:
         return 2
     req = root / ".substrate" / "required_profile"
     try:
-        lock = req.read_text(encoding="utf-8").strip()
+        lock = (_safe_read_text(req, root, max_bytes=1 << 16) or "").strip()
     except Exception:
         lock = ""
     # Two INDEPENDENT constraints (v3.8.5). The v3.8.4 single max()-floor with `<=`
@@ -191,7 +231,7 @@ def _write(root: Path, target: str, cfg: dict[str, str], force: bool) -> int:
               "nothing was changed.", file=sys.stderr)
         return 2
     try:
-        template_text = tpl.read_text(encoding="utf-8")
+        template_text = _safe_read_text(tpl, root, max_bytes=8 << 20) or ""
     except Exception as e:
         print(f"substrate-profile: cannot read {STAGED_TEMPLATE}: {e}; nothing was changed.",
               file=sys.stderr)
@@ -206,11 +246,11 @@ def _write(root: Path, target: str, cfg: dict[str, str], force: bool) -> int:
     # ---- all preconditions pass; apply (template confirmed readable) ----
     rendered = render_precommit(template_text, target, cfg.get("SUBSTRATE_LANG", "python"),
                                 _run_prefix(cfg))
-    (root / ".pre-commit-config.yaml").write_text(rendered, encoding="utf-8")
+    _safe_atomic_write(root / ".pre-commit-config.yaml", rendered, root=root)
     print("substrate-profile: re-rendered .pre-commit-config.yaml")
 
     cfg_path = root / ".substrate" / "config"
-    lines = cfg_path.read_text(encoding="utf-8").splitlines()
+    lines = (_safe_read_text(cfg_path, root, max_bytes=1 << 20) or "").splitlines()
     replaced = False
     for i, line in enumerate(lines):
         if line.startswith("SUBSTRATE_PROFILE="):
@@ -219,13 +259,13 @@ def _write(root: Path, target: str, cfg: dict[str, str], force: bool) -> int:
             break
     if not replaced:
         lines.append(f'SUBSTRATE_PROFILE="{target}"')
-    cfg_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    _safe_atomic_write(cfg_path, "\n".join(lines) + "\n", root=root)
     print(f'substrate-profile: SUBSTRATE_PROFILE="{target}"')
 
     req = root / ".substrate" / "required_profile"
-    prev_req = req.read_text(encoding="utf-8").strip() if req.is_file() else ""
+    prev_req = (_safe_read_text(req, root, max_bytes=1 << 16) or "").strip()
     if RANK.get(prev_req, -1) < RANK[target]:  # raise-only; never lower the lock
-        req.write_text(target + "\n", encoding="utf-8")
+        _safe_atomic_write(req, target + "\n", root=root)
         print(f"substrate-profile: required_profile -> {target}")
 
     if target == "strict":
@@ -235,8 +275,11 @@ def _write(root: Path, target: str, cfg: dict[str, str], force: bool) -> int:
             if dest.exists():
                 print(f"substrate-profile: SKIP scripts/{f.name} (exists)")
                 continue
-            dest.write_bytes(f.read_bytes())
-            dest.chmod(dest.stat().st_mode | 0o755)
+            # v3.8.43: dest.exists() is FALSE for a BROKEN symlink, so the
+            # skip above did not protect this write — it followed the link
+            # and created the outside file. Anchored write instead.
+            _safe_atomic_write(dest, f.read_bytes(), root=root,
+                               mode=(f.stat().st_mode & 0o777) | 0o755)
             print(f"substrate-profile: + scripts/{f.name}")
         if not staged:
             print("substrate-profile: WARNING no staged extras (.substrate/extras/) — "
@@ -273,17 +316,17 @@ def _check(root: Path, target: str, cfg: dict[str, str]) -> int:
     if RANK.get(current, -1) < RANK[target]:
         problems.append(f"SUBSTRATE_PROFILE={current!r} is below {target}")
     req = root / ".substrate" / "required_profile"
-    req_val = req.read_text(encoding="utf-8").strip() if req.is_file() else ""
+    req_val = (_safe_read_text(req, root, max_bytes=1 << 16) or "").strip()
     if RANK.get(req_val, -1) < RANK[target]:
         problems.append(f"required_profile={req_val!r} is below {target}")
     tpl = root / STAGED_TEMPLATE
     if not tpl.is_file():
         problems.append(f"{STAGED_TEMPLATE} not staged (run ./manage.sh upgrade)")
     elif current in RANK:
-        want = render_precommit(tpl.read_text(encoding="utf-8"), current,
+        want = render_precommit(_safe_read_text(tpl, root, max_bytes=8 << 20) or "", current,
                                 cfg.get("SUBSTRATE_LANG", "python"), _run_prefix(cfg))
         pc = root / ".pre-commit-config.yaml"
-        if pc.is_file() and pc.read_text(encoding="utf-8") != want:
+        if pc.is_file() and (_safe_read_text(pc, root, max_bytes=8 << 20) or "") != want:
             problems.append(".pre-commit-config.yaml does not match a fresh render at the "
                             "current profile (locally edited or stale template)")
     for p in problems:

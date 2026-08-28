@@ -4,6 +4,28 @@ from __future__ import annotations
 import argparse, json, subprocess, sys
 from datetime import UTC, datetime
 from pathlib import Path
+
+# v3.8.43 (round-26): shared guarded file-IO helpers. Fallbacks fail CLOSED —
+# a reader yields None (no usable content) and a writer RAISES; neither
+# degrades to an unguarded operation.
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+try:
+    from _doc_common import safe_atomic_write as _safe_atomic_write
+except Exception:  # pragma: no cover - stripped install
+    def _safe_atomic_write(*a, **k):
+        raise OSError("safe_atomic_write unavailable — refusing an unguarded write")
+
+# v3.8.46 (round-29 P2): guarded mkdir. A raw mkdir(parents=True) BEFORE a
+# guarded write creates the directory through a symlinked ancestor and only
+# then gets refused — the mutation has already happened outside the repo.
+try:
+    from _doc_common import safe_mkdir as _safe_mkdir
+except Exception:  # pragma: no cover - stripped install
+    def _safe_mkdir(*a, **k):
+        raise OSError("safe_mkdir unavailable — refusing an unguarded mkdir")
+
 ROOT=Path.cwd()
 def run(cmd):
     start=datetime.now(UTC).replace(microsecond=0).isoformat().replace('+00:00','Z')
@@ -33,13 +55,13 @@ def plan(mode):
     else: full.append(['__skip__','pre-commit not in .substrate/venv — run ./manage.sh setup'])
     return full
 def write_report(report):
-    stamp=datetime.now(UTC).strftime('%Y-%m-%dT%H%M%SZ'); outdir=ROOT/'ai'/'audits'/stamp; outdir.mkdir(parents=True,exist_ok=True)
-    (outdir/'audit-report.json').write_text(json.dumps(report,indent=2,sort_keys=True)+'\n',encoding='utf-8')
+    stamp=datetime.now(UTC).strftime('%Y-%m-%dT%H%M%SZ'); outdir=ROOT/'ai'/'audits'/stamp; _safe_mkdir(outdir, ROOT)
+    _safe_atomic_write(outdir/'audit-report.json', json.dumps(report,indent=2,sort_keys=True)+'\n', root=ROOT)
     lines=[f'# Audit report — {stamp}','',f"Mode: `{report['mode']}`",f"Final: **{report['final']}**",'', '## Checks','']
     for c in report['checks']:
         status='PASS' if c['returncode']==0 else 'BLOCK'; lines.append(f"### {status}: `{' '.join(c['cmd'])}`")
         if c['output']: lines+=['','```text',c['output'][-4000:],'```','']
-    (outdir/'audit-report.md').write_text('\n'.join(lines)+'\n',encoding='utf-8')
+    _safe_atomic_write(outdir/'audit-report.md', '\n'.join(lines)+'\n', root=ROOT)
     return outdir/'audit-report.json'
 def main():
     ap=argparse.ArgumentParser(); ap.add_argument('--mode',choices=['quick','full'],default='quick'); ap.add_argument('--write-report',action='store_true'); ap.add_argument('--json',action='store_true'); a=ap.parse_args()
@@ -50,7 +72,17 @@ def main():
         r=run(cmd); checks.append(r); print(('PASS' if r['returncode']==0 else 'BLOCK')+': '+' '.join(cmd))
         if r['returncode'] and r['output']: print(r['output'][-2000:])
     final='PASS' if all(c['returncode']==0 for c in checks) else 'BLOCK'; report={'mode':a.mode,'final':final,'generated_at':datetime.now(UTC).replace(microsecond=0).isoformat().replace('+00:00','Z'),'checks':checks}
-    if a.write_report: print('substrate-audit: wrote '+str(write_report(report).relative_to(ROOT)))
+    if a.write_report:
+        # v3.8.46 (round-29 P2): the report directory is created through the
+        # guarded descent now, so a symlinked ai/ is REFUSED before anything is
+        # created outside. Report that as an audit failure with a readable
+        # message rather than a traceback — an audit that cannot record itself
+        # has not passed.
+        try:
+            print('substrate-audit: wrote '+str(write_report(report).relative_to(ROOT)))
+        except OSError as e:
+            print(f'substrate-audit: BLOCK: cannot write the report: {e}', file=sys.stderr)
+            return 1
     if a.json: print(json.dumps(report,indent=2,sort_keys=True))
     return 0 if final=='PASS' else 1
 if __name__=='__main__': sys.exit(main())

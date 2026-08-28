@@ -56,7 +56,31 @@ except Exception:
 
 SESSION_START = ROOT / ".substrate" / "memory" / "session_start.json"
 EVENTS = ROOT / ".substrate" / "memory" / "events.jsonl"
+CONFIG = ROOT / ".substrate" / "config"
 _EVENTS_TAIL_LINES = 200
+
+# v3.8.43 (round-26): import the CANONICAL guarded reader instead of keeping an
+# inline mirror. v3.8.42 added one here for events.jsonl; this round needed two
+# more readers guarded (session_start.json, .substrate/config), and three
+# hand-copies in one file is how the mirrors drift. scripts/ is on sys.path
+# above and _doc_common is pure stdlib. The fallback returns None — no evidence
+# — which makes the gate NUDGE rather than go quiet, the fail-safe direction.
+try:
+    from _doc_common import safe_read_text as _safe_read_text
+except Exception:  # pragma: no cover - stripped install
+    def _safe_read_text(path, root=None, max_bytes=None, tail_bytes=None):
+        return None
+
+
+def _safe_cfg_text() -> str | None:
+    """.substrate/config as text, or None when absent/unsafe. Trust-adjacent:
+    a FIFO here hung the Stop hook and a linked one supplied outside config."""
+    return _safe_read_text(CONFIG, ROOT, max_bytes=64 * 1024)
+
+
+def _safe_read_json_text(path) -> str | None:
+    """Guarded read of a small JSON state file (None when absent/unsafe)."""
+    return _safe_read_text(path, ROOT, max_bytes=1 << 20)
 
 # Substrate bookkeeping the gate must ignore — restore()/capture()/todo-mirror
 # and the memory log THIS gate consults are written as a side effect of the
@@ -94,7 +118,9 @@ def _enabled() -> bool:
     if env is not None:
         return env.strip() in ("1", "true", "yes", "warn")
     try:
-        for line in (ROOT / ".substrate" / "config").read_text(encoding="utf-8").splitlines():
+        # v3.8.43 (round-26): .substrate/config is a trust-adjacent file; a
+        # FIFO here hung the Stop hook and a linked one supplied outside config.
+        for line in (_safe_cfg_text() or "").splitlines():
             if line.strip().startswith("COMPLETION_GATE="):
                 return line.split("=", 1)[1].strip().strip('"') == "1"
     except Exception:
@@ -147,16 +173,31 @@ def _last_project_change() -> datetime | None:
     return max(candidates).replace(microsecond=0)
 
 
+def _safe_event_lines() -> list[str] | None:
+    """Tail lines of events.jsonl, or None when absent OR unsafe to read.
+
+    v3.8.42 (round-25 P2) added the guard here as a hand-copied inline mirror.
+    v3.8.43 collapses it onto the canonical `safe_read_text`: this round had to
+    guard two MORE readers in this file, and three hand-copies in one module is
+    exactly how mirrors drift out of sync with the original. The guarantees are
+    unchanged — containment, O_NOFOLLOW|O_NONBLOCK, S_ISREG, st_nlink == 1, and
+    a bounded tail — they are just no longer re-derived here."""
+    raw = _safe_read_text(EVENTS, ROOT, tail_bytes=64 * 1024)
+    return None if raw is None else raw.splitlines()
+
+
 def _audit_event_after(cutoff: datetime | None) -> bool:
     """True if a self-audit skill-run event exists at/after `cutoff`
-    (bounded tail read — the log is append-only and can grow large)."""
-    try:
-        with EVENTS.open("rb") as fh:
-            fh.seek(0, 2)
-            size = fh.tell()
-            fh.seek(max(0, size - 64 * 1024))
-            lines = fh.read().decode("utf-8", errors="replace").splitlines()
-    except Exception:
+    (bounded tail read — the log is append-only and can grow large).
+
+    v3.8.42 (round-25 P2): this decides whether the Stop nudge fires, so reading
+    it through a link is a gate BYPASS — a hard-linked events.jsonl pointing at
+    an outside file holding a recent self-audit event silenced the nudge on a
+    dirty tree. The read is guarded (containment + O_NOFOLLOW|O_NONBLOCK +
+    S_ISREG + st_nlink == 1); anything unsafe returns False, i.e. NO evidence of
+    an audit, which nudges rather than staying silent."""
+    lines = _safe_event_lines()
+    if lines is None:
         return False
     for line in lines[-_EVENTS_TAIL_LINES:]:
         try:
@@ -180,7 +221,13 @@ def _work_happened() -> tuple[bool, datetime | None]:
     dirty = _project_dirty_files()
     head_moved = False
     try:
-        baseline = json.loads(SESSION_START.read_text(encoding="utf-8"))
+        # v3.8.43 (round-26 P2): events.jsonl was guarded in v3.8.42 but this
+        # BASELINE read was not, so a hard-linked session_start.json whose head
+        # matched HEAD silenced the nudge, and a FIFO hung the gate. Same guard.
+        _base_raw = _safe_read_json_text(SESSION_START)
+        if _base_raw is None:
+            raise OSError("session_start.json unreadable or unsafe")
+        baseline = json.loads(_base_raw)
         base_head = str(baseline.get("head", ""))
         cur_head = _git("rev-parse", "--short", "HEAD")
         head_moved = bool(base_head) and bool(cur_head) and base_head != cur_head
@@ -220,7 +267,7 @@ def main() -> int:
 
 def _strict_profile() -> bool:  # pragma: no cover — used by the v3.8.4 block path
     try:
-        for line in (ROOT / ".substrate" / "config").read_text(encoding="utf-8").splitlines():
+        for line in (_safe_cfg_text() or "").splitlines():
             if line.strip().startswith("SUBSTRATE_PROFILE="):
                 return line.split("=", 1)[1].strip().strip('"') == "strict"
     except Exception:

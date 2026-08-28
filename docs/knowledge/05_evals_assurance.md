@@ -65,6 +65,22 @@ bindings during the walk instead produced three separate escapes at once —
 use-before-import dropped, a nested import clobbering a sibling's alias, and a
 nested definition suppressing a star import.
 
+Resolution also covers ordinary binding and origin spellings rather than only
+the ones that happened to appear in the first repro: assignment aliases such as
+`op = open` or `op = shutil.copy` use the last effective binding, function
+defaults can bind either a path or a callable, destructuring/loop/comprehension
+targets and `match` captures inherit governed provenance, walrus callees bind
+before the call is inspected, assigned lambdas are re-scanned at call time under
+the caller's current bindings, `MatchOr` alternatives bind their captures,
+`io.open`/`builtins.open` aliases are recognized, `os.path` wrappers are
+recognized through module aliases, function aliases, and star imports,
+`Path.joinpath` aliases preserve receiver/argument provenance when their result
+feeds raw I/O, and `pathlib.Path` constructor aliases plus repo-relative origins such as
+`Path("docs")`, `Path.cwd()`, `Path(__file__)...`, `os.path.abspath(...)`, and
+`os.path.join(...)` are treated as checkout paths when they appear in real file
+I/O operands. The safety invariant remains the same: a construct the analyzer
+cannot resolve should be printed as unresolved, not silently disappear.
+
 The scan surface is every tree that BECOMES `scripts/` under some profile, not
 just `scripts/` itself: `extras/*.py` are copied in on a strict install, so a
 file that is governed in the install but sits elsewhere in the source would
@@ -81,8 +97,12 @@ Exemptions live in a small
 allowlist where every entry carries a reason AND an expected match COUNT, and an
 entry that no longer matches any call site — or that silently starts covering
 more sites than were reviewed — is itself a failure. An exemption is granted to a
-call site a human actually read, not to a shape. A stale exemption is permanent
-cover. The gate exists because the class it guards recurred across six
+call site a human actually read, not to a shape. Reviewed openat-style component
+walks can also consume an otherwise unresolved single-component call through the
+same allowlist accounting, so intentional helper internals are not left as
+unexplained background noise. A stale or widened exemption is a gate failure,
+because otherwise stale exemptions become permanent cover. The gate exists
+because the class it guards recurred across six
 consecutive audit rounds while being fixed correctly each time: shared helpers
 make the safe path available, and only a gate makes it mandatory.
 

@@ -1,6 +1,6 @@
 ---
 purpose: Release packaging, signing, manifests, and artifact verification.
-last_human_reviewed: 2026-08-26
+last_human_reviewed: 2026-08-28
 covers:
   - manage.sh
   - package_release.sh
@@ -34,6 +34,10 @@ self-test suite.
 hand-edited. `.substrate/install.json` is generated after render and records the
 installed answers, owned-file hashes, version, and source tree used by later
 drift checks.
+Its stripped-install inventory fallback mirrors the canonical install-owned
+surface lists exactly while deliberately excluding governed project-authored
+knowledge directories from provenance, so a missing helper import does not
+silently shrink the upgrade drift baseline.
 
 ## Verification
 

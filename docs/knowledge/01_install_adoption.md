@@ -4,7 +4,7 @@ asserts:
   - bootstrap.sh::_safe_mkdir_p
   - bootstrap.sh::wappend
   - scripts/run_python_gate.sh::_ruff_args
-last_human_reviewed: 2026-08-27
+last_human_reviewed: 2026-08-28
 covers:
   - bootstrap.sh
   - manage.sh
@@ -82,7 +82,10 @@ the upgrade drift baseline.
 
 `doctor` reports operational readiness, integrity, hook wiring, and configured
 governance. Offline doctor and go-live checks do not claim live remote protection
-or a sandbox backend that the host cannot prove.
+or a sandbox backend that the host cannot prove. Its stripped-install ownership
+fallback is parity-checked against the canonical surface inventory so a missing
+helper import cannot silently remove newly governed files from the readiness
+scan.
 
 
 A present-but-unusable `.substrate/config` is tampering, not an absent config.

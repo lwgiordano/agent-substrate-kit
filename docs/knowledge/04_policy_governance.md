@@ -76,11 +76,21 @@ audit triggers. It distinguishes substrate-owned install surfaces from governed
 project-authored context such as knowledge siblings and execution plans: both
 require review, but only generated or install-supplied knowledge files enter the
 install drift baseline. Deterministic parity tests pin the critical cross-list
-mappings and the doctor's fail-safe fallback.
+mappings and every local fail-safe inventory fallback.
+
+The policy-code integrity pin reads the target `command_policy.py` and
+`check_agent_harness.py` source through a component-walk rooted at the target
+tree, not through a multi-component string path. A symlinked parent, linked
+leaf, FIFO/special file, or post-read source swap is a pin failure even if the
+bytes available through the redirected path hash to the expected value.
 
 Dependency cooldown and security scanner tiers are explicit. Offline or missing
 backend states report skipped or unavailable instead of false success, and a
-required tier blocks when its evidence cannot be produced.
+required tier blocks when its evidence cannot be produced. Dependency manifests
+and lockfiles are part of that evidence: absent ecosystem files still mean "no
+discoverable direct dependencies for that ecosystem", but a present manifest or
+lockfile that cannot be read safely as a private regular file is malformed
+evidence, not an empty dependency set.
 
 Frozen `.substrate/required_*` locks fail closed at every reader: an absent
 lock means no lock was pinned, but a present lock that is a symlink, a

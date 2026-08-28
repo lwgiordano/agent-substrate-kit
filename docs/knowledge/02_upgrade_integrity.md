@@ -3,7 +3,7 @@ purpose: Upgrade provenance, authority floors, transactions, and postconditions.
 asserts:
   - scripts/substrate_upgrade.py::_exec_module_from_source
   - scripts/substrate_upgrade.py::_apply_capability_floor
-last_human_reviewed: 2026-08-27
+last_human_reviewed: 2026-08-28
 covers:
   - bootstrap.sh
   - manage.sh
@@ -79,6 +79,9 @@ baseline coverage, upgrade aborts before the render even with `--force`; it does
 not downgrade that missing oracle to a late finalizer failure. The canonical
 surface inventory must also load independently, and the writer's exported
 ownership constants must match it; a self-consistent fallback is not authority.
+The writer's own stripped-install fallback is tested against the canonical
+install-owned and optional inventories so an import failure cannot silently
+shrink the provenance baseline.
 
 The drift map in `.substrate/install.json` is agent-writable. It detects
 accidental or ordinary local changes but is not a local cryptographic integrity

@@ -19,6 +19,7 @@ Two scan classes:
 """
 from __future__ import annotations
 import json
+import hashlib
 import os, stat, re, sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -27,10 +28,11 @@ try:
     ROOT = _sr()
 except Exception:
     ROOT = Path.cwd()
+SCRIPT_ROOT = Path(__file__).resolve().parent.parent
 from _substrate_surfaces import (CONTEXT_GLOBS, CODE_GLOBS, HARNESS_SKIP_GLOBS, HARNESS_ALLOWLIST,
                                  OWNED_DIRS, OPTIONAL_DIRS, GOVERNED_DIRS, GOVERNED_OPTIONAL_DIRS,
                                  _SKILL_ROOTS)
-def _guarded_json_bytes(p):
+def _guarded_json_bytes(p, root=None):
     """Read a governed JSON data file WITHOUT following a link or blocking.
 
     v3.8.47 (round-30 P2): this ran a raw read_text() at MODULE IMPORT, so a
@@ -39,8 +41,37 @@ def _guarded_json_bytes(p):
     inline and dependency-free because this module is AST-pinned and must not
     grow an import.
     """
-    fd = os.open(str(p), os.O_RDONLY
-                 | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    root = Path(root) if root is not None else ROOT
+
+    def _parts_under_root(path):
+        target = Path(path)
+        if not target.is_absolute():
+            target = root / target
+        rel = os.path.relpath(str(target), str(root))
+        if rel == "." or rel.startswith(".." + os.sep) or rel == ".." or os.path.isabs(rel):
+            raise OSError(f"surface is outside root: {path}")
+        return [part for part in rel.split(os.sep) if part and part != "."]
+
+    def _open_leaf(path):
+        parts = _parts_under_root(path)
+        if not parts:
+            raise OSError(f"surface has no leaf: {path}")
+        dir_fd = os.open(str(root), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+                         | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            for comp in parts[:-1]:
+                next_fd = os.open(comp, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+                                  | getattr(os, "O_NOFOLLOW", 0), dir_fd=dir_fd)
+                os.close(dir_fd)
+                dir_fd = next_fd
+            fd = os.open(parts[-1], os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                         | getattr(os, "O_NONBLOCK", 0), dir_fd=dir_fd)
+            return fd, dir_fd
+        except Exception:
+            os.close(dir_fd)
+            raise
+
+    fd, parent_fd = _open_leaf(p)
     try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode) or st.st_nlink > 1:
@@ -53,20 +84,98 @@ def _guarded_json_bytes(p):
             chunks.append(b)
     finally:
         os.close(fd)
+        os.close(parent_fd)
+    fd2, parent_fd2 = _open_leaf(p)
+    try:
+        st2 = os.fstat(fd2)
+        if not stat.S_ISREG(st2.st_mode) or st2.st_nlink > 1:
+            raise OSError(f"pattern source is not a private regular file: {p}")
+    finally:
+        os.close(fd2)
+        os.close(parent_fd2)
+    if (st.st_dev, st.st_ino) != (st2.st_dev, st2.st_ino):
+        raise OSError(f"surface changed during read: {p}")
     return b"".join(chunks)
 
 
 # Surfaces where inline-code spans are quoted EVIDENCE rather than
 # instructions. Deliberately a one-element set: the coordination bus.
 EVIDENCE_QUOTING_SURFACES = {'AGENT_BUS.md'}
+LEGACY_BUS_EVIDENCE_CUTOFF = '2026-08-28T01:10:24Z'
+LEGACY_BUS_EVIDENCE_LINE_IDS = frozenset({
+    # Exact already-published round-30 evidence lines. Pinned by line number
+    # AND content hash so a newly backdated/duplicated bus entry cannot inherit
+    # the legacy evidence carve-out by self-reporting an old timestamp.
+    (471, '0366dc0ac99f6abf6e09ebb268fcd4b66693d1218e64345f94210b76cd90c3ff'),
+    (473, 'b2bedf453e171f29abebab0c114c7eb7b67b667036b1fbf8e08614c5f766335a'),
+})
 
 
 def _load_patterns():
-    p=Path(__file__).resolve().parent/'harness_patterns.json'
-    data=json.loads(_guarded_json_bytes(p).decode('utf-8'))
+    p=SCRIPT_ROOT/'scripts'/'harness_patterns.json'
+    data=json.loads(_guarded_json_bytes(p, root=SCRIPT_ROOT).decode('utf-8'))
     def comp(key): return [(label,re.compile(rx)) for label,rx in data.get(key,[])]
     return comp('secret'), comp('shell_danger'), comp('injection')
 SECRET, SHELL_DANGER, INJECTION = _load_patterns()
+
+
+def _strip_inline_code_spans(text):
+    """Blank CommonMark-ish one-line inline code spans, preserving length."""
+    def escaped(pos):
+        nslash = 0
+        j = pos - 1
+        while j >= 0 and text[j] == '\\':
+            nslash += 1
+            j -= 1
+        return nslash % 2 == 1
+
+    chars = list(text)
+    i = 0
+    n = len(text)
+    while i < n:
+        if text[i] != '`':
+            i += 1
+            continue
+        if escaped(i):
+            i += 1
+            continue
+        j = i
+        while j < n and text[j] == '`':
+            j += 1
+        marker = '`' * (j - i)
+        k = j
+        close = -1
+        while True:
+            k = text.find(marker, k)
+            if k == -1 or '\n' in text[j:k]:
+                break
+            before_ok = k == 0 or text[k - 1] != '`'
+            before_ok = before_ok and not escaped(k)
+            after = k + len(marker)
+            after_ok = after >= n or text[after] != '`'
+            if before_ok and after_ok:
+                close = k
+                break
+            k = after
+        if close == -1:
+            i = j
+            continue
+        for pos in range(i, close + len(marker)):
+            chars[pos] = ' '
+        i = close + len(marker)
+    return ''.join(chars)
+
+
+def _strip_legacy_bus_evidence_spans(text):
+    """Keep already-published quoted repro evidence readable, not future bypasses."""
+    out = []
+    for lineno, line in enumerate(text.splitlines(keepends=True), 1):
+        body = line.rstrip('\r\n')
+        line_id = (lineno, hashlib.sha256(body.encode('utf-8')).hexdigest())
+        out.append(_strip_inline_code_spans(line) if line_id in LEGACY_BUS_EVIDENCE_LINE_IDS else line)
+    return ''.join(out)
+
+
 def _glob(pats):
     # v3.8.38 (round-21 P2): discover surfaces WITHOUT following symlinks. A
     # symlinked surface either redirects the scan to outside bytes (a symlinked
@@ -140,16 +249,18 @@ def main():
                                  "(redirects/shrinks the scan)", comp, 0))
                 break  # deeper components are under the link; one finding per chain
     for p in sorted(context|code):
-        text=p.read_text(encoding='utf-8', errors='replace'); rel=p.relative_to(ROOT).as_posix()
+        rel=p.relative_to(ROOT).as_posix()
+        try:
+            text=_guarded_json_bytes(p).decode('utf-8', errors='replace')
+        except Exception as e:
+            findings.append(("governed surface became unreadable/non-regular before scan "
+                             f"({e.__class__.__name__})", rel, 0))
+            continue
         # v3.8.47 (round-30 P3): the bus is an agent-read surface AND the audit
-        # channel. Scanning it verbatim BLOCKS on an auditor accurately quoting
-        # the string they tested — verified: adding it to CONTEXT_GLOBS failed
-        # immediately on the round-30 finding that reported this very gap, whose
-        # repro names the phrase in backticks. A gate that punishes accurate
-        # reporting is worse than the hole. Inline-code spans are EVIDENCE, so
-        # they are blanked (length-preserving, to keep line numbers honest)
-        # before matching — on this surface only. An UNQUOTED injection line on
-        # the bus still blocks, and no other governed surface gets the carve-out.
+        # channel. Scanning it verbatim BLOCKED on already-published auditor
+        # evidence. The compatibility carve-out is therefore exact-line pinned:
+        # only known legacy line-number+hash pairs get injection-only code-span
+        # blanking. A newly appended or backdated bus entry still scans verbatim.
         # v3.8.47 in-release (auditor BLOCK): the first cut blanked the text
         # ONCE, before all three pattern classes ran, so the carve-out also
         # exempted quoted credentials and quoted shell-danger commands. The
@@ -159,7 +270,7 @@ def main():
         # block, so the blanked copy feeds the injection class ALONE.
         evidence_text=text
         if rel in EVIDENCE_QUOTING_SURFACES:
-            evidence_text=re.sub(r'`[^`\n]*`', lambda m: ' '*len(m.group(0)), text)
+            evidence_text=_strip_legacy_bus_evidence_spans(text)
         if rel in HARNESS_ALLOWLIST:
             pats=list(SECRET)  # the pattern DATA file: secrets only
         else:

@@ -81,10 +81,15 @@ except Exception:
     _OWNED_DIRS = ("scripts/", "extras/", ".claude/", ".codex/", ".agents/", ".github/hooks/",
                    ".github/instructions/", ".github/workflows/", ".github/skills/",
                    "docs/decisions/", "docs/blind-spot-checklists/", "docs/templates/",
-                   "docs/postmortems/")
-    _OWNED_FILES = {"AGENTS.md", "CLAUDE.md", "GEMINI.md", "DESIGN.md", "manage.sh", "pytest.ini",
+                   "docs/postmortems/", "design-system/", "templates/")
+    _OWNED_FILES = {"AGENTS.md", "CLAUDE.md", "DESIGN.md", "AGENT_BUS.md", "manage.sh",
+                    "bootstrap.sh", "agentsync.sh", "package_release.sh", "pytest.ini",
                     ".pre-commit-config.yaml", ".gitattributes", ".gitignore",
                     ".github/copilot-instructions.md", ".github/dependabot.yml", ".mcp.json",
+                    ".substrate/config", ".substrate/required_profile",
+                    ".substrate/trust/minisign.pub", ".substrate/trust/sigstore_identity.json",
+                    ".substrate/install.json", "docs/HISTORY.md", "docs/REJECTED.md",
+                    "docs/README.md", "docs/ARCHITECTURE.md", "docs/INTENT.md",
                     "docs/knowledge/00_substrate.md", "docs/knowledge/_template.md"}
     _GOVERNED_DIRS = ("docs/knowledge/", "docs/superpowers/")
     KIT_TEST_FILES = {"tests/conftest.py", "tests/test_doc_consistency.py", "tests/test_hook_scripts.py",

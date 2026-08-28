@@ -12060,7 +12060,7 @@ def test_history_sha_correction_naming_an_unreferenced_sha_is_itself_drift(tmp_p
         tmp_path, [("NOW", "REAL"), ("NOW", "Correction-of-deadbee")]
     )
     assert rc == 1
-    assert "no HISTORY entry references" in out
+    assert "no EARLIER HISTORY entry references" in out
 
 
 def test_history_sha_correction_cannot_retire_a_resolving_sha(tmp_path) -> None:
@@ -12090,3 +12090,35 @@ def test_history_sha_clean_history_stays_green(tmp_path) -> None:
     rc, out, _ = _run_history_sha(tmp_path, [("NOW", "REAL")])
     assert rc == 0, out
     assert "verified" in out
+
+
+def test_history_sha_correction_cannot_pre_forgive_a_later_entry(tmp_path) -> None:
+    """round-32 P2: the v3.8.49 pre-pass keyed corrections by SHA alone with no
+    entry-order binding, so a `Correction-of-X` written BEFORE any X entry
+    retired a bad SHA that had not been recorded yet. HISTORY is append-only and
+    chronological — a correction can only speak to what is already above it."""
+    rc, out, _ = _run_history_sha(
+        tmp_path,
+        [
+            ("2026-01-01T00:00:00Z", f"Correction-of-{_DEAD_SHA}"),
+            ("2026-01-02T00:00:00Z", _DEAD_SHA),
+        ],
+    )
+    assert rc == 1, out
+    assert "does not resolve" in out or "no EARLIER" in out
+
+
+def test_history_sha_correction_does_not_retire_a_reused_later_sha(tmp_path) -> None:
+    """round-32 P2, second shape: a corrected SHA appended AGAIN after the
+    correction reused the same retirement. Only entries above the correction
+    may be superseded."""
+    rc, out, _ = _run_history_sha(
+        tmp_path,
+        [
+            ("2026-01-01T00:00:00Z", _DEAD_SHA),
+            ("2026-01-02T00:00:00Z", f"Correction-of-{_DEAD_SHA}"),
+            ("2026-01-03T00:00:00Z", _DEAD_SHA),
+        ],
+    )
+    assert rc == 1, out
+    assert "does not resolve" in out

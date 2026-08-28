@@ -227,17 +227,37 @@ def main() -> int:
     # silencer: a correction supersedes ONLY the "does not resolve" finding,
     # never the future-dated one, and a correction that does not correspond
     # to a real broken entry is itself a finding (see below).
+    #
+    # v3.8.50 (round-32 P2) — the v3.8.49 pre-pass keyed corrections by SHA
+    # ALONE, with no entry-order binding, so it retired matching entries
+    # anywhere in the file. Two ways that silenced a live finding: a
+    # `Correction-of-X` written BEFORE any X entry pre-forgave a bad SHA that
+    # had not been recorded yet, and an X entry appended AFTER a correction
+    # for an earlier X reused the same retirement. HISTORY is append-only and
+    # chronological, so a correction can only speak to what was already
+    # written: superseding is now bound to entry ORDER — a correction at
+    # index j clears an unresolvable entry only at index i < j.
+    #
+    # The same defect, in the same shape, as v3.8.47's binding pre-pass: an
+    # identity-keyed lookup built without the document order that gives the
+    # identity meaning. That one was mine too, two releases earlier.
     entry_shas = [m.group("sha").strip() for m in headers]
-    superseded: dict[str, str] = {}
-    for m in headers:
-        marker = m.group("sha").strip()
+    corrections: list[tuple[int, str]] = []
+    for idx, marker in enumerate(entry_shas):
         cm = _CORRECTION_OF_RE.match(marker)
         if cm:
-            superseded[cm.group("sha").lower()] = m.group("ts")
+            corrections.append((idx, cm.group("sha").lower()))
+
+    def _superseding_correction(i: int, sha_l: str):
+        """The first correction that appears strictly AFTER entry `i`."""
+        for j, target in corrections:
+            if j > i and target == sha_l:
+                return j
+        return None
 
     findings: list[str] = []
     n_sha = n_working = n_correction = 0
-    for m in headers:
+    for entry_i, m in enumerate(headers):
         ts = m.group("ts")
         sha = m.group("sha").strip()
 
@@ -260,14 +280,20 @@ def main() -> int:
                 # would let anyone append `Correction-of-<sha>` and quietly
                 # retire a SHA that was never broken. Both guards fail CLOSED.
                 target = cm.group("sha").lower()
-                matches = [s for s in entry_shas if s.lower() == target]
+                # ORDER-BOUND (v3.8.50): only entries written BEFORE this
+                # correction count. A correction cannot pre-forgive a SHA that
+                # has not been recorded yet.
+                matches = [
+                    s for s in entry_shas[:entry_i] if s.lower() == target
+                ]
                 if not matches:
                     findings.append(
-                        f"{ts}: correction {sha!r} names a SHA that no HISTORY "
-                        "entry references. A correction must supersede a real "
-                        "entry — check the SHA you are correcting."
+                        f"{ts}: correction {sha!r} names a SHA that no EARLIER "
+                        "HISTORY entry references. A correction supersedes an "
+                        "entry already written above it — check the SHA, and "
+                        "check that you appended the correction AFTER it."
                     )
-                elif _resolve_commit(matches[0], commits) is not None:
+                elif all(_resolve_commit(s, commits) is not None for s in matches):
                     findings.append(
                         f"{ts}: correction {sha!r} names a SHA that RESOLVES, "
                         "so the entry it corrects was never broken. "
@@ -287,15 +313,16 @@ def main() -> int:
             continue
         commit_iso = _resolve_commit(sha, commits)
         if commit_iso is None:
-            if sha.lower() in superseded:
-                # Superseded by an appended correction — the documented,
-                # append-only remedy, which this gate now actually honours.
-                # Counted on the correction entry itself, not here, so the
-                # summary line still reports one correction per correction.
+            corr_j = _superseding_correction(entry_i, sha.lower())
+            if corr_j is not None:
+                # Superseded by a correction appended AFTER this entry — the
+                # documented, append-only remedy, which this gate now actually
+                # honours. Counted on the correction entry itself, not here, so
+                # the summary still reports one correction per correction.
                 if args.verbose:
                     print(
                         f"  {ts} {sha} unresolvable but superseded by the "
-                        f"correction at {superseded[sha.lower()]}"
+                        f"correction at entry {corr_j + 1}"
                     )
                 continue
             findings.append(

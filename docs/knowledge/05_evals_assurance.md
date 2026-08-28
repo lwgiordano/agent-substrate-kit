@@ -144,8 +144,11 @@ that recorded an unresolvable SHA was red forever with no route the tooling
 allowed. Since v3.8.49 an entry whose third field is `Correction-of-<sha>`
 supersedes the unresolvable-SHA finding for that SHA alone. The hatch is
 deliberately narrow: it never silences the future-dated finding, a correction
-naming a SHA no entry references is itself drift, and a correction naming a SHA
-that resolves is itself drift. The same shape is handled for `AGENT_BUS.md` by
+naming a SHA no EARLIER entry references is itself drift, and a correction
+naming a SHA that resolves is itself drift. Superseding is bound to entry
+ORDER — a correction clears only entries written above it. Keying the hatch by
+SHA alone (v3.8.49) let a correction pre-forgive a bad SHA not yet recorded, and
+let a corrected SHA appended again reuse the same retirement. The same shape is handled for `AGENT_BUS.md` by
 the harness scanner's legacy line-and-content-hash evidence pairs.
 
 Deep security scanners and dependency cooldown require explicit availability and

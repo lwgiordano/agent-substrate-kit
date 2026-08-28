@@ -780,6 +780,47 @@ fail-closed guards so the remedy cannot retire a live finding. Ask it when the
 gate is written: *what does someone do when this fires and the evidence is
 immutable?* If the answer is "edit the record", the gate is unshippable.
 
+## Round 12 — v3.8.50 (round-32): the hatch I built retired live findings
+
+One finding, and I asked for it: the v3.8.49 release note told the auditor to
+attack the correction hatch specifically and to try retiring a live finding with
+it. That is exactly what came back, in one round.
+
+The v3.8.49 pre-pass collected `Correction-of-<sha>` markers into a map keyed by
+SHA **alone**, with no binding to entry order. Two ways to abuse it, both
+reproduced in disposable repos before I accepted the finding:
+
+1. Write `Correction-of-badc0de` FIRST and a `badc0de` entry after it. The
+   correction pre-forgives a bad SHA that had not been recorded yet.
+2. Write `badc0de`, then its correction, then `badc0de` AGAIN. The second entry
+   reuses the first one's retirement.
+
+Both returned `rc=0` on v3.8.49. HISTORY is append-only and chronological, so a
+correction can only speak to what is already above it; superseding is now bound
+to entry order, and a correction that names no EARLIER entry is itself drift.
+
+The part worth keeping is whose mistake this is and what shape it has.
+**v3.8.47's headline fix was that bindings must resolve in DOCUMENT order rather
+than traversal order** — an identity-keyed lookup built without the ordering that
+gives the identity meaning. Two releases later I introduced a new
+identity-keyed lookup with no ordering at all, in a mechanism written to fix a
+different defect. Part 12 said a fixed bug class is not a fixed habit; this is
+the same author repeating the same class inside three releases, in code written
+while thinking about that class.
+
+There is a narrower lesson too. An escape hatch is a privilege, and a privilege
+needs a scope in every dimension the record has. I scoped the hatch by WHICH
+finding it clears (unresolvable only, never future-dated) and by WHETHER the
+target is real (must exist, must not resolve), and I simply did not ask the third
+question — WHEN it applies. Two of three dimensions is how a narrow exception
+becomes a general one.
+
+**Carry-forward rule, part 17 — scope an exception in every dimension of the
+record it acts on.** For an ordered, append-only log the dimensions are at least
+*which finding*, *which target*, and *which position*. Enumerate them explicitly
+when the exception is written; an unscoped dimension is not a smaller hole than a
+missing check, it is the same hole.
+
 ## (Optional) Reproduction
 
 In a disposable repo: `ln victim.txt AGENT_BUS.md` then

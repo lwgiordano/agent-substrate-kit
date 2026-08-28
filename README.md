@@ -42,7 +42,7 @@ bash /path/to/agent_substrate_kit_v3/bootstrap.sh --profile standard --lang auto
 | 4-field bug-fix commit protocol + postmortem-per-bugfix hooks | — | — | yes |
 | Extras (calibration, stale-phrases, license headers) | — | — | yes |
 
-## Current status (v3.8.49)
+## Current status (v3.8.50)
 
 **Local-first, remote-expandable.** The base is offline-complete (memory,
 hooks, validators, evals, sandbox, release bundle) — no GitHub/CI/token/remote

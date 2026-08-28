@@ -6108,24 +6108,137 @@ def test_raw_io_gate_resolves_every_binding_form(tmp_path) -> None:
         "late_assign": ('def f():\n'
                         '    op(ROOT / "docs" / "d", "w").write("x")\n'
                         'op = open\n'),
+        "late_assign_last_wins": ('import shutil\n'
+                                  'def f(tmp_path):\n'
+                                  '    op(tmp_path / "s", ROOT / "docs" / "d")\n'
+                                  'op = open\n'
+                                  'op = shutil.copy\n'),
+        "late_assign_module_alias": ('import shutil as sh\n'
+                                     'def f(tmp_path):\n'
+                                     '    op(tmp_path / "s", ROOT / "docs" / "d")\n'
+                                     'op = sh.copy\n'),
+        "path_ctor_alias_assignment": ('from pathlib import Path\n'
+                                       'P = Path\n'
+                                       'def f():\n'
+                                       '    (P.cwd() / "docs" / "d").write_text("x")\n'),
+        "callable_alias_not_erased_by_bound": ('def f(tmp_path):\n'
+                                               '    op = open\n'
+                                               '    if False:\n'
+                                               '        op = (tmp_path / "fixture").write_text\n'
+                                               '    op(ROOT / "docs" / "d", "w").write("x")\n'),
+        "bound_alias_not_erased_by_callable": ('def f():\n'
+                                               '    fn = (ROOT / "docs" / "d").write_text\n'
+                                               '    if False:\n'
+                                               '        fn = open\n'
+                                               '    fn("x")\n'),
+        "assigned_lambda_reanalyzed_at_call": ('def f(tmp_path):\n'
+                                               '    p = tmp_path / "fixture"\n'
+                                               '    fn = lambda: p.write_text("x")\n'
+                                               '    p = ROOT / "docs" / "d"\n'
+                                               '    fn()\n'),
+        "os_path_module_alias": ('import os.path as osp\n'
+                                 'def f():\n'
+                                 '    open(osp.abspath("docs/d"), "w").write("x")\n'),
+        "os_path_from_os_alias": ('from os import path as osp\n'
+                                  'def f():\n'
+                                  '    open(osp.abspath("docs/d"), "w").write("x")\n'),
+        "os_path_func_alias": ('from os.path import join\n'
+                               'def f():\n'
+                               '    open(join("docs", "d"), "w").write("x")\n'),
+        "os_path_star_import": ('from os.path import *\n'
+                                'def f():\n'
+                                '    open(join("docs", "d"), "w").write("x")\n'),
+        "late_walrus_callable_alias": ('def f():\n'
+                                       '    op(ROOT / "docs" / "d", "w").write("x")\n'
+                                       '(op := open)\n'),
+        "late_assign_annotated": ('def f():\n'
+                                  '    op(ROOT / "docs" / "d", "w").write("x")\n'
+                                  'op: object = open\n'),
+        "late_assign_destructured": ('import shutil\n'
+                                     'def f(tmp_path):\n'
+                                     '    op(tmp_path / "s", ROOT / "docs" / "d")\n'
+                                     'op, other = shutil.copy, None\n'),
         "late_bound": ('def f():\n    fn("x")\n'
                        'fn = (ROOT / "docs" / "d").write_text\n'),
+        "late_bound_last_wins": ('def f(tmp_path):\n    fn("x")\n'
+                                 'fn = (tmp_path / "fixture").write_text\n'
+                                 'fn = (ROOT / "docs" / "d").write_text\n'),
+        "bound_alias_governed_sticky": ('def f(tmp_path):\n'
+                                        '    fn = (ROOT / "docs" / "d").write_text\n'
+                                        '    if False:\n'
+                                        '        fn = (tmp_path / "fixture").write_text\n'
+                                        '    fn("x")\n'),
         "default": ('def f(p=ROOT / "docs" / "d"):\n    p.write_text("x")\n'),
         "kwdefault": ('def f(*, p=ROOT / "docs" / "d"):\n    p.write_text("x")\n'),
+        "callable_default": ('def f(op=open):\n'
+                             '    op(ROOT / "docs" / "d", "w").write("x")\n'),
+        "lambda_default": ('def f():\n'
+                           '    (lambda p=ROOT / "docs" / "d": p.write_text("x"))()\n'),
+        "lambda_call": ('def f():\n'
+                        '    (lambda p: p.write_text("x"))(ROOT / "docs" / "d")\n'),
         "destructure": ('def f():\n'
                         '    p, _ = ROOT / "docs" / "d", 1\n'
                         '    p.write_text("x")\n'),
+        "for_destructure": ('def f():\n'
+                            '    for p, _ in [(ROOT / "docs" / "d", 1)]:\n'
+                            '        p.write_text("x")\n'),
         "for_target": ('def f():\n'
                        '    for p in [ROOT / "docs" / "d"]:\n'
                        '        p.write_text("x")\n'),
+        "listcomp_target": ('def f():\n'
+                            '    [(p.write_text("x")) for p in [ROOT / "docs" / "d"]]\n'),
+        "assigned_iterable": ('def f():\n'
+                              '    paths = [ROOT / "docs" / "d"]\n'
+                              '    for p in paths:\n'
+                              '        p.write_text("x")\n'),
         "match_capture": ('def f():\n'
                           '    match ROOT / "docs" / "d":\n'
                           '        case p:\n'
                           '            p.write_text("x")\n'),
+        "match_as_capture": ('def f():\n'
+                             '    match ROOT / "docs" / "d":\n'
+                             '        case p as q:\n'
+                             '            q.write_text("x")\n'),
+        "match_sequence_capture": ('def f():\n'
+                                   '    match [ROOT / "docs" / "d"]:\n'
+                                   '        case [p]:\n'
+                                   '            p.write_text("x")\n'),
+        "match_mapping_capture": ('def f():\n'
+                                  '    match {"p": ROOT / "docs" / "d"}:\n'
+                                  '        case {"p": p}:\n'
+                                  '            p.write_text("x")\n'),
+        "match_or_capture": ('def f():\n'
+                             '    match [ROOT / "docs" / "d"]:\n'
+                             '        case [p] | [p]:\n'
+                             '            p.write_text("x")\n'),
         "walrus": ('def f():\n'
                    '    (p := ROOT / "docs" / "d").write_text("x")\n'),
+        "walrus_callee": ('def f():\n'
+                          '    (op := open)(ROOT / "docs" / "d", "w").write("x")\n'),
+        "builtins_open_alias": ('from builtins import open as op\n'
+                                'def f():\n'
+                                '    op(ROOT / "docs" / "d", "w").write("x")\n'),
+        "io_open": ('import io\n'
+                    'def f():\n'
+                    '    io.open(ROOT / "docs" / "d", "w").write("x")\n'),
+        "unbound_path_method": ('def f():\n'
+                                '    Path.write_text(ROOT / "docs" / "d", "x")\n'),
+        "unbound_two_path_method_alias": ('def f(tmp_path):\n'
+                                          '    fn = Path.rename\n'
+                                          '    fn(tmp_path / "src", ROOT / "docs" / "d")\n'),
         "inline_join": ('def f():\n'
                         '    open(os.path.join("/tmp", ROOT, "docs", "d"), "w").write("x")\n'),
+        "joinpath_governed_arg": ('def f(tmp_path):\n'
+                                  '    tmp_path.joinpath(ROOT / "docs" / "d").write_text("x")\n'),
+        "joinpath_unbound_alias": ('def f(tmp_path):\n'
+                                   '    jp = Path.joinpath\n'
+                                   '    jp(tmp_path, ROOT / "docs" / "d").write_text("x")\n'),
+        "joinpath_bound_alias_governed_arg": ('def f(tmp_path):\n'
+                                              '    jp = tmp_path.joinpath\n'
+                                              '    jp(ROOT / "docs" / "d").write_text("x")\n'),
+        "joinpath_bound_alias_governed_receiver": ('def f():\n'
+                                                   '    jp = (ROOT / "docs").joinpath\n'
+                                                   '    jp("d").write_text("x")\n'),
     }
     for label, body in cases.items():
         p, _ = _gate_probe(tmp_path, label, body)
@@ -6148,6 +6261,25 @@ def test_raw_io_gate_resolves_every_binding_form(tmp_path) -> None:
                          "--root", str(cls)], capture_output=True, text=True, timeout=120)
     assert pc.returncode == 1 and "round30_class.py" in (pc.stdout + pc.stderr), \
         f"class-body I/O vanished: {pc.stdout + pc.stderr}"
+
+    # Class-local bindings must not leak into methods. A class body executes and
+    # is scanned, but unqualified names in a method resolve like globals, not
+    # through the class namespace.
+    noleak = tmp_path / "classnoleak"
+    noleak.mkdir()
+    _sh.copytree(SCRIPTS, noleak / "scripts", ignore=_sh.ignore_patterns("__pycache__"))
+    (noleak / "scripts" / "round31_class_noleak.py").write_text(
+        'from pathlib import Path\n'
+        'ROOT = Path(__file__).resolve().parent.parent\n'
+        'class C:\n'
+        '    p = ROOT / "docs" / "d"\n'
+        '    def f(self, tmp_path):\n'
+        '        p = tmp_path / "fixture"\n'
+        '        p.write_text("x")\n', encoding="utf-8")
+    pn = subprocess.run([sys.executable, "-I", str(SCRIPTS / "check_raw_file_io.py"),
+                         "--root", str(noleak)], capture_output=True, text=True, timeout=120)
+    assert pn.returncode == 0, \
+        f"class-local path binding leaked into a method and false-positived: {pn.stdout + pn.stderr}"
 
 
 def test_bus_carve_out_covers_injection_only(tmp_path) -> None:
@@ -6176,8 +6308,12 @@ def test_bus_carve_out_covers_injection_only(tmp_path) -> None:
         return subprocess.run([sys.executable, "-I", "scripts/check_agent_harness.py"],
                               cwd=str(repo), capture_output=True, text=True, timeout=120)
 
-    assert _run(f"repro used `{phrase}` here").returncode == 0, \
-        "quoted injection evidence must not block the audit channel"
+    legacy = "- [2026-08-27T00:00:00Z] **codex**: FINDING P3 AGENT_BUS.md:1 — "
+    future = "- [2026-08-28T02:00:00Z] **codex**: FINDING P3 AGENT_BUS.md:1 — "
+    assert _run(f"{legacy}repro used `{phrase}` here").returncode != 0, \
+        "newly written backdated injection evidence must not inherit the legacy carve-out"
+    assert _run(f"{future}repro used `{phrase}` here").returncode != 0, \
+        "new quoted injection text must not be hidden by the audit-channel carve-out"
     assert _run(phrase).returncode != 0, "an unquoted injection must still block"
     assert _run(f"the command was `{danger}`").returncode != 0, \
         "the carve-out must NOT exempt a quoted shell-danger command"
@@ -6231,17 +6367,24 @@ def test_raw_io_gate_sees_repo_origins_that_never_say_root(tmp_path) -> None:
     _sh.copytree(SCRIPTS, root / "scripts", ignore=_sh.ignore_patterns("__pycache__"))
     (root / "scripts" / "round30_origins.py").write_text(
         'from pathlib import Path\n'
+        'from pathlib import Path as P\n'
+        'import os\n'
         'def a():\n    open("docs/relative.txt", "w").write("x")\n'
         'def b():\n    (Path.cwd() / "docs" / "c.txt").write_text("x")\n'
         'def c():\n'
         '    (Path(__file__).resolve().parent.parent / "docs" / "f.txt").write_text("x")\n'
-        'def d():\n    (p := Path.cwd() / "docs" / "w.txt").write_text("x")\n',
+        'def d():\n    (p := Path.cwd() / "docs" / "w.txt").write_text("x")\n'
+        'def e():\n    (P(__file__).resolve().parent.parent / "docs" / "p.txt").write_text("x")\n'
+        'def f():\n    (Path("docs") / "ctor.txt").write_text("x")\n'
+        'def g():\n    open(os.path.abspath("docs/abs.txt"), "w").write("x")\n'
+        'def h():\n    open(os.path.join("docs", "join.txt"), "w").write("x")\n'
+        'def i():\n    open(os.path.join("/tmp", Path.cwd(), "docs", "jcwd.txt"), "w").write("x")\n',
         encoding="utf-8")
     p = subprocess.run([sys.executable, "-I", str(SCRIPTS / "check_raw_file_io.py"),
                         "--root", str(root)], capture_output=True, text=True, timeout=120)
     out = p.stdout + p.stderr
     assert p.returncode == 1, f"repo-relative origins passed: {out}"
-    for line in ("3:", "5:", "7:", "9:"):
+    for line in ("5:", "7:", "9:", "11:", "13:", "15:", "17:", "19:", "21:"):
         assert f"round30_origins.py:{line}" in out, f"missed origin at line {line}: {out}"
 
     # ...and a string literal that is NOT a path operand stays quiet.
@@ -6259,8 +6402,21 @@ def test_raw_io_gate_sees_repo_origins_that_never_say_root(tmp_path) -> None:
     assert pc.returncode == 0, \
         f"string .replace() false-positived as a path op: {pc.stdout + pc.stderr}"
 
+    fixture = tmp_path / "fixture_join"
+    fixture.mkdir()
+    _sh.copytree(SCRIPTS, fixture / "scripts", ignore=_sh.ignore_patterns("__pycache__"))
+    (fixture / "scripts" / "round31_fixture_join.py").write_text(
+        'import os\n'
+        'def f(tmp_path):\n'
+        '    open(os.path.join(tmp_path, "fixture.txt"), "w").write("x")\n',
+        encoding="utf-8")
+    pf = subprocess.run([sys.executable, "-I", str(SCRIPTS / "check_raw_file_io.py"),
+                         "--root", str(fixture)], capture_output=True, text=True, timeout=120)
+    assert pf.returncode == 0, \
+        f"os.path.join(tmp_path, ...) false-positived as governed: {pf.stdout + pf.stderr}"
 
-def test_safe_mkdir_refuses_a_detached_parent(tmp_path) -> None:
+
+def test_safe_mkdir_refuses_a_detached_parent(tmp_path, monkeypatch) -> None:
     """round-30 P2: dir_fd_still_live was written in v3.8.45 for reads, writes
     and appends. v3.8.46 added a FOURTH fd-capturing primitive and did not give
     it the check that already existed for exactly this — so a rename mid-descent
@@ -6272,31 +6428,42 @@ def test_safe_mkdir_refuses_a_detached_parent(tmp_path) -> None:
     (repo / "state").mkdir(parents=True)
     outside = tmp_path / "outside"
     outside.mkdir()
-    real = os.mkdir
+    real_live = dc.dir_fd_still_live
     fired = {"n": False}
 
-    def hook(*a, **k):
-        r = real(*a, **k)
+    def hook(root, parent, dir_fd):
         if not fired["n"]:
             fired["n"] = True
             os.rename(repo / "state", outside / "state")
             (repo / "state").mkdir()
-        return r
+        return real_live(root, parent, dir_fd)
 
-    os.mkdir = hook
-    try:
-        with pytest.raises(OSError, match="renamed"):
-            dc.safe_mkdir(repo / "state" / "tasks", root=repo)
-    finally:
-        os.mkdir = real
+    monkeypatch.setattr(dc, "dir_fd_still_live", hook)
+    with pytest.raises(OSError, match="renamed"):
+        dc.safe_mkdir(repo / "state" / "tasks", root=repo)
+    assert fired["n"], "test did not reach the post-mkdir liveness guard"
     assert not (repo / "state" / "tasks").exists()
+    assert (outside / "state" / "tasks").is_dir(), "race did not detach the created directory"
+
+    # Negative control: the liveness check is consulted on the ordinary path
+    # without making safe_mkdir refuse unconditionally.
+    monkeypatch.setattr(dc, "dir_fd_still_live", real_live)
+    live_checks = {"n": 0}
+
+    def counting_live(root, parent, dir_fd):
+        live_checks["n"] += 1
+        return real_live(root, parent, dir_fd)
+
+    monkeypatch.setattr(dc, "dir_fd_still_live", counting_live)
     # ordinary use unaffected, and no fd leak
+    dc.safe_mkdir(repo / "d" / "e", root=repo)
+    assert (repo / "d" / "e").is_dir()
+    assert live_checks["n"] >= 1
     if os.path.isdir("/proc/self/fd"):
         before = len(os.listdir("/proc/self/fd"))
         for _ in range(100):
             dc.safe_mkdir(repo / "d" / "e", root=repo)
         assert len(os.listdir("/proc/self/fd")) == before
-    assert (repo / "d" / "e").is_dir()
 
 
 def test_harness_pattern_source_cannot_hang_the_scanner(tmp_path) -> None:
@@ -6328,6 +6495,197 @@ def test_harness_pattern_source_cannot_hang_the_scanner(tmp_path) -> None:
         assert p.returncode != 0, f"{tool} passed a FIFO pattern source"
 
 
+def test_harness_scan_reopens_surfaces_safely_after_inventory(tmp_path, monkeypatch) -> None:
+    """Round-31: _glob() classified a private regular surface, then main()
+    reopened it with raw read_text(). A leaf swapped to FIFO between those two
+    steps hung the harness instead of turning into a BLOCK finding."""
+    import importlib.util
+    import shutil as _sh
+
+    if not (SCRIPTS / "check_agent_harness.py").exists():
+        return
+    repo = tmp_path / "race"
+    repo.mkdir()
+    _sh.copytree(SCRIPTS, repo / "scripts", ignore=_sh.ignore_patterns("__pycache__"))
+    (repo / ".substrate").mkdir()
+    (repo / ".substrate" / "config").write_text('SUBSTRATE_PROFILE="standard"\n',
+                                                encoding="utf-8")
+    (repo / "AGENTS.md").write_text("# rules\n", encoding="utf-8")
+    (repo / "AGENT_BUS.md").write_text("# bus\n", encoding="utf-8")
+
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "round31_check_agent_harness", repo / "scripts" / "check_agent_harness.py")
+        assert spec and spec.loader
+        cah = importlib.util.module_from_spec(spec)
+        sys.path.insert(0, str(repo / "scripts"))
+        monkeypatch.setenv("SUBSTRATE_PROJECT_DIR", str(repo))
+        spec.loader.exec_module(cah)
+        monkeypatch.setattr(cah, "ROOT", repo)
+        real = cah._guarded_json_bytes
+        fired = {"done": False}
+
+        def swapping(path):
+            p = Path(path)
+            if not fired["done"] and p == repo / "AGENTS.md":
+                fired["done"] = True
+                p.unlink()
+                os.mkfifo(p)
+            return real(path)
+
+        monkeypatch.setattr(cah, "_guarded_json_bytes", swapping)
+        assert cah.main() == 1, "a post-inventory FIFO swap must BLOCK, not pass or hang"
+    finally:
+        try:
+            sys.path.remove(str(repo / "scripts"))
+        except ValueError:
+            pass
+
+
+def test_harness_surface_read_refuses_swapped_ancestor(tmp_path, monkeypatch) -> None:
+    """Round-31 in-release: guarding the leaf reopen is not enough if the
+    parent chain is re-resolved by path. A parent swapped to a symlink between
+    inventory and read must refuse instead of reading redirected bytes."""
+    import importlib.util
+    import shutil as _sh
+
+    if not (SCRIPTS / "check_agent_harness.py").exists():
+        return
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _sh.copytree(SCRIPTS, repo / "scripts", ignore=_sh.ignore_patterns("__pycache__"))
+    (repo / "docs").mkdir()
+    (repo / "docs" / "note.md").write_text("# inside\n", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "note.md").write_text("# outside\n", encoding="utf-8")
+
+    spec = importlib.util.spec_from_file_location(
+        "round31_check_agent_harness_parent", repo / "scripts" / "check_agent_harness.py")
+    assert spec and spec.loader
+    cah = importlib.util.module_from_spec(spec)
+    sys.path.insert(0, str(repo / "scripts"))
+    try:
+        monkeypatch.setenv("SUBSTRATE_PROJECT_DIR", str(repo))
+        spec.loader.exec_module(cah)
+        monkeypatch.setattr(cah, "ROOT", repo)
+        real_open = cah.os.open
+        fired = {"done": False}
+
+        def swapping_open(path, *args, **kwargs):
+            if not fired["done"] and (Path(path).name == "note.md" or path == "docs"):
+                fired["done"] = True
+                _sh.rmtree(repo / "docs")
+                os.symlink(outside, repo / "docs")
+            return real_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(cah.os, "open", swapping_open)
+        with pytest.raises(OSError):
+            cah._guarded_json_bytes(repo / "docs" / "note.md")
+        assert fired["done"], "test did not trigger the parent-swap window"
+    finally:
+        try:
+            sys.path.remove(str(repo / "scripts"))
+        except ValueError:
+            pass
+
+
+def test_harness_surface_read_rechecks_identity_after_read(tmp_path, monkeypatch) -> None:
+    """Round-31 in-release: a safe first open is not enough; if the live path
+    is replaced after the read, the helper must refuse the stale bytes."""
+    import importlib.util
+    import shutil as _sh
+
+    if not (SCRIPTS / "check_agent_harness.py").exists():
+        return
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _sh.copytree(SCRIPTS, repo / "scripts", ignore=_sh.ignore_patterns("__pycache__"))
+    (repo / "docs").mkdir()
+    note = repo / "docs" / "note.md"
+    note.write_text("# inside-old\n", encoding="utf-8")
+    moved = tmp_path / "moved-docs"
+
+    spec = importlib.util.spec_from_file_location(
+        "round31_check_agent_harness_reopen", repo / "scripts" / "check_agent_harness.py")
+    assert spec and spec.loader
+    cah = importlib.util.module_from_spec(spec)
+    sys.path.insert(0, str(repo / "scripts"))
+    try:
+        monkeypatch.setenv("SUBSTRATE_PROJECT_DIR", str(repo))
+        spec.loader.exec_module(cah)
+        monkeypatch.setattr(cah, "ROOT", repo)
+        real_read = cah.os.read
+        fired = {"done": False}
+
+        def swapping_read(fd, n):
+            data = real_read(fd, n)
+            if data and not fired["done"]:
+                fired["done"] = True
+                os.rename(repo / "docs", moved)
+                (repo / "docs").mkdir()
+                (repo / "docs" / "note.md").write_text("# live-new\n", encoding="utf-8")
+            return data
+
+        monkeypatch.setattr(cah.os, "read", swapping_read)
+        with pytest.raises(OSError, match="changed"):
+            cah._guarded_json_bytes(note)
+        assert fired["done"], "test did not trigger the post-read replacement window"
+        assert (moved / "note.md").read_text(encoding="utf-8") == "# inside-old\n"
+        assert note.read_text(encoding="utf-8") == "# live-new\n"
+    finally:
+        try:
+            sys.path.remove(str(repo / "scripts"))
+        except ValueError:
+            pass
+
+
+def test_harness_surface_read_rechecks_link_count_after_read(tmp_path, monkeypatch) -> None:
+    """A surface that gains a hard-link alias after the first fstat must not
+    pass solely because the dev/inode stayed the same."""
+    import importlib.util
+    import shutil as _sh
+
+    if not (SCRIPTS / "check_agent_harness.py").exists():
+        return
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _sh.copytree(SCRIPTS, repo / "scripts", ignore=_sh.ignore_patterns("__pycache__"))
+    (repo / "docs").mkdir()
+    note = repo / "docs" / "note.md"
+    note.write_text("# inside\n", encoding="utf-8")
+    alias = tmp_path / "outside-note.md"
+
+    spec = importlib.util.spec_from_file_location(
+        "round31_check_agent_harness_nlink", repo / "scripts" / "check_agent_harness.py")
+    assert spec and spec.loader
+    cah = importlib.util.module_from_spec(spec)
+    sys.path.insert(0, str(repo / "scripts"))
+    try:
+        monkeypatch.setenv("SUBSTRATE_PROJECT_DIR", str(repo))
+        spec.loader.exec_module(cah)
+        monkeypatch.setattr(cah, "ROOT", repo)
+        real_fstat = cah.os.fstat
+        fired = {"done": False}
+
+        def linking_fstat(fd):
+            st = real_fstat(fd)
+            if not fired["done"]:
+                fired["done"] = True
+                os.link(note, alias)
+            return st
+
+        monkeypatch.setattr(cah.os, "fstat", linking_fstat)
+        with pytest.raises(OSError, match="private regular"):
+            cah._guarded_json_bytes(note)
+        assert fired["done"], "test did not trigger the post-fstat hard-link window"
+    finally:
+        try:
+            sys.path.remove(str(repo / "scripts"))
+        except ValueError:
+            pass
+
+
 def test_bus_is_scanned_but_quoted_evidence_is_not_an_instruction(tmp_path) -> None:
     """round-30 P3: AGENT_BUS.md is an agent-read surface and was outside the
     scan. It is also the AUDIT CHANNEL — adding it verbatim BLOCKED immediately
@@ -6357,10 +6715,52 @@ def test_bus_is_scanned_but_quoted_evidence_is_not_an_instruction(tmp_path) -> N
 
     assert _run("AGENT_BUS.md", f"\n{phrase}\n").returncode != 0, \
         "an unquoted injection on the bus must still block"
-    assert _run("AGENT_BUS.md", f"\nrepro appended `{phrase}` to the file\n").returncode == 0, \
-        "quoted evidence on the bus must not block the audit channel"
+    legacy = "- [2026-08-27T00:00:00Z] **codex**: FINDING P3 AGENT_BUS.md:1 — "
+    future = "- [2026-08-28T02:00:00Z] **codex**: FINDING P3 AGENT_BUS.md:1 — "
+    assert _run("AGENT_BUS.md", f"\n{legacy}repro appended `{phrase}` to the file\n").returncode != 0, \
+        "a newly appended backdated bus line must not inherit the legacy carve-out"
+    assert _run("AGENT_BUS.md", f"\n{legacy}repro appended ``{phrase}`` to the file\n").returncode != 0, \
+        "a newly appended backdated double-backtick line must not inherit the legacy carve-out"
+    assert _run("AGENT_BUS.md", f"\n{legacy}repro appended \\`{phrase}\\` to the file\n").returncode != 0, \
+        "escaped backticks are literal text, not a CommonMark code span"
+    assert _run("AGENT_BUS.md", f"\n{legacy}repro appended `{phrase}`` to the file\n").returncode != 0, \
+        "malformed mixed-backtick text is not valid quoted evidence and must still block"
+    assert _run("AGENT_BUS.md", f"\n{future}repro appended `{phrase}` to the file\n").returncode != 0, \
+        "new bus entries must not hide injection text merely by backticking it"
     assert _run("AGENTS.md", f"\nsee `{phrase}`\n").returncode != 0, \
         "the evidence carve-out must NOT extend to other governed surfaces"
+
+    # The compatibility carve-out is for one exact already-published line, not
+    # any line that self-reports an old timestamp. Keep the current bus readable
+    # while blocking duplicated/backdated text elsewhere.
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("round31_check_agent_harness_ids",
+                                                  SCRIPTS / "check_agent_harness.py")
+    assert spec and spec.loader
+    cah = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cah)
+    legacy_lineno = next(iter(cah.LEGACY_BUS_EVIDENCE_LINE_IDS))[0]
+    bus_lines = (ROOT / "AGENT_BUS.md").read_text(encoding="utf-8").splitlines()
+    legacy_line = bus_lines[legacy_lineno - 1]
+
+    def _run_bus_body(body: str):
+        repo = tmp_path / f"bus_body_{abs(hash(body)) % 100000}"
+        repo.mkdir()
+        _sh.copytree(SCRIPTS, repo / "scripts", ignore=_sh.ignore_patterns("__pycache__"))
+        (repo / ".substrate").mkdir()
+        (repo / ".substrate" / "config").write_text('SUBSTRATE_PROFILE="standard"\n',
+                                                    encoding="utf-8")
+        (repo / "AGENTS.md").write_text("# rules\n", encoding="utf-8")
+        (repo / "AGENT_BUS.md").write_text(body, encoding="utf-8")
+        return subprocess.run([sys.executable, "-I", "scripts/check_agent_harness.py"],
+                              cwd=str(repo), capture_output=True, text=True, timeout=120)
+
+    exact_legacy_body = "\n".join(["# bus", *("" for _ in range(legacy_lineno - 2)),
+                                   legacy_line]) + "\n"
+    assert _run_bus_body(exact_legacy_body).returncode == 0, \
+        "exact published legacy evidence line should remain readable"
+    assert _run_bus_body("# bus\n" + legacy_line + "\n").returncode != 0, \
+        "duplicating the legacy evidence line at a new line number must block"
 
 
 def test_raw_io_gate_binding_prepass_has_no_blind_scopes(tmp_path) -> None:
@@ -6991,11 +7391,51 @@ def test_harness_scans_root_execution_surfaces(tmp_path) -> None:
     """v3.8.37 (round-20 P1): bootstrap.sh / agentsync.sh / package_release.sh are
     root shell the substrate runs and must be content-scanned — a pipe-to-shell
     payload in package_release.sh previously passed the harness scan clean."""
-    import importlib
-    surf = importlib.import_module("_substrate_surfaces")
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("_current_substrate_surfaces",
+                                                  SCRIPTS / "_substrate_surfaces.py")
+    assert spec and spec.loader
+    surf = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(surf)
     for f in ("bootstrap.sh", "agentsync.sh", "package_release.sh"):
         assert f in surf.CODE_GLOBS, f"{f} not in CODE_GLOBS"
         assert f in surf.OWNED_FILES, f"{f} not review-gated"
+    assert "AGENT_BUS.md" in surf.CONTEXT_GLOBS, "bus is not context-scanned"
+    assert "AGENT_BUS.md" in surf.OWNED_FILES, "bus context surface is not review-gated"
+
+
+def test_every_context_surface_is_review_gated_or_governed() -> None:
+    """v3.8.48: every context surface must also land in an ownership or
+    governance registry. A scanned-but-unowned agent-read file can be replaced
+    without CODEOWNER review, which made AGENT_BUS.md and docs/REJECTED.md
+    siblings of the same review-gate gap."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("_current_substrate_surfaces",
+                                                  SCRIPTS / "_substrate_surfaces.py")
+    assert spec and spec.loader
+    surf = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(surf)
+
+    owned_dirs = tuple(surf.OWNED_DIRS + surf.OPTIONAL_DIRS
+                       + surf.GOVERNED_DIRS + surf.GOVERNED_OPTIONAL_DIRS)
+    owned_files = set(surf.OWNED_FILES + surf.OPTIONAL_FILES)
+
+    def _surface_prefix(glob: str) -> str:
+        if "*" not in glob:
+            return glob
+        if "/**/" in glob:
+            return glob.split("/**/", 1)[0]
+        before_star = glob.split("*", 1)[0].rstrip("/")
+        return before_star if before_star else "."
+
+    def _covered(glob: str) -> bool:
+        prefix = _surface_prefix(glob)
+        if "*" not in glob and prefix in owned_files:
+            return True
+        return any(prefix == d or prefix.startswith(d + "/") for d in owned_dirs)
+
+    uncovered = [g for g in surf.CONTEXT_GLOBS if not _covered(g)]
+    assert uncovered == []
 
 
 def test_harness_blocks_symlinked_root_entrypoint(tmp_path) -> None:
@@ -8374,6 +8814,43 @@ def test_policy_code_source_pins_match_shipped() -> None:
         assert got == want, f"MODULE_SOURCE_SHA256[{rel}] stale"
 
 
+def test_policy_code_integrity_refuses_unsafe_pinned_sources(tmp_path) -> None:
+    """Round-31 in-release: the source-pin reader must not follow a linked
+    policy module or a symlinked scripts/ parent while claiming the trusted
+    bytes matched."""
+    if not (SCRIPTS / "check_policy_code_integrity.py").exists():
+        return
+
+    hard = tmp_path / "hard"
+    (hard / "scripts").mkdir(parents=True)
+    for rel in ("command_policy.py", "check_agent_harness.py"):
+        (hard / "scripts" / rel).write_bytes((SCRIPTS / rel).read_bytes())
+    outside = tmp_path / "outside-command-policy.py"
+    outside.write_bytes((SCRIPTS / "command_policy.py").read_bytes())
+    (hard / "scripts" / "command_policy.py").unlink()
+    os.link(outside, hard / "scripts" / "command_policy.py")
+    rhard = subprocess.run(
+        [sys.executable, "-I", str(SCRIPTS / "check_policy_code_integrity.py"),
+         "--root", str(hard)],
+        capture_output=True, text=True, timeout=30)
+    assert rhard.returncode == 1, rhard.stdout + rhard.stderr
+    assert "command_policy.py" in (rhard.stdout + rhard.stderr)
+
+    linked = tmp_path / "linked"
+    linked.mkdir()
+    link_target = tmp_path / "outside-scripts"
+    link_target.mkdir()
+    for rel in ("command_policy.py", "check_agent_harness.py"):
+        (link_target / rel).write_bytes((SCRIPTS / rel).read_bytes())
+    os.symlink(link_target, linked / "scripts")
+    rlinked = subprocess.run(
+        [sys.executable, "-I", str(SCRIPTS / "check_policy_code_integrity.py"),
+         "--root", str(linked)],
+        capture_output=True, text=True, timeout=30)
+    assert rlinked.returncode == 1, rlinked.stdout + rlinked.stderr
+    assert "command_policy.py" in (rlinked.stdout + rlinked.stderr)
+
+
 def _stage_policy(tmp_path):
     _stage(tmp_path, "check_policy_code_integrity.py", "command_policy.py",
            "check_agent_harness.py", "_substrate_root.py")
@@ -9068,7 +9545,10 @@ def test_doctor_fallback_matches_canonical_inventory() -> None:
 def test_write_install_json_fallback_keeps_project_context_out_of_baseline() -> None:
     """Import failure must not turn governed project docs back into provenance."""
     import ast
+    import importlib
 
+    sys.path.insert(0, str(SCRIPTS))
+    inv = importlib.import_module("_substrate_surfaces")
     src = (SCRIPTS / "write_install_json.py").read_text(encoding="utf-8")
 
     def _fallback(name):
@@ -9076,10 +9556,67 @@ def test_write_install_json_fallback_keeps_project_context_out_of_baseline() -> 
         assert match, f"fallback {name} not found in write_install_json.py"
         return set(ast.literal_eval(match.group(1)))
 
+    assert _fallback("OWNED_DIRS") == set(inv.OWNED_DIRS)
+    assert _fallback("OWNED_FILES") == set(inv.OWNED_FILES)
+    assert _fallback("OPTIONAL_FILES") == set(inv.OPTIONAL_FILES)
+    assert _fallback("OPTIONAL_DIRS") == set(inv.OPTIONAL_DIRS)
     assert "docs/knowledge" not in _fallback("OWNED_DIRS")
     assert {"docs/knowledge/00_substrate.md", "docs/knowledge/_template.md"} <= _fallback(
         "OWNED_FILES"
     )
+    m = re.search(r"^\s*COVERAGE_SKIP_PARTS = (\{[^}]*\})", src, re.MULTILINE)
+    assert m and ast.literal_eval(m.group(1)) == set(inv.COVERAGE_SKIP_PARTS)
+
+
+def test_surface_inventory_fallbacks_are_explicitly_pinned() -> None:
+    """v3.8.48: every local fallback copy of _substrate_surfaces either mirrors
+    the canonical inventory or declares a tested divergence."""
+    import ast
+    import importlib
+
+    sys.path.insert(0, str(SCRIPTS))
+    inv = importlib.import_module("_substrate_surfaces")
+    inventory_fallbacks = set()
+    for path in SCRIPTS.glob("*.py"):
+        src = path.read_text(encoding="utf-8")
+        if "from _substrate_surfaces import" not in src:
+            continue
+        if re.search(r"except Exception:[\s\S]{0,2500}"
+                     r"(OWNED_FILES|_OWNED_FILES|_SENSITIVE_FILES)", src):
+            inventory_fallbacks.add(path.name)
+    assert inventory_fallbacks == {
+        "code_shape.py", "substrate_doctor.py", "write_install_json.py"
+    }
+
+    write_src = (SCRIPTS / "write_install_json.py").read_text(encoding="utf-8")
+
+    def _write_list(name):
+        match = re.search(rf"^    {name} = (\[[^\]]*\])", write_src, re.MULTILINE)
+        assert match, f"write_install_json.py fallback {name} not found"
+        return set(ast.literal_eval(match.group(1)))
+
+    assert _write_list("OWNED_DIRS") == set(inv.OWNED_DIRS)
+    assert _write_list("OWNED_FILES") == set(inv.OWNED_FILES)
+    assert _write_list("OPTIONAL_FILES") == set(inv.OPTIONAL_FILES)
+    assert _write_list("OPTIONAL_DIRS") == set(inv.OPTIONAL_DIRS)
+
+    shape_src = (SCRIPTS / "code_shape.py").read_text(encoding="utf-8")
+
+    def _shape_literal(name):
+        match = re.search(rf"^\s*{name} = ([\[(\{{][\s\S]*?[\])\}}])", shape_src,
+                          re.MULTILINE)
+        assert match, f"code_shape.py fallback {name} not found"
+        return ast.literal_eval(match.group(1))
+
+    expected_owned_dirs = {
+        d.rstrip("/") + "/" for d in (inv.OWNED_DIRS + inv.OPTIONAL_DIRS) if d != "tests"
+    } | {"extras/"}
+    assert set(_shape_literal("_OWNED_DIRS")) == expected_owned_dirs
+    assert set(_shape_literal("_OWNED_FILES")) == set(inv.OWNED_FILES + inv.OPTIONAL_FILES)
+    assert set(_shape_literal("_GOVERNED_DIRS")) == {
+        d.rstrip("/") + "/" for d in inv.GOVERNED_DIRS + inv.GOVERNED_OPTIONAL_DIRS
+    }
+    assert set(_shape_literal("KIT_TEST_FILES")) == set(inv.KIT_TEST_FILES)
 
 
 def test_doctor_go_live_runs_and_reports() -> None:
@@ -10411,6 +10948,91 @@ def test_dep_cooldown_offline_skips_unless_required(tmp_path) -> None:
     assert r2.returncode == 1, "required + unverifiable must BLOCK"
 
 
+def test_dep_cooldown_required_refuses_unsafe_manifests(tmp_path) -> None:
+    """Round-31: guarded reads returning None are not empty manifests. In
+    required mode an unsafe package manifest means the dependency set is
+    unverifiable, not `checked 0, skipped 0`."""
+    dc = SCRIPTS / "check_dep_cooldown.py"
+    if not dc.exists():
+        return
+    sub = _ccfg(tmp_path)
+    (sub / "config").write_text('SUBSTRATE_DEP_COOLDOWN="7"\n', encoding="utf-8")
+    (sub / "required_dep_cooldown").write_text("1\n", encoding="utf-8")
+    (tmp_path / "package-lock.json").write_text(
+        json.dumps({"packages": {"node_modules/left-pad": {"version": "1.3.0"}}}),
+        encoding="utf-8")
+
+    os.mkfifo(tmp_path / "package.json")
+    fifo = subprocess.run([sys.executable, "-I", str(dc), "--root", str(tmp_path),
+                           "--offline", "--require"],
+                          capture_output=True, text=True, timeout=20)
+    assert fifo.returncode != 0, fifo.stdout + fifo.stderr
+    assert "package.json" in (fifo.stdout + fifo.stderr)
+
+    (tmp_path / "package.json").unlink()
+    outside = tmp_path / "outside-package.json"
+    outside.write_text('{"dependencies":{"left-pad":"1.3.0"}}', encoding="utf-8")
+    os.link(outside, tmp_path / "package.json")
+    hard = subprocess.run([sys.executable, "-I", str(dc), "--root", str(tmp_path),
+                           "--offline", "--require"],
+                          capture_output=True, text=True, timeout=20)
+    assert hard.returncode != 0, hard.stdout + hard.stderr
+    assert "package.json" in (hard.stdout + hard.stderr)
+
+    def _fresh(name: str) -> Path:
+        root = tmp_path / name
+        root.mkdir()
+        _ccfg(root)
+        return root
+
+    cfg = _fresh("unsafe_config")
+    (cfg / ".substrate" / "config").unlink(missing_ok=True)
+    os.mkfifo(cfg / ".substrate" / "config")
+    rcfg = subprocess.run([sys.executable, "-I", str(dc), "--root", str(cfg), "--offline",
+                           "--require"],
+                          capture_output=True, text=True, timeout=20)
+    assert rcfg.returncode == 2, rcfg.stdout + rcfg.stderr
+    assert ".substrate/config" in (rcfg.stdout + rcfg.stderr)
+
+    nlock = _fresh("unsafe_package_lock")
+    (nlock / "package.json").write_text('{"dependencies":{"left-pad":"1.3.0"}}',
+                                        encoding="utf-8")
+    os.mkfifo(nlock / "package-lock.json")
+    rnlock = subprocess.run([sys.executable, "-I", str(dc), "--root", str(nlock),
+                             "--days", "7", "--offline", "--require"],
+                            capture_output=True, text=True, timeout=20)
+    assert rnlock.returncode == 2, rnlock.stdout + rnlock.stderr
+    assert "package-lock.json" in (rnlock.stdout + rnlock.stderr)
+
+    pym = _fresh("unsafe_pyproject")
+    os.mkfifo(pym / "pyproject.toml")
+    (pym / "uv.lock").write_text('[[package]]\nname = "requests"\nversion = "2.32.0"\n',
+                                 encoding="utf-8")
+    rpym = subprocess.run([sys.executable, "-I", str(dc), "--root", str(pym),
+                           "--days", "7", "--offline", "--require"],
+                          capture_output=True, text=True, timeout=20)
+    assert rpym.returncode == 2, rpym.stdout + rpym.stderr
+    assert "pyproject.toml" in (rpym.stdout + rpym.stderr)
+
+    pyl = _fresh("unsafe_uv_lock")
+    (pyl / "pyproject.toml").write_text('[project]\ndependencies = ["requests==2.32.0"]\n',
+                                       encoding="utf-8")
+    os.mkfifo(pyl / "uv.lock")
+    rpyl = subprocess.run([sys.executable, "-I", str(dc), "--root", str(pyl),
+                           "--days", "7", "--offline", "--require"],
+                          capture_output=True, text=True, timeout=20)
+    assert rpyl.returncode == 2, rpyl.stdout + rpyl.stderr
+    assert "uv.lock" in (rpyl.stdout + rpyl.stderr)
+
+    gom = _fresh("unsafe_go_mod")
+    os.mkfifo(gom / "go.mod")
+    rgom = subprocess.run([sys.executable, "-I", str(dc), "--root", str(gom),
+                           "--days", "7", "--offline", "--require"],
+                          capture_output=True, text=True, timeout=20)
+    assert rgom.returncode == 2, rgom.stdout + rgom.stderr
+    assert "go.mod" in (rgom.stdout + rgom.stderr)
+
+
 def test_required_dep_cooldown_lock_blocks_disabling(tmp_path) -> None:
     """v3.7.2: required_dep_cooldown=1 + SUBSTRATE_DEP_COOLDOWN=0 must BLOCK the config gate."""
     cc = SCRIPTS / "check_substrate_config.py"
@@ -10421,6 +11043,10 @@ def test_required_dep_cooldown_lock_blocks_disabling(tmp_path) -> None:
     (sub / "required_dep_cooldown").write_text("1\n", encoding="utf-8")
     r = subprocess.run([sys.executable, "-I", str(cc)], cwd=str(tmp_path), capture_output=True, text=True, timeout=30)
     assert r.returncode == 2 and "required minimum" in (r.stdout + r.stderr)
+    dc = SCRIPTS / "check_dep_cooldown.py"
+    r2 = subprocess.run([sys.executable, "-I", str(dc), "--root", str(tmp_path), "--offline"],
+                        capture_output=True, text=True, timeout=30)
+    assert r2.returncode == 2 and "required_dep_cooldown=1" in (r2.stdout + r2.stderr)
 
 
 def test_go_live_has_dep_cooldown_deep_row() -> None:

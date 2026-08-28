@@ -39,12 +39,24 @@ try:
         COVERAGE_SKIP_PARTS, OPTIONAL_DIRS, OPTIONAL_FILES, OWNED_DIRS, OWNED_FILES,
     )
 except Exception:  # fail-soft: a baseline is a safety aid, not a gate
+    # Keep this fallback in exact parity with the install-owned inventory in
+    # _substrate_surfaces.py. It deliberately does NOT include governed
+    # project-authored knowledge directories, which are CODEOWNER-reviewed
+    # context but not substrate provenance/drift baseline.
     OWNED_DIRS = ["scripts", "tests", ".claude", ".codex", ".agents",
+                  "docs/decisions", "docs/blind-spot-checklists", "docs/templates",
                   ".github/hooks", ".github/instructions", ".github/workflows"]
-    OWNED_FILES = ["AGENTS.md", "CLAUDE.md", "manage.sh", "pytest.ini",
-                   ".pre-commit-config.yaml", ".substrate/config",
+    OWNED_FILES = ["AGENTS.md", "CLAUDE.md", "DESIGN.md", "AGENT_BUS.md", "manage.sh",
+                   "bootstrap.sh", "agentsync.sh", "package_release.sh", "pytest.ini",
+                   ".pre-commit-config.yaml", ".gitattributes", ".gitignore",
+                   ".github/copilot-instructions.md", ".github/dependabot.yml",
+                   ".substrate/config", ".substrate/required_profile",
+                   "docs/HISTORY.md", "docs/REJECTED.md", "docs/README.md",
+                   "docs/ARCHITECTURE.md", "docs/INTENT.md",
                    "docs/knowledge/00_substrate.md", "docs/knowledge/_template.md"]
-    OPTIONAL_FILES, OPTIONAL_DIRS = [".mcp.json"], []
+    OPTIONAL_FILES = [".mcp.json", ".substrate/trust/minisign.pub",
+                      ".substrate/trust/sigstore_identity.json", ".substrate/install.json"]
+    OPTIONAL_DIRS = [".github/skills", "docs/postmortems", "design-system", "templates"]
     COVERAGE_SKIP_PARTS = {"__pycache__", "venv", "node_modules", ".pytest_cache",
                            ".ruff_cache", ".mypy_cache"}
 

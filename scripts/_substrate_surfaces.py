@@ -117,11 +117,11 @@ OWNED_FILES = [
     # Root execution surfaces are content-scanned (CODE_GLOBS) AND review-gated
     # (v3.8.37) — a scanned-but-unowned script could be replaced without a
     # CODEOWNER seeing it. bootstrap/agentsync/package_release join manage.sh.
-    "AGENTS.md", "CLAUDE.md", "DESIGN.md", "manage.sh", "bootstrap.sh",
+    "AGENTS.md", "CLAUDE.md", "DESIGN.md", "AGENT_BUS.md", "manage.sh", "bootstrap.sh",
     "agentsync.sh", "package_release.sh", "pytest.ini", ".pre-commit-config.yaml",
     ".gitattributes", ".gitignore", ".github/copilot-instructions.md",
     ".github/dependabot.yml", ".substrate/config", ".substrate/required_profile",
-    "docs/HISTORY.md", "docs/README.md", "docs/ARCHITECTURE.md", "docs/INTENT.md",
+    "docs/HISTORY.md", "docs/REJECTED.md", "docs/README.md", "docs/ARCHITECTURE.md", "docs/INTENT.md",
     # The generated consumer guide and installed scaffold are substrate-owned;
     # project-authored knowledge siblings are governed context, not provenance.
     "docs/knowledge/00_substrate.md", "docs/knowledge/_template.md",

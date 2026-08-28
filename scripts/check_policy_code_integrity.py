@@ -51,40 +51,74 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # (identical on every Python — see the module docstring on why raw bytes, not AST).
 MODULE_SOURCE_SHA256 = {
     "command_policy.py": "374fc9cb8277ef3dd329692ac21dd7527ec2f73154327eb43b53111797b5320d",
-    "check_agent_harness.py": "dfdc7dfe5815b1a3095675dc57fe0aeafe723304bf8b2e579bf9a11930dc1c39",
+    "check_agent_harness.py": "90ac8b1a37395e2727359aa55cf71fa2a7d5e5b98e4f14cbb379497384cfd26f",
 }
 
 
-def _target_scripts(argv: list[str]) -> Path:
+def _target_root(argv: list[str]) -> Path:
     if "--root" in argv:
-        return Path(argv[argv.index("--root") + 1]).resolve() / "scripts"
-    return Path(__file__).resolve().parent
+        return Path(argv[argv.index("--root") + 1]).resolve()
+    return Path(__file__).resolve().parent.parent
+
+
+def _safe_source_bytes(root: Path, rel: Path) -> bytes:
+    if rel.is_absolute() or ".." in rel.parts or not rel.parts:
+        raise OSError(f"unsafe source path: {rel}")
+
+    def _open_leaf():
+        dir_fd = os.open(str(root), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+                         | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            for comp in rel.parts[:-1]:
+                next_fd = os.open(comp, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+                                  | getattr(os, "O_NOFOLLOW", 0), dir_fd=dir_fd)
+                os.close(dir_fd)
+                dir_fd = next_fd
+            fd = os.open(rel.parts[-1], os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                         | getattr(os, "O_NONBLOCK", 0), dir_fd=dir_fd)
+            return fd, dir_fd
+        except Exception:
+            os.close(dir_fd)
+            raise
+
+    fd, parent_fd = _open_leaf()
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink > 1:
+            raise OSError("pinned module is not a private regular file")
+        chunks = []
+        while True:
+            b = os.read(fd, 1 << 20)
+            if not b:
+                break
+            chunks.append(b)
+    finally:
+        os.close(fd)
+        os.close(parent_fd)
+    fd2, parent_fd2 = _open_leaf()
+    try:
+        st2 = os.fstat(fd2)
+        if not stat.S_ISREG(st2.st_mode) or st2.st_nlink > 1:
+            raise OSError("pinned module is not a private regular file")
+    finally:
+        os.close(fd2)
+        os.close(parent_fd2)
+    if (st.st_dev, st.st_ino) != (st2.st_dev, st2.st_ino):
+        raise OSError("pinned module changed during read")
+    return b"".join(chunks)
 
 
 def main(argv: list[str]) -> int:
-    scripts = _target_scripts(argv)
+    root = _target_root(argv)
     failures = []
     for rel, want in MODULE_SOURCE_SHA256.items():
-        src = scripts / rel
         try:
             # v3.8.43 (round-26 P2): read_bytes() BLOCKS on a FIFO, so a
             # non-regular pinned module wedged the integrity check instead of
             # failing it. Open O_NOFOLLOW|O_NONBLOCK and require a regular
             # file before hashing; anything else is a pin mismatch (BLOCK).
-            fd = os.open(str(src), os.O_RDONLY
-                         | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
-            try:
-                if not stat.S_ISREG(os.fstat(fd).st_mode):
-                    raise OSError("pinned module is not a regular file")
-                chunks = []
-                while True:
-                    b = os.read(fd, 1 << 20)
-                    if not b:
-                        break
-                    chunks.append(b)
-            finally:
-                os.close(fd)
-            got = hashlib.sha256(b"".join(chunks)).hexdigest()
+            data = _safe_source_bytes(root, Path("scripts") / rel)
+            got = hashlib.sha256(data).hexdigest()
         except Exception as e:
             print(f"check-policy-code-integrity: BLOCK: {rel}: {e}", file=sys.stderr)
             return 1

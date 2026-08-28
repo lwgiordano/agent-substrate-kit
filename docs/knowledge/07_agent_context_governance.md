@@ -124,6 +124,23 @@ sharing an inode with a file outside the repo is a BLOCK rather than an ordinary
 regular file: `is_symlink()` is False and `is_file()` is True for a hard link, so
 without an explicit `st_nlink > 1` check an outside alias stays writable while
 the scan reports ok. A surface whose link count cannot be read fails closed.
+After inventory, the scanner reopens each surface through the same guarded,
+nonblocking reader; a file that was private and regular during globbing but is
+swapped to a FIFO/special/link-like surface before content scan becomes a BLOCK
+finding rather than a raw `read_text()` hang or redirect. The guarded reader
+walks components under the pinned scan root, refuses linked or non-regular leaves
+on both the initial read and the post-read reopen, and compares device/inode so
+a parent replacement cannot silently serve stale bytes.
+
+`AGENT_BUS.md` is both an agent-read surface and the audit coordination channel,
+so it is scanned with one legacy-compatibility carve-out: only exact
+already-published line-number/content-hash pairs are blanked, only for the
+prompt-injection pattern class, and only on the bus. New backdated entries,
+duplicates, inserted continuations, escaped or malformed backticks, and unquoted
+instruction-like text still scan as literal text. Quoted secrets or shell-danger
+text also still block because their pattern classes read the original bytes.
+Future audit findings should split or otherwise neutralize exact local repro
+strings rather than relying on code-span hiding.
 
 `agentsync.sh` is the transport: it appends a one-line entry to the bus and
 pull/pushes the branch so two agent checkouts share work. As a governed root

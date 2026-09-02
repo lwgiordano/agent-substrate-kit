@@ -39,9 +39,20 @@ echo "==> Secrets"; run_py scripts/check_secrets.py
 echo "==> History"; run_py scripts/check_history_sha.py
 # Durable memory integrity: verify the hash chain, and the anchor in strict
 # (the structured handoff + event log are the tamper-evident record).
+#
+# v3.8.51 (self-audit P1): this used to require the anchor only when a note
+# happened to exist — `strict && [ -n "$(git notes list)" ]`. Nothing ever
+# wrote a note, so in strict the ABSENCE of the trust anchor silently
+# downgraded to the unanchored check: a trust anchor failing open, which
+# INTENT.md forbids ("absence and unreadability are different states").
+# Observed live: the memory directory was replaced wholesale by an older
+# valid chain and `verify` reported OK. In strict the anchor is now REQUIRED
+# and its absence is a gate failure with the remedy named; the anchor itself
+# is written below once the whole gate has passed, so every release re-ties
+# the chain to a known-good commit.
 if [ -f .substrate/memory/events.jsonl ]; then
   echo "==> Memory chain"
-  if [ "$SUBSTRATE_PROFILE" = "strict" ] && [ -n "$(git notes --ref=substrate-memory list 2>/dev/null)" ]; then
+  if [ "$SUBSTRATE_PROFILE" = "strict" ]; then
     run_py scripts/memory_log.py verify --anchor
   else
     run_py scripts/memory_log.py verify
@@ -56,3 +67,11 @@ echo "==> Pre-commit"; run_tool pre-commit run --all-files --show-diff-on-failur
 echo "==> Behavior evals"; run_py scripts/run_substrate_evals.py   # measured block-rate / FP-rate
 echo "==> Audit report"; run_py scripts/substrate_audit.py --mode quick --write-report
 echo "release-gate: passed"
+# Re-tie the memory chain to THIS commit now that every gate has passed. Done in
+# every profile: writing a note is harmless, and it is what makes the strict
+# requirement above satisfiable after a profile ratchet instead of a fresh
+# chicken-and-egg. The note is only as strong as where it lives — push
+# refs/notes/substrate-memory to a protected remote for the real guarantee.
+if [ -f .substrate/memory/events.jsonl ]; then
+  echo "==> Memory anchor"; run_py scripts/memory_log.py anchor
+fi

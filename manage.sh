@@ -248,6 +248,16 @@ case "$cmd" in
       *) echo "usage: ./manage.sh security scan" >&2; exit 2 ;;
     esac ;;
   check)
+    # v3.8.51 (self-audit P3): pre-commit hooks below hardcode $SUBPY, while
+    # run_py silently falls back to uv/python3 when it is missing. On a fresh
+    # clone without `setup` that let the validator chain pass and then failed
+    # fourteen hooks with "Failed" and the one real cause buried per hook
+    # ("Executable .substrate/venv/bin/python not found"). CI never saw it
+    # because ci.yml runs setup first. One honest line, before any gate runs.
+    if [ ! -x "$SUBPY" ]; then
+      echo "check: substrate venv missing ($SUBPY) — run ./manage.sh setup first" >&2
+      exit 1
+    fi
     # Remote governance (CODEOWNERS coverage + trusted-base authority) is enforced as
     # part of check only when the remote tier is ON (v3.6.0 — decoupled from the strict
     # profile, so a strict-LOCAL repo is not told it is "broken" for lacking a

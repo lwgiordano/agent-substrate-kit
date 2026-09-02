@@ -1,6 +1,6 @@
 ---
 purpose: Release packaging, signing, manifests, and artifact verification.
-last_human_reviewed: 2026-08-28
+last_human_reviewed: 2026-09-02
 covers:
   - manage.sh
   - package_release.sh
@@ -50,6 +50,14 @@ The release manifest binds the commit, source-tree identity, and artifact
 SHA-256. `BENCHMARK.md` carries measured behavior but delegates exact artifact
 provenance to that manifest. Review bundles include the evidence required for a
 human or another agent to reproduce the decision.
+
+The gate also verifies the tamper-evident memory chain, and in the strict
+profile requires its git-note anchor unconditionally — an absent anchor is a
+named failure, never a silent downgrade to the unanchored check (that hedge was
+the v3.8.50 self-audit's P1: a trust anchor failing open on absence). Once the
+whole gate has passed, every profile's release writes a fresh anchor for that
+commit, so each release re-ties the chain to a known-good state; the first
+strict release in a repo needs a one-time `./manage.sh memory anchor`.
 
 The release gate runs deterministic validators, project tests, policy evals, and
 artifact verification in sequence. A finalizer or verifier failure is a release

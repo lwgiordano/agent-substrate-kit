@@ -821,6 +821,85 @@ record it acts on.** For an ordered, append-only log the dimensions are at least
 when the exception is written; an unscoped dimension is not a smaller hole than a
 missing check, it is the same hole.
 
+## Round 13 — v3.8.51: the self-audit, and the trust anchor that failed open
+
+Not an audit round from the other agent. The first full self-audit of `main`
+after the merge — seven read-only auditors plus the deterministic gates — returned
+zero BLOCKs. The finding that mattered was not in any of their reports. It was
+hit.
+
+During the audit the workspace was replaced under me: shallow re-clone, venv
+gone, and `.substrate/memory/` swapped for an Aug-27 snapshot. The 113-event
+tamper-evident chain vanished; a 2-event chain from a different state took its
+place; **`memory verify` reported "chain OK."** It was not lying — the chain it
+had was internally valid. It could not tell *intact* from *replaced wholesale*,
+and `memory_log.py`'s own docstring said that was exactly what `anchor` /
+`verify --anchor` existed for. Then `release_gate.sh:44`:
+
+```sh
+if [ "$SUBSTRATE_PROFILE" = "strict" ] && [ -n "$(git notes --ref=substrate-memory list)" ]; then
+    verify --anchor
+else
+    verify
+fi
+```
+
+No ritual had ever written a note. So even in strict, the *absence* of the trust
+anchor silently downgraded to the unanchored check. `INTENT.md` forbids this in
+so many words: *absence and unreadability are different states with different
+verdicts.* Pre-existing, not from the merge; on `main`; guarding objectives #1
+and #3 at once.
+
+Why the hedge existed is the part worth keeping. `verify --anchor` required the
+chain head to **equal** the anchored hash, so one legitimate append after
+anchoring read as "history was rewritten", and it consulted only HEAD's own note,
+so the anchor vanished at the very next commit. Under those semantics requiring
+the anchor would have failed every run — so the gate was written to require it
+only when it happened to be satisfiable. The eval corpus then **pinned the false
+positive**: `memory_anchor_mismatch_detected` asserted that growth past the
+anchor must be detected as tampering. A malicious task encoding the defect as the
+expected behaviour, and a doctor row (`substrate_doctor.py:344`) restating the
+same equality rule as a second definition of "anchor valid".
+
+The fix is membership, not equality: `verify --anchor` finds the nearest
+annotated ancestor of HEAD and requires that hash to be a member of the already
+link-verified chain. Growth passes; replacement and truncation past the anchor
+fail; no anchor anywhere in the ancestry fails closed with the remedy named. The
+release gate requires it unconditionally in strict and *writes* one in every
+profile once it has passed. The doctor delegates to the same verifier. The eval
+was re-targeted at the real threat with a benign twin for growth. What no unkeyed
+hash chain can detect — a rewrite of the suffix after the anchor point — is now
+stated as the limit rather than implied away.
+
+Three siblings landed in the same unit, all the same class:
+
+- `check_history_sha` in a **shallow clone** reported every pre-boundary SHA as
+  unresolvable and printed the append-a-Correction remedy. Followed, that
+  corrupts HISTORY permanently — in every full clone those corrections name
+  *resolving* SHAs, which v3.8.50's own guard rightly treats as drift on a file
+  that cannot be edited back. GitHub Actions checks out `depth: 1` by default;
+  this kit's CI escaped only via `fetch-depth: 0`, and the workaround had been
+  written into a knowledge note instead of into the gate. It now refuses to
+  judge what it cannot see.
+- `manage.sh check` on a fresh clone auto-created its own venv, passed the
+  validator chain, then failed fourteen pre-commit hooks with the one real cause
+  buried per hook. One honest line before any gate runs.
+- The `_doc_common` safety primitives had two "same algorithm" mirrors in
+  fallback paths — `memory_log._safe_read_text`, `session_handoff._safe_atomic_write`
+  — still opening the parent by multi-component path, the exact window v3.8.44
+  closed, with no post-op liveness check. Two fixes behind, in dead code
+  (`_doc_common` is never stripped) that would have silently reintroduced a
+  closed class the day it ran. They are fail-closed stubs now, and a discovery
+  test asserts every such fallback is stub-shaped — the v3.8.48 inventory
+  lock-down, applied to the primitives that actually gate writes.
+
+**Carry-forward rule, part 18 — when a control has to be hedged to stay
+satisfiable, the semantics are wrong, not the hedge.** A gate that reads "require
+X only if X happens to exist" is a confession that requiring X would fail
+constantly. Do not ship the hedge; fix what makes X unsatisfiable. And when an
+eval asserts the hedge's behaviour as correct, the corpus has become a record of
+the defect, and passing it proves nothing.
+
 ## (Optional) Reproduction
 
 In a disposable repo: `ln victim.txt AGENT_BUS.md` then

@@ -1,6 +1,6 @@
 ---
 purpose: Behavioral evals, deterministic validators, audits, and assurance limits.
-last_human_reviewed: 2026-08-28
+last_human_reviewed: 2026-09-02
 covers:
   - manage.sh
   - extras/calibrate_diy_ultrareview.py
@@ -102,7 +102,7 @@ walks can also consume an otherwise unresolved single-component call through the
 same allowlist accounting, so intentional helper internals are not left as
 unexplained background noise. A stale or widened exemption is a gate failure,
 because otherwise stale exemptions become permanent cover. The gate exists
-because the class it guards recurred across six
+because the class it guards recurred across twelve
 consecutive audit rounds while being fixed correctly each time: shared helpers
 make the safe path available, and only a gate makes it mandatory.
 
@@ -135,6 +135,21 @@ substrate-owned for upgrade purposes.
 Finding-response and postmortem gates connect significant fixes to regression
 evidence without asking a model to decide whether code is correct.
 
+Copies of a shared definition are pinned, not trusted. The canonical surface
+inventory in `_substrate_surfaces.py` has three hand-maintained fallbacks for a
+stripped install — `substrate_doctor.py`, `write_install_json.py`, and
+`code_shape.py` — and each is either byte-parity with canonical or an explicitly
+documented divergence, enforced by a discovery test that fails on an unclassified
+copy. The same lock-down now covers the `_doc_common` safety primitives: every
+`except: def _safe_*` fallback behind a `from _doc_common import` must be a
+fail-closed stub (return None, or raise), never a reimplementation. Two "same
+algorithm" mirrors — `memory_log._safe_read_text` and
+`session_handoff._safe_atomic_write` — were found two fixes behind the primitive
+they copied, still opening the parent by multi-component path (the v3.8.44
+window) with no post-op liveness check (v3.8.45). `_doc_common` is never stripped,
+so those fallbacks were dead code in every profile; a fallback that runs an OLDER
+guard is the fail-open shape a dropped guard has, only slower to notice.
+
 A gate over an APPEND-ONLY record needs an additive remedy that the gate
 actually implements. `check_history_sha.py` validates `docs/HISTORY.md`, which
 must never be edited, so the only permitted fix for a wrong SHA is a further
@@ -148,7 +163,11 @@ naming a SHA no EARLIER entry references is itself drift, and a correction
 naming a SHA that resolves is itself drift. Superseding is bound to entry
 ORDER — a correction clears only entries written above it. Keying the hatch by
 SHA alone (v3.8.49) let a correction pre-forgive a bad SHA not yet recorded, and
-let a corrected SHA appended again reuse the same retirement. The same shape is handled for `AGENT_BUS.md` by
+let a corrected SHA appended again reuse the same retirement. In a SHALLOW clone
+the gate refuses to judge at all (exit 2, naming `git fetch --unshallow`): every
+SHA older than the fetch boundary is an absent object, not drift, and printing the
+append-a-Correction remedy there would corrupt HISTORY permanently once a full
+clone resolved those SHAs. The same shape is handled for `AGENT_BUS.md` by
 the harness scanner's legacy line-and-content-hash evidence pairs.
 
 Deep security scanners and dependency cooldown require explicit availability and

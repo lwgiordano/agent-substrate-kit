@@ -11608,17 +11608,34 @@ def test_go_live_memory_anchor_verified_is_pass(tmp_path) -> None:
     assert sum(1 for _ in (repo / ".substrate" / "memory" / "events.jsonl").open()) == 1
 
 
-def test_go_live_memory_anchor_stale_is_fail(tmp_path) -> None:
-    """v3.7.6 (audit P1): an anchor NOTE that exists but no longer matches the current
-    head (new events since the last anchor, or a rewrite) → fail, NOT a false pass."""
+def test_go_live_memory_anchor_growth_is_pass(tmp_path) -> None:
+    """v3.8.51 (self-audit P1): appending AFTER anchoring is the chain's normal life and
+    must stay `pass`. This row used to reimplement the anchor rule as head==anchored and
+    reported growth as STALE — a second definition of validity alongside memory_log's,
+    and a false positive that made the anchor unusable one event after it was written."""
     if not (ROOT / "bootstrap.sh").exists():
         return
     repo = _bootstrapped_git_repo(tmp_path)
     _ml(repo, "append", "--type", "note", "--message", "one")
     _ml(repo, "anchor")
-    _ml(repo, "append", "--type", "note", "--message", "two")  # head now past the anchor
+    _ml(repo, "append", "--type", "note", "--message", "two")  # legitimate growth
     row = _memrow(repo)
-    assert row and row["status"] == "fail" and "STALE" in row["reason"].upper(), row
+    assert row and row["status"] == "pass", row
+
+
+def test_go_live_memory_anchor_replaced_is_fail(tmp_path) -> None:
+    """v3.7.6 intent, v3.8.51 target: an anchor NOTE that exists but whose head is NOT in
+    the current chain (the chain was replaced wholesale or truncated past the anchor —
+    the v3.8.50 self-audit's live scenario) → fail, NOT a false pass."""
+    if not (ROOT / "bootstrap.sh").exists():
+        return
+    repo = _bootstrapped_git_repo(tmp_path)
+    _ml(repo, "append", "--type", "note", "--message", "one")
+    _ml(repo, "anchor")
+    (repo / ".substrate" / "memory" / "events.jsonl").unlink()
+    _ml(repo, "append", "--type", "note", "--message", "other-history")  # a different valid chain
+    row = _memrow(repo)
+    assert row and row["status"] == "fail" and "MISMATCH" in row["reason"].upper(), row
 
 
 def test_go_live_memory_unanchored_is_warn(tmp_path) -> None:
@@ -12105,7 +12122,11 @@ def test_history_sha_correction_cannot_pre_forgive_a_later_entry(tmp_path) -> No
         ],
     )
     assert rc == 1, out
-    assert "does not resolve" in out or "no EARLIER" in out
+    # Both findings are expected: the correction supersedes nothing above it
+    # ("no EARLIER"), AND the later entry it tried to pre-forgive is still
+    # unresolvable. An OR here (v3.8.50) would have let a refactor drop either
+    # finding silently — self-audit test-auditor WARN.
+    assert "does not resolve" in out and "no EARLIER" in out
 
 
 def test_history_sha_correction_does_not_retire_a_reused_later_sha(tmp_path) -> None:
@@ -12122,3 +12143,374 @@ def test_history_sha_correction_does_not_retire_a_reused_later_sha(tmp_path) -> 
     )
     assert rc == 1, out
     assert "does not resolve" in out
+
+
+# --- memory_log anchor: membership semantics + fail-closed absence (v3.8.51) --
+# Self-audit P1. `verify --anchor` used to require the chain head to EQUAL the
+# anchored hash (so ordinary growth was reported as "rewritten") and looked only
+# at the note on HEAD (so the anchor vanished at the next commit). The release
+# gate hedged around both by requiring the anchor only when a note happened to
+# exist — a trust anchor failing open on absence. These pin the corrected
+# semantics: nearest annotated ancestor; anchored hash must be a MEMBER of the
+# (already link-verified) chain.
+
+
+def _anchor_repo(tmp_path):
+    """Throwaway git repo with memory_log staged and the project dir pointed at it."""
+    td = tmp_path / "anchorrepo"
+    (td / "scripts").mkdir(parents=True)
+    for name in ("memory_log.py", "_doc_common.py", "_substrate_root.py"):
+        src = SCRIPTS / name
+        if src.exists():
+            (td / "scripts" / name).write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+    env = {**os.environ, "SUBSTRATE_PROJECT_DIR": str(td)}
+
+    def g(*a):
+        return subprocess.run(["git", *a], cwd=str(td), capture_output=True, text=True, timeout=20)
+
+    def m(*a):
+        return subprocess.run(
+            [sys.executable, "-I", str(td / "scripts" / "memory_log.py"), *a],
+            cwd=str(td), env=env, capture_output=True, text=True, timeout=20,
+        )
+
+    g("init", "-q"); g("config", "user.email", "t@example.invalid"); g("config", "user.name", "t")
+    (td / "f").write_text("x\n", encoding="utf-8"); g("add", "."); g("commit", "-qm", "init")
+    return td, g, m
+
+
+def _events_path(td):
+    return td / ".substrate" / "memory" / "events.jsonl"
+
+
+def test_memory_anchor_growth_after_anchor_passes(tmp_path) -> None:
+    """The former false positive: appending after anchoring is the chain's normal
+    life and must verify."""
+    td, g, m = _anchor_repo(tmp_path)
+    m("append", "--type", "note", "--message", "one")
+    if m("anchor").returncode != 0:
+        pytest.skip("git notes unavailable on this host")
+    m("append", "--type", "note", "--message", "two")
+    r = m("verify", "--anchor")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "anchor verified" in r.stdout
+
+
+def test_memory_anchor_found_on_older_ancestor_commit(tmp_path) -> None:
+    """The anchor must survive ordinary commits: looked up on the nearest annotated
+    ANCESTOR, not only on HEAD."""
+    td, g, m = _anchor_repo(tmp_path)
+    m("append", "--type", "note", "--message", "one")
+    if m("anchor").returncode != 0:
+        pytest.skip("git notes unavailable on this host")
+    (td / "f").write_text("y\n", encoding="utf-8"); g("add", "."); g("commit", "-qm", "later")
+    m("append", "--type", "note", "--message", "two")
+    r = m("verify", "--anchor")
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_memory_anchor_detects_wholesale_replacement(tmp_path) -> None:
+    """The real threat, observed live in the v3.8.50 self-audit: a different valid
+    chain swapped in. Plain `verify` says OK; `--anchor` must not."""
+    td, g, m = _anchor_repo(tmp_path)
+    m("append", "--type", "note", "--message", "one")
+    if m("anchor").returncode != 0:
+        pytest.skip("git notes unavailable on this host")
+    m("append", "--type", "note", "--message", "two")
+    _events_path(td).unlink()
+    m("append", "--type", "note", "--message", "other-history")
+    assert m("verify").returncode == 0, "control: the swapped chain is internally valid"
+    r = m("verify", "--anchor")
+    assert r.returncode == 1
+    assert "not in the current chain" in r.stderr
+
+
+def test_memory_anchor_detects_truncation_past_anchor(tmp_path) -> None:
+    td, g, m = _anchor_repo(tmp_path)
+    m("append", "--type", "note", "--message", "one")
+    m("append", "--type", "note", "--message", "two")
+    if m("anchor").returncode != 0:
+        pytest.skip("git notes unavailable on this host")
+    lines = _events_path(td).read_text(encoding="utf-8").splitlines(keepends=True)
+    _events_path(td).write_text("".join(lines[:1]), encoding="utf-8")
+    r = m("verify", "--anchor")
+    assert r.returncode == 1
+    assert "not in the current chain" in r.stderr
+
+
+def test_memory_anchor_absence_fails_closed(tmp_path) -> None:
+    """No note anywhere in the ancestry is a refusal with the remedy named, never a
+    silent downgrade — the shape INTENT.md forbids and the release gate now relies on."""
+    td, g, m = _anchor_repo(tmp_path)
+    m("append", "--type", "note", "--message", "one")
+    r = m("verify", "--anchor")
+    assert r.returncode == 1
+    assert "NO ANCHOR" in r.stderr and "memory_log.py anchor" in r.stderr
+
+
+def test_memory_anchor_plain_verify_unchanged(tmp_path) -> None:
+    """Discriminating control: without --anchor nothing changed."""
+    td, g, m = _anchor_repo(tmp_path)
+    m("append", "--type", "note", "--message", "one")
+    r = m("verify")
+    assert r.returncode == 0 and "chain OK" in r.stdout
+
+
+def test_release_gate_requires_anchor_in_strict_unconditionally() -> None:
+    """The gate must no longer hedge on note existence: in strict, `verify --anchor`
+    is unconditional, and the gate writes an anchor once it has passed."""
+    src = (SCRIPTS / "release_gate.sh").read_text(encoding="utf-8")
+    assert "git notes --ref=substrate-memory list" not in src, "the fail-open hedge is back"
+    strict_block = src[src.index('"$SUBSTRATE_PROFILE" = "strict"'):]
+    assert "verify --anchor" in strict_block[:200]
+    assert "memory_log.py anchor" in src, "the gate must write an anchor after passing"
+    assert src.index("release-gate: passed") < src.index("memory_log.py anchor")
+
+
+# --- check_history_sha: shallow clones (v3.8.51, self-audit P2) ---------------
+
+
+def _shallow_clone_of(tmp_path):
+    """A full repo with a HISTORY naming its own commits, then a depth-1 clone of it
+    (the GitHub Actions default) in which the older SHAs are absent objects."""
+    import datetime
+    src = tmp_path / "src"
+    src.mkdir()
+    run = lambda *a, cwd=src: subprocess.run(  # noqa: E731
+        ["git", "-C", str(cwd), *a], check=True, capture_output=True, text=True
+    ).stdout.strip()
+    subprocess.run(["git", "init", "-q", str(src)], check=True, capture_output=True)
+    run("config", "user.email", "t@example.invalid"); run("config", "user.name", "t")
+    (src / "docs").mkdir(); (src / "scripts").mkdir()
+    for name in ("check_history_sha.py", "_doc_common.py"):
+        (src / "scripts" / name).write_text((SCRIPTS / name).read_text(encoding="utf-8"), encoding="utf-8")
+    shas = []
+    for i in range(3):
+        (src / f"f{i}").write_text(f"{i}\n", encoding="utf-8")
+        run("add", "-A"); run("commit", "-qm", f"c{i}")
+        shas.append(run("rev-parse", "--short", "HEAD"))
+    now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    (src / "docs" / "HISTORY.md").write_text(
+        _HIST_HEADER + "".join(_hist_entry(now, s) for s in shas), encoding="utf-8"
+    )
+    run("add", "-A"); run("commit", "-qm", "history")
+    shallow = tmp_path / "shallow"
+    subprocess.run(["git", "clone", "-q", "--depth", "1", f"file://{src}", str(shallow)],
+                   check=True, capture_output=True)
+    return src, shallow
+
+
+def _run_gate_in(repo):
+    return subprocess.run(
+        [sys.executable, "-I", str(repo / "scripts" / "check_history_sha.py")],
+        capture_output=True, text=True, cwd=str(repo),
+    )
+
+
+def test_history_sha_shallow_clone_refuses_and_names_unshallow(tmp_path) -> None:
+    """In a shallow clone the older SHAs are absent objects, not drift. The gate used
+    to report each one unresolvable and print the append-a-Correction remedy —
+    which, followed, corrupts HISTORY permanently (in a full clone those corrections
+    name RESOLVING SHAs). It must refuse to judge, name `git fetch --unshallow`, and
+    never print the Correction advice in this state."""
+    src, shallow = _shallow_clone_of(tmp_path)
+    p = _run_gate_in(shallow)
+    assert p.returncode == 2, p.stdout + p.stderr
+    assert "SHALLOW CLONE" in p.stderr and "unshallow" in p.stderr
+    assert "Correction-of" not in p.stderr, "must not prescribe the corrupting remedy"
+    assert "does not resolve" not in p.stderr
+
+
+def test_history_sha_full_clone_is_not_flagged_as_shallow(tmp_path) -> None:
+    """Discriminating control: the same HISTORY in the full repo verifies normally."""
+    src, shallow = _shallow_clone_of(tmp_path)
+    p = _run_gate_in(src)
+    assert p.returncode == 0, p.stdout + p.stderr
+    assert "verified" in p.stdout and "SHALLOW" not in p.stderr
+
+
+# --- _doc_common fallbacks must be STUBS, never reimplementations (v3.8.51) ----
+
+
+def test_doc_common_fallbacks_are_fail_closed_stubs() -> None:
+    """Self-audit architecture P3. Every `except: def _safe_*` fallback behind a
+    `from _doc_common import ...` must be a fail-closed stub — return None / a
+    constant, or raise — never a reimplementation. Two "same algorithm" mirrors
+    (memory_log._safe_read_text, session_handoff._safe_atomic_write) were found
+    two fixes behind the canonical primitive: still opening the parent by
+    multi-component path (the v3.8.44 window) with no liveness check (v3.8.45).
+    _doc_common is never stripped (only tests are), so the fallbacks are dead code
+    in every profile — dead code that would silently reintroduce a fixed class if
+    it ever ran. Discovery-based, so a new reimplementation cannot appear
+    unclassified; the inventory-fallback lock-down of v3.8.48 in the same shape."""
+    import ast
+
+    offenders = []
+    seen = 0
+    for path in sorted(SCRIPTS.glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Try):
+                continue
+            if not any(isinstance(s, ast.ImportFrom) and s.module == "_doc_common" for s in node.body):
+                continue
+            for handler in node.handlers:
+                for stmt in handler.body:
+                    if not isinstance(stmt, ast.FunctionDef):
+                        continue
+                    seen += 1
+                    body = [
+                        b for b in stmt.body
+                        if not (isinstance(b, ast.Expr) and isinstance(getattr(b, "value", None), ast.Constant))
+                    ]
+                    calls_fs = any(
+                        isinstance(n, ast.Call) and getattr(getattr(n, "func", None), "attr", "") in ("open", "fdopen", "replace", "unlink")
+                        for b in body for n in ast.walk(b)
+                    )
+                    is_stub = (
+                        len(body) <= 2
+                        and all(isinstance(b, (ast.Return, ast.Raise)) for b in body)
+                        and not calls_fs
+                    )
+                    if not is_stub:
+                        offenders.append(f"{path.name}:{stmt.lineno} {stmt.name} ({len(body)} stmts)")
+    assert seen >= 30, f"discovery found only {seen} fallbacks — the scan is broken, not the tree"
+    assert not offenders, "reimplemented _doc_common fallbacks (must be stubs):\n  " + "\n  ".join(offenders)
+
+
+# --- check_raw_file_io: async with binds like with (v3.8.51) --------------------
+
+
+def _gate_on_probe(tmp_path, name: str, src: str):
+    """Run check_raw_file_io against a one-file scripts/ tree. Returns (rc, out)."""
+    root = tmp_path / name
+    (root / "scripts").mkdir(parents=True)
+    (root / "scripts" / "probe.py").write_text(src, encoding="utf-8")
+    p = subprocess.run(
+        [sys.executable, "-I", str(SCRIPTS / "check_raw_file_io.py"), "--root", str(root), "--list-unresolved"],
+        capture_output=True, text=True, timeout=60, cwd=str(root),
+    )
+    return p.returncode, p.stdout + p.stderr
+
+
+def test_raw_io_gate_binds_async_with_targets(tmp_path) -> None:
+    """`async with governed() as p` must bind `p` exactly as `with` does, so a
+    governed write through it is a FINDING — not merely unresolved, and never
+    silent."""
+    rc, out = _gate_on_probe(tmp_path, "aw", (
+        "async def f():\n"
+        "    async with (ROOT / 'docs' / 'd') as p:\n"
+        "        p.write_text('y')\n"
+    ))
+    assert rc == 1, "governed async-with write must be a finding: " + out
+    assert "probe.py" in out
+
+
+def test_raw_io_gate_opaque_bindings_are_never_silent(tmp_path) -> None:
+    """Self-audit test-auditor WARN: the invariant 'a construct the analyzer cannot
+    resolve is printed as UNRESOLVED, never dropped' was pinned for kwargs-unpack,
+    mixed-origin loops and match/case only. Every binding form the gate claims to
+    track gets the same check here, with an OPAQUE value (an unknown call) bound
+    and then written through. The forbidden outcome is NEITHER a finding NOR an
+    unresolved line — the property v3.8.46/47 shipped with for loop targets."""
+    cases = {
+        "default": ("def f(p=get_path()):\n"
+                    "    p.write_text('x')\n"),
+        "class_body": ("class C:\n"
+                       "    p = get_path()\n"
+                       "    p.write_text('x')\n"),
+        "plain_assign": ("def f():\n"
+                         "    p = get_path()\n"
+                         "    p.write_text('x')\n"),
+        "walrus": ("def f():\n"
+                   "    (p := get_path()).write_text('x')\n"),
+        "destructure": ("def f():\n"
+                        "    a, p = get_path()\n"
+                        "    p.write_text('x')\n"),
+        "loop_target": ("def f():\n"
+                        "    for p in get_paths():\n"
+                        "        p.write_text('x')\n"),
+        "match_capture": ("def f(v):\n"
+                          "    match v:\n"
+                          "        case [p]:\n"
+                          "            p.write_text('x')\n"),
+        "with_target": ("def f():\n"
+                        "    with get_path() as p:\n"
+                        "        p.write_text('x')\n"),
+    }
+    silent = []
+    for name, src in cases.items():
+        rc, out = _gate_on_probe(tmp_path, name, src)
+        surfaced = rc != 0 or "unresolved" in out.lower()
+        if not (surfaced and "probe.py" in out):
+            silent.append(f"{name}: rc={rc} out={out.strip()[:120]!r}")
+    assert not silent, "opaque binding vanished (neither finding nor unresolved):\n  " + "\n  ".join(silent)
+
+
+# --- substrate_profile: symlink behaviors with no regression (v3.8.51) ---------
+
+
+def test_profile_precommit_drift_treats_symlinked_config_as_drift(tmp_path) -> None:
+    """substrate_profile.py:141-176: a .pre-commit-config.yaml that is a SYMLINK
+    hashes to None through the guarded reader and must count as drift, even when
+    the bytes behind the link equal the baseline — the link, not the content, is
+    the tamper."""
+    import importlib
+    sp = importlib.import_module("substrate_profile")
+    root = tmp_path / "repo"
+    root.mkdir()
+    cfg = root / ".pre-commit-config.yaml"
+    cfg.write_text("repos: []\n", encoding="utf-8")
+    baseline = {"owned_file_sha256": {".pre-commit-config.yaml": sp._sha256(cfg, root)}}
+    assert sp._precommit_drifted(root, baseline) is False, "control: identical regular file is not drift"
+    outside = tmp_path / "outside.yaml"
+    outside.write_text("repos: []\n", encoding="utf-8")   # same bytes
+    cfg.unlink()
+    cfg.symlink_to(outside)
+    assert sp._precommit_drifted(root, baseline) is True, "a symlinked config must be drift"
+
+
+def test_profile_strict_extras_write_refuses_broken_symlink_dest(tmp_path) -> None:
+    """substrate_profile.py:275-282: `dest.exists()` is False for a BROKEN symlink, so
+    the exists-skip did not protect the strict-extras copy and a raw write would
+    follow the link outside the tree. The site now uses the anchored writer; pin
+    the primitive's behavior at exactly that shape: a broken-symlink destination is
+    refused, and nothing is created at the link's target."""
+    import importlib
+    dc = importlib.import_module("_doc_common")
+    root = tmp_path / "repo"
+    (root / "scripts").mkdir(parents=True)
+    target = tmp_path / "outside" / "planted.py"
+    dest = root / "scripts" / "extra.py"
+    dest.symlink_to(target)          # broken: target's parent does not exist
+    assert not dest.exists() and dest.is_symlink()
+    dc.safe_atomic_write(dest, "print('x')\n", root=root)
+    # The anchored writer renames its temp file OVER the link entry (dir_fd +
+    # basename), so the link is replaced by a regular file and its target is
+    # never resolved — the raw write followed the link and created the outside
+    # file. That replacement, not an exception, is the protective property.
+    assert dest.is_file() and not dest.is_symlink(), "dest must become a regular file in-tree"
+    assert not target.exists() and not target.parent.exists(), "the write followed the broken link outside the tree"
+
+
+# --- manage.sh check: honest precheck when setup was skipped (v3.8.51) ---------
+
+
+def test_manage_check_refuses_with_one_line_when_venv_missing(tmp_path) -> None:
+    """Self-audit P3: on a fresh clone without `setup`, run_py fell back to uv/python3
+    so the validator chain passed, then fourteen pre-commit hooks failed with the one
+    real cause buried per hook. `check` must now stop with a single line naming
+    `./manage.sh setup` before any gate runs."""
+    import shutil
+    root = tmp_path / "repo"
+    root.mkdir()
+    shutil.copy(ROOT / "manage.sh", root / "manage.sh")
+    shutil.copytree(SCRIPTS, root / "scripts")   # manage.sh sources scripts/_substrate_config.sh
+    (root / ".substrate").mkdir()
+    (root / ".substrate" / "config").write_text('SUBSTRATE_PROFILE="standard"\n', encoding="utf-8")
+    assert not (root / ".substrate" / "venv").exists()
+    p = subprocess.run(["bash", "manage.sh", "check"], cwd=str(root),
+                       capture_output=True, text=True, timeout=60)
+    assert p.returncode == 1
+    assert "substrate venv missing" in p.stderr and "./manage.sh setup" in p.stderr
+    assert "check-import-shadowing" not in p.stdout, "a gate ran before the precheck"

@@ -625,9 +625,16 @@ def t_memory_chain_rewrite_detected():
 
 
 def t_memory_anchor_mismatch_detected():
-    """After anchoring, extending history moves the head past the anchor; `verify
-    --anchor` must DETECT the mismatch (rc!=0). Anchor = git note, so this needs git;
-    a host where the anchor can't be written returns a skip (honest, never a false block)."""
+    """After anchoring, the chain is REPLACED wholesale by a different valid chain
+    (the v3.8.50 self-audit's live scenario: a workspace restore swapped in an older
+    memory directory and plain `verify` said OK). `verify --anchor` must DETECT that
+    the anchored head is no longer in the chain (rc!=0).
+
+    v3.8.51: this task previously asserted that ordinary GROWTH past the anchor was
+    detected as a mismatch — i.e. it pinned the false positive that made the anchor
+    unusable one append after it was written, and never exercised the real threat.
+    Anchor = git note, so this needs git; a host where the anchor can't be written
+    returns a skip (honest, never a false block)."""
     ml = str(SCRIPTS / "memory_log.py")
     with tempfile.TemporaryDirectory() as td:
         td = Path(td); env = _ml_env(td)
@@ -643,9 +650,36 @@ def t_memory_anchor_mismatch_detected():
         m("append", "--type", "note", "--message", "one")
         if m("anchor").returncode != 0:
             return True, "skipped: anchor unavailable on this host"
-        m("append", "--type", "note", "--message", "two")   # head now past the anchor
+        m("append", "--type", "note", "--message", "two")   # legitimate growth
+        # The swap: a different, internally valid chain replaces the anchored one.
+        (td / ".substrate" / "memory" / "events.jsonl").unlink()
+        m("append", "--type", "note", "--message", "other-history")
         r = m("verify", "--anchor")
         return r.returncode != 0, f"rc={r.returncode}"
+
+
+def t_memory_anchor_growth_allowed():
+    """BENIGN twin of anchor-mismatch: anchoring then APPENDING is the normal life of
+    the chain and must pass `verify --anchor` (rc==0). Without this positive path a
+    verifier that refused unconditionally would score as a perfect detector."""
+    ml = str(SCRIPTS / "memory_log.py")
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td); env = _ml_env(td)
+
+        def g(*a):
+            return subprocess.run(["git", *a], cwd=str(td), capture_output=True, text=True, timeout=20)
+
+        def m(*a):
+            return subprocess.run([PY, "-I", ml, *a], env=env, cwd=str(td),
+                                  capture_output=True, text=True, timeout=20)
+        g("init", "-q"); g("config", "user.email", "x@x"); g("config", "user.name", "x")
+        (td / "f").write_text("x"); g("add", "."); g("commit", "-qm", "init")
+        m("append", "--type", "note", "--message", "one")
+        if m("anchor").returncode != 0:
+            return True, "skipped: anchor unavailable on this host"
+        m("append", "--type", "note", "--message", "two")
+        r = m("verify", "--anchor")
+        return r.returncode == 0, f"rc={r.returncode}"
 
 
 def t_memory_restore_from_structured():
@@ -1180,6 +1214,7 @@ TASKS = [
     ("benign_curl_download",    "benign", "allow", lambda: (not bool(_cp and _cp.looks_dangerous_command(_d(_CURL_DL), "strict")), ""), False),
     ("benign_grep",             "benign", "allow", lambda: (not bool(_cp and _cp.looks_dangerous_command(_d(_GREP), "strict")), ""), False),
     ("benign_agents_md",        "benign", "allow", t_benign_agents_harness, True),
+    ("benign_memory_anchor_growth", "benign", "allow", t_memory_anchor_growth_allowed, True),
     ("benign_node_lint",        "benign", "allow", lambda: t_config_benign("bnBtIHJ1biBsaW50"), True),
     ("benign_go_test",          "benign", "allow", lambda: t_config_benign("Z28gdGVzdCAuLy4uLg=="), True),
     ("benign_ruff",             "benign", "allow", lambda: t_config_benign("cnVmZiBjaGVjayBzcmMv"), True),

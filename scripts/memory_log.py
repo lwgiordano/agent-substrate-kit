@@ -9,8 +9,13 @@ rewritten: anyone with write access can edit an old event AND recompute
 every subsequent hash. For that guarantee you need an anchor OUTSIDE
 the agent's write scope — `memory_log.py anchor` writes the current head
 hash to a git note (refs/notes/substrate-memory), outside events.jsonl;
-`verify --anchor` checks the head against it. For strong assurance push
-that note to a protected remote or anchor in CI.
+`verify --anchor` finds the nearest annotated ancestor of HEAD and requires
+that anchored hash to be PRESENT in the current chain. Growth after the
+anchor passes; a chain replaced wholesale or truncated past the anchor
+fails; no anchor anywhere in the ancestry fails closed. A rewrite of the
+suffix after the anchor point is undetectable by any unkeyed hash chain —
+anchor at every release and push that note to a protected remote or anchor
+in CI; that is the documented limit, not a gap.
 
 CURRENT_SESSION.md is a derived, disposable VIEW — never authoritative.
 
@@ -96,45 +101,21 @@ except Exception:  # pragma: no cover - stripped install
 
 try:
     from _doc_common import safe_read_text as _safe_read_text
-except Exception:  # pragma: no cover - inline mirror for a stripped install
+except Exception:  # pragma: no cover - stripped install
+    # v3.8.51 (self-audit, architecture P3): this used to be a ~40-line
+    # "same algorithm" mirror of _doc_common.safe_read_text — the v3.8.42
+    # algorithm. The canonical primitive then gained component-walk descent
+    # (v3.8.44) and post-op liveness (v3.8.45) and the mirror did not: a copy
+    # of a security primitive that silently stayed two fixes behind, in a
+    # fallback path that _doc_common is never actually stripped from. A
+    # fallback that runs an OLDER guard is the same fail-open shape as one
+    # that drops the guard, only slower to notice. Refuse instead — and refuse
+    # LOUDLY: _read_events turns a None read into "no events", so a None stub
+    # here would let a stripped install verify an unreadable chain as empty and
+    # OK. A raise propagates to a nonzero exit; a stripped install cannot
+    # claim the chain verified.
     def _safe_read_text(path, root=None, max_bytes=None, tail_bytes=None):
-        """Fail-closed mirror of _doc_common.safe_read_text (v3.8.42): STRICT
-        ancestor containment, then refuse a symlinked/hard-linked/non-regular
-        leaf, and never block on a FIFO. Containment is mirrored here rather
-        than skipped — a fallback that drops the check is exactly the fail-open
-        shape the round-23 audit caught in this file."""
-        if root is not None:
-            try:
-                _p = Path(path).parent
-                _rel = os.path.relpath(str(_p), str(root))
-                if (_rel == os.pardir or _rel.startswith(os.pardir + os.sep)
-                        or os.path.isabs(_rel)):
-                    return None
-                _expected = os.path.normpath(os.path.join(os.path.realpath(str(root)), _rel))
-                if os.path.realpath(str(_p)) != _expected:
-                    return None
-            except (OSError, ValueError):
-                return None
-        try:
-            fd = os.open(str(path), os.O_RDONLY
-                         | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
-        except (OSError, ValueError):
-            return None
-        try:
-            st = os.fstat(fd)
-            if not stat.S_ISREG(st.st_mode) or st.st_nlink > 1:
-                return None
-            chunks = []
-            while True:
-                b = os.read(fd, 65536)
-                if not b:
-                    break
-                chunks.append(b)
-        except (OSError, ValueError):
-            return None
-        finally:
-            os.close(fd)
-        return b"".join(chunks).decode("utf-8", errors="replace")
+        raise OSError("safe_read_text unavailable — refusing an unguarded read of the memory chain")
 
 _SECRET_PATTERNS = [
     re.compile(r"\bsk-[A-Za-z0-9][A-Za-z0-9_-]{20,}\b"),
@@ -679,19 +660,43 @@ def anchor() -> int:
     return 0
 
 
-def _anchored_head() -> str | None:
+def _nearest_anchor() -> tuple[str, str] | None:
+    """(commit, anchored_chain_head) for the nearest ancestor of HEAD that
+    carries a substrate-memory note, HEAD itself included; None if no ancestor
+    does.
+
+    v3.8.51 (self-audit P1): the previous lookup consulted ONLY the note on
+    HEAD, so an anchor was invisible from the very next commit and "no anchor"
+    became the normal state everywhere except the instant of anchoring. The
+    release gate hedged around that by requiring the anchor only when a note
+    happened to exist — a trust anchor that fails open on absence, which
+    INTENT.md forbids. Walking to the nearest annotated ancestor makes the
+    anchor durable across ordinary commits, so absence can mean what it should:
+    nobody ever anchored, refuse.
+    """
     try:
-        sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT,
-                             capture_output=True, text=True, timeout=10)
-        if sha.returncode != 0:
+        listed = subprocess.run(["git", "notes", "--ref", "substrate-memory", "list"],
+                                cwd=ROOT, capture_output=True, text=True, timeout=10)
+        if listed.returncode != 0 or not listed.stdout.strip():
             return None
-        r = subprocess.run(["git", "notes", "--ref", "substrate-memory", "show", sha.stdout.strip()],
-                          cwd=ROOT, capture_output=True, text=True, timeout=10)
-        if r.returncode != 0:
+        annotated = {ln.split()[1] for ln in listed.stdout.splitlines() if len(ln.split()) == 2}
+        # Bounded walk: a repo with thousands of commits since its last anchor
+        # is not a repo whose anchor we should quietly accept anyway.
+        walk = subprocess.run(["git", "rev-list", "--max-count=5000", "HEAD"],
+                              cwd=ROOT, capture_output=True, text=True, timeout=20)
+        if walk.returncode != 0:
             return None
-        for line in r.stdout.splitlines():
-            if line.startswith("substrate-memory-head:"):
-                return line.split(":", 1)[1].strip()
+        for commit in walk.stdout.split():
+            if commit not in annotated:
+                continue
+            r = subprocess.run(["git", "notes", "--ref", "substrate-memory", "show", commit],
+                               cwd=ROOT, capture_output=True, text=True, timeout=10)
+            if r.returncode != 0:
+                return None
+            for line in r.stdout.splitlines():
+                if line.startswith("substrate-memory-head:"):
+                    return commit, line.split(":", 1)[1].strip()
+            return None
     except Exception:
         return None
     return None
@@ -716,15 +721,36 @@ def verify(check_anchor: bool = False) -> int:
             return 1
         prev = ev["hash"]
     if check_anchor:
-        anchored = _anchored_head()
-        if anchored is None:
-            print("memory-log: no anchor note for HEAD (run `memory_log.py anchor`)", file=sys.stderr)
+        # MEMBERSHIP, not equality (v3.8.51). The old check required the
+        # current head to EQUAL the anchored hash, so every legitimate append
+        # after anchoring reported "history was rewritten" — a false positive
+        # that made the anchor unusable past the instant it was written and
+        # never tested the real threat. The threat is a chain that was
+        # REPLACED wholesale (a different valid chain swapped in — observed
+        # live during the v3.8.50 self-audit) or TRUNCATED past the anchor.
+        # Both leave the anchored hash absent from the chain; growth keeps it
+        # present. The chain walk above already proved every link from the
+        # genesis, so "present" means "this chain descends from the anchored
+        # state". What no unkeyed hash chain can detect is a rewrite of the
+        # suffix AFTER the anchor point — anchor often (every release) and
+        # push the note to a protected remote; that is the documented limit.
+        found = _nearest_anchor()
+        if found is None:
+            print("memory-log: NO ANCHOR in the ancestry of HEAD — the chain cannot be "
+                  "tied to any known-good state. Establish one with "
+                  "`memory_log.py anchor` (a release does this after its gate passes).",
+                  file=sys.stderr)
             return 1
-        if anchored != prev:
-            print("memory-log: ANCHOR MISMATCH — head hash differs from the git-note "
-                  "anchor; history was rewritten since the last anchor", file=sys.stderr)
+        commit, anchored = found
+        seen = {ZERO} | {ev.get("hash") for ev in events}
+        if anchored not in seen:
+            print(f"memory-log: ANCHOR MISMATCH — the head anchored at commit {commit[:12]} "
+                  f"({anchored[:12]}) is not in the current chain: history was replaced "
+                  "or truncated past the anchor", file=sys.stderr)
             return 1
-        print(f"memory-log: chain OK + anchor verified ({len(events)} events)")
+        at = next((ev.get("seq") for ev in events if ev.get("hash") == anchored), "genesis")
+        print(f"memory-log: chain OK + anchor verified ({len(events)} events; anchored "
+              f"at commit {commit[:12]}, chain seq {at})")
         return 0
     print(f"memory-log: chain OK ({len(events)} events)")
     return 0

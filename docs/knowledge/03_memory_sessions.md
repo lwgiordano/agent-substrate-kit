@@ -6,7 +6,7 @@ asserts:
   - scripts/_doc_common.py::locked_atomic_append
   - scripts/session_handoff.py::_safe_history_line
   - scripts/session_handoff.py::_rejected_block
-last_human_reviewed: 2026-08-27
+last_human_reviewed: 2026-09-02
 covers:
   - manage.sh
   - scripts/_doc_common.py
@@ -25,7 +25,28 @@ covers:
 
 The durable event log is hash-chained. Verification checks sequence, previous
 hash, event hash, and any optional Git-note anchor. An absent anchor is distinct
-from a broken or stale anchor; go-live reports those states separately.
+from a broken or mismatched anchor; go-live reports those states separately.
+
+The anchor is a git note on a commit recording the chain head at that moment.
+`verify --anchor` finds the nearest annotated ancestor of HEAD and requires that
+recorded hash to be a MEMBER of the current, link-verified chain. Ordinary growth
+after anchoring therefore passes; a chain replaced wholesale by a different valid
+chain, or truncated past the anchor, fails; no anchor anywhere in the ancestry
+fails closed with the remedy named. Until v3.8.51 the check required the head to
+EQUAL the anchored hash — so one append after anchoring read as "rewritten" — and
+consulted only HEAD's own note, so the anchor vanished at the next commit. The
+release gate had hedged around both by requiring the anchor only when a note
+happened to exist, and nothing ever wrote one: a trust anchor failing open on
+absence. It was found by being hit — a workspace restore swapped the memory
+directory for an older valid chain and plain `verify` reported OK. In strict the
+release gate now requires the anchor unconditionally, and every profile's release
+writes one once the gate has passed. The first strict release in a repo needs a
+one-time `./manage.sh memory anchor`; that is the human-established trust root,
+by design. What no unkeyed hash chain can detect is a rewrite of the suffix after
+the anchor point — anchor at every release and push `refs/notes/substrate-memory`
+to a protected remote; that is the documented limit. `substrate_doctor` delegates
+to the same verifier rather than restating the rule, so there is one definition
+of "anchor valid".
 
 ## Verified skill evidence
 

@@ -1010,6 +1010,87 @@ reverting either alone leaves the test green, which reads identically to a test
 that never discriminated. Revert the whole mechanism to prove the test catches the
 regression, and say which specific line each remaining test actually pins.
 
+## Round 16 — v3.8.54 (round-36): the check and the thing it authorized were not the same
+
+Three findings, all in the layer v3.8.53 had just hardened, and all three the
+same shape: **the thing that was checked and the thing that was used were not
+the same object.** Different environment input, different moment, different read
+of the same file.
+
+**P1a — a config file outside the repo chose which server answered.** `_clean_env`
+strips the variables that redirect which *repository* git reads. It was written
+in v3.8.10, when every git call in the module was local. v3.8.52 added calls
+whose verdict comes from a *server*, and the denylist was never re-derived for
+them: `XDG_CONFIG_HOME` still selected the user config file, so a
+`url.<attacker>.insteadOf` entry rewrote the origin URL and a genuine
+`ANCHOR CONFLICT` printed as `anchor verified against origin`. I reproduced the
+reported vector and then the one that was not reported — the same config as
+`~/.gitconfig`, reached through `HOME` — because fixing only the named variable
+would have left the attack one variable away. Config files are now taken out of
+the loop for the evidence calls (`GIT_CONFIG_GLOBAL`/`SYSTEM` at `/dev/null`,
+system config refused, `XDG_CONFIG_HOME` dropped, no credential prompt), and
+where that is impossible — git older than 2.32 — the anchor is reported
+unconfirmed rather than confirmed on weaker evidence.
+
+Isolation has a real cost: a globally configured credential helper, proxy, or
+`safe.directory` goes with it. The trade is right — a remote reachable only
+through a file outside the repository is not evidence about that repository —
+but a cost that presents as an unexplained "local-only" is a gate people switch
+off, so the fetch is retried once, purely to classify the failure, and the
+message says user config is why. That retry never contributes to a verdict.
+
+**P1b — the gate certified the state it started in.** The memory check runs
+before the block that writes and pushes the fresh note, and `release-gate:
+passed` printed before that block too. So an origin refusing `refs/notes/*` left
+a strict release green over a repo whose very next `verify --anchor` failed.
+Reproduced by executing the real gate tail verbatim against an origin with a
+rejecting `pre-receive` — and the end state was worse than the report said: not
+merely unpublished but `ANCHOR CONFLICT`, the tier that accuses the operator of
+rewriting the note. **This one had already happened to me.** The v3.8.53 release
+printed "passed" with its own note push refused, and I reported it as green.
+The anchor is now written, published, and re-verified with the profile's own
+check before the success line prints.
+
+**P2 — the precondition held; what it authorized was bound to a different read.**
+v3.8.53 made `--force` require its `anchor-forced` evidence append to succeed.
+It then re-read `events.jsonl` to choose the note payload. `append` releases its
+lock when it returns, so a writer in that gap produced rc 0, a note over a chain
+containing no `anchor-forced` event, and `verify --anchor` green. `anchor` now
+reads the chain once and certifies the hash the successful append returned.
+
+**A fourth item, mine, found by my own P1b repro rather than reported.**
+`ANCHOR CONFLICT` fired whenever the local note differed from the published one
+— including when the local note is a legitimate *advance* whose push was
+refused, with the published hash still in the chain. That called a failure the
+tooling had just reported "the local note was rewritten". CONFLICT now means the
+published hash is **not** in the chain; the benign case is reported as
+not-yet-published, which still fails strict.
+
+### The reverts that proved nothing, again
+
+Seven revert cases, one per guard. Two came back green — reverting the
+`ls-remote` call alone (the fetch that follows still reached the real remote)
+and removing the anchor post-condition alone (the head binding already blocked
+it). Both were fixed rather than recorded: an AST test now pins the env of every
+evidence call site by shape, and the race regression asserts the note is
+*untouched* and the return code is 1, which the binding alone does not produce.
+After that, all seven reverts fail a test.
+
+**Carry-forward rule, part 23 — a control's coverage must be re-derived when the
+surface it protects changes.** `_clean_env` was correct for the calls that
+existed when it was written. Adding calls of a different KIND — local reads
+became remote evidence — silently changed what "sanitized" had to mean, and
+nothing re-asked the question. When a helper's callers gain a new capability,
+re-derive the helper's set from scratch rather than assuming the old list still
+spans it.
+
+**Carry-forward rule, part 24 — a skipped eval has left the denominator.**
+Narrowing the conflict semantics turned one existing task's setup into a
+non-conflict, and it reported `skipped` — indistinguishable from an absent
+sandbox backend, excluded from the rate, and measuring nothing. A task that can
+no longer build its own baseline must fail, not skip; failing that, read the
+skip lines on any release that changes a semantic the corpus depends on.
+
 ## (Optional) Reproduction
 
 In a disposable repo: `ln victim.txt AGENT_BUS.md` then

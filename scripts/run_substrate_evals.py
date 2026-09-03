@@ -753,8 +753,15 @@ def t_memory_anchor_hostile_git_routing_blocked():
         g("push", "-q", "origin", "HEAD:refs/heads/main")
         if g("push", "-q", "origin", "refs/notes/substrate-memory").returncode != 0:
             return True, "skipped: cannot push notes on this host"
-        m("append", "--type", "note", "--message", "two")
-        m("anchor")  # local note now ahead of origin => genuine conflict
+        # v3.8.54: the baseline used to be "local note ahead of origin", which is a
+        # refused push, not tampering, and CONFLICT no longer fires on it. Left as
+        # it was, this task SKIPPED — quietly leaving the denominator instead of
+        # failing, which is how coverage disappears without anyone noticing. The
+        # genuine conflict is an origin publishing a hash this chain lacks.
+        commit = g("rev-parse", "HEAD").stdout.strip()
+        subprocess.run(["git", "-C", str(bare), "notes", "--ref=substrate-memory", "add",
+                        "-f", "-m", "substrate-memory-head:" + "a" * 64, commit],
+                       capture_output=True, timeout=20)
         if m("verify", "--anchor").returncode == 0:
             return True, "skipped: baseline conflict not reproducible here"
         fake.mkdir(exist_ok=True)
@@ -813,6 +820,173 @@ def t_memory_anchor_force_without_evidence_blocked():
         after = g("notes", "--ref=substrate-memory", "show", "HEAD").stdout.splitlines()
         if r.returncode == 0:
             return False, "force succeeded without recording the discontinuity"
+        if after and after[0] != before:
+            return False, "force aborted but rewrote the note anyway"
+        return True, f"rc={r.returncode}, note untouched"
+
+
+def _anchored_with_origin(td, g, m):
+    """(bare, commit) for a repo whose anchor is genuinely published to origin,
+    or (None, reason) when this host cannot do notes/pushes."""
+    bare = td / "origin.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(bare)], capture_output=True, timeout=20)
+    g("remote", "add", "origin", str(bare))
+    m("append", "--type", "note", "--message", "one")
+    if m("anchor").returncode != 0:
+        return None, "skipped: anchor unavailable on this host"
+    g("push", "-q", "origin", "HEAD:refs/heads/main")
+    if g("push", "-q", "origin", "refs/notes/substrate-memory").returncode != 0:
+        return None, "skipped: cannot push notes on this host"
+    return bare, g("rev-parse", "HEAD").stdout.strip()
+
+
+def t_memory_anchor_hostile_user_config_blocked():
+    """round-36 P1a: user git config selected by XDG_CONFIG_HOME (or HOME) rewrote
+    the origin URL, so a genuine ANCHOR CONFLICT printed as `verified against
+    origin`. Confirmation must not be routable by a file outside the repo."""
+    ml = str(SCRIPTS / "memory_log.py")
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td); env = _ml_env(td)
+        repo = td / "repo"; repo.mkdir()
+
+        def g(*a):
+            return subprocess.run(["git", *a], cwd=str(repo), capture_output=True, text=True, timeout=20)
+
+        def m(*a, extra=None):
+            return subprocess.run([PY, "-I", ml, *a], env={**env, **(extra or {})},
+                                  cwd=str(repo), capture_output=True, text=True, timeout=60)
+        env["SUBSTRATE_PROJECT_DIR"] = str(repo)
+        g("init", "-q"); g("config", "user.email", "x@x"); g("config", "user.name", "x")
+        (repo / "f").write_text("x"); g("add", "."); g("commit", "-qm", "init")
+        bare, commit = _anchored_with_origin(td, g, m)
+        if bare is None:
+            return True, commit
+        fake = td / "fake.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(fake)], capture_output=True, timeout=20)
+        subprocess.run(["git", "-C", str(fake), "fetch", "-q", str(bare),
+                        "refs/heads/main:refs/heads/main"], capture_output=True, timeout=20)
+        payload = g("notes", "--ref=substrate-memory", "show", "HEAD").stdout.splitlines()
+        if not payload:
+            return True, "skipped: note unreadable on this host"
+        subprocess.run(["git", "-C", str(fake), "notes", "--ref=substrate-memory", "add", "-f",
+                        "-m", payload[0], commit], capture_output=True, timeout=20)
+        subprocess.run(["git", "-C", str(bare), "notes", "--ref=substrate-memory", "add", "-f",
+                        "-m", "substrate-memory-head:" + "a" * 64, commit],
+                       capture_output=True, timeout=20)
+        if m("verify", "--anchor").returncode != 1:
+            return True, "skipped: baseline conflict not reproducible on this host"
+        results = []
+        for var in ("XDG_CONFIG_HOME", "HOME"):
+            cfgdir = td / ("cfg-" + var)
+            if var == "XDG_CONFIG_HOME":
+                (cfgdir / "git").mkdir(parents=True); cfg = cfgdir / "git" / "config"
+            else:
+                cfgdir.mkdir(); cfg = cfgdir / ".gitconfig"
+            cfg.write_text('[url "%s"]\n\tinsteadOf = %s\n' % (fake, bare))
+            r = m("verify", "--anchor", extra={var: str(cfgdir)})
+            if r.returncode == 0 or "verified against origin" in r.stdout:
+                return False, f"{var} chose which remote answers"
+            results.append(f"{var} rc={r.returncode}")
+        return True, ", ".join(results)
+
+
+def t_release_gate_unpublished_anchor_blocked():
+    """round-36 P1b: the gate printed its success line BEFORE writing and pushing
+    the fresh anchor, so a refused refs/notes push left a strict release green over
+    a repo that immediately failed `verify --anchor`."""
+    ml = str(SCRIPTS / "memory_log.py")
+    gate = (SCRIPTS / "release_gate.sh").read_text(encoding="utf-8")
+    marker = "# Re-tie the memory chain"
+    if marker not in gate:
+        return False, "release_gate.sh lost the memory-anchor block"
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td); env = _ml_env(td)
+        repo = td / "repo"; repo.mkdir()
+
+        def g(*a):
+            return subprocess.run(["git", *a], cwd=str(repo), capture_output=True, text=True, timeout=20)
+
+        def m(*a):
+            return subprocess.run([PY, "-I", ml, *a], env=env, cwd=str(repo),
+                                  capture_output=True, text=True, timeout=60)
+        env["SUBSTRATE_PROJECT_DIR"] = str(repo)
+        g("init", "-q"); g("config", "user.email", "x@x"); g("config", "user.name", "x")
+        (repo / "f").write_text("x"); g("add", "."); g("commit", "-qm", "init")
+        bare, commit = _anchored_with_origin(td, g, m)
+        if bare is None:
+            return True, commit
+        (repo / ".substrate" / "config").write_text('SUBSTRATE_PROFILE="strict"\n')
+        hook = bare / "hooks" / "pre-receive"
+        hook.write_text('#!/bin/sh\nwhile read _o _n ref; do\n'
+                        '  case "$ref" in refs/notes/*) exit 1;; esac\ndone\nexit 0\n')
+        hook.chmod(0o755)
+        m("append", "--type", "note", "--message", "two")
+        tail = repo / "gate_tail.sh"
+        tail.write_text('set -euo pipefail\nSUBSTRATE_PROFILE=strict\n'
+                        'run_py(){ "%s" -I "$@"; }\n' % PY + gate[gate.index(marker):])
+        r = subprocess.run(["bash", str(tail)], cwd=str(repo), env=env,
+                           capture_output=True, text=True, timeout=120)
+        if r.returncode == 0:
+            return False, "strict release passed with an unpublished fresh anchor"
+        if "release-gate: passed" in r.stdout:
+            return False, "the gate announced success before certifying the end state"
+        return True, f"rc={r.returncode}, success line withheld"
+
+
+def t_memory_anchor_forced_head_race_blocked():
+    """round-36 P2: --force checked the evidence append's rc, then re-read a mutable
+    events.jsonl to choose the note payload. A writer in that gap got a green anchor
+    over a chain with no `anchor-forced` event in it."""
+    ml = str(SCRIPTS / "memory_log.py")
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td); env = _ml_env(td)
+
+        def g(*a):
+            return subprocess.run(["git", *a], cwd=str(td), capture_output=True, text=True, timeout=20)
+
+        def m(*a):
+            return subprocess.run([PY, "-I", ml, *a], env=env, cwd=str(td),
+                                  capture_output=True, text=True, timeout=30)
+        g("init", "-q"); g("config", "user.email", "x@x"); g("config", "user.name", "x")
+        (td / "f").write_text("x"); g("add", "."); g("commit", "-qm", "init")
+        m("append", "--type", "note", "--message", "one")
+        if m("anchor").returncode != 0:
+            return True, "skipped: anchor unavailable on this host"
+        shown = g("notes", "--ref=substrate-memory", "show", "HEAD").stdout.splitlines()
+        if not shown:
+            return True, "skipped: note unreadable on this host"
+        before = shown[0]
+        ev = td / ".substrate" / "memory" / "events.jsonl"
+        ev.unlink(); m("append", "--type", "note", "--message", "replacement")
+        replacement = ev.read_text()
+        ev.unlink(); m("append", "--type", "note", "--message", "third")
+        third = ev.read_text()
+        (td / "third.jsonl").write_text(third)
+        ev.write_text(replacement)
+        racer = td / "race.py"
+        racer.write_text(
+            "import pathlib, sys\n"
+            "sys.path.insert(0, %r)\n" % str(SCRIPTS) +
+            "import memory_log\n"
+            "third = pathlib.Path(%r).read_text()\n" % str(td / "third.jsonl") +
+            "name = '_append_returning_head' if hasattr(memory_log, '_append_returning_head') else 'append'\n"
+            "real = getattr(memory_log, name)\n"
+            "def racing(etype, data):\n"
+            "    out = real(etype, data)\n"
+            "    rc = out[0] if isinstance(out, tuple) else out\n"
+            "    if etype == 'anchor-forced' and rc == 0:\n"
+            "        memory_log.EVENTS.write_text(third)\n"
+            "    return out\n"
+            "setattr(memory_log, name, racing)\n"
+            "sys.exit(memory_log.anchor(force=True))\n")
+        r = subprocess.run([PY, str(racer)], cwd=str(td), env=env,
+                           capture_output=True, text=True, timeout=60)
+        after = g("notes", "--ref=substrate-memory", "show", "HEAD").stdout.splitlines()
+        third_head = json.loads(third.splitlines()[-1])["hash"]
+        if after and after[0].endswith(third_head):
+            return False, "the note certified a chain the evidence append never produced"
+        if r.returncode == 0:
+            return False, "force succeeded over a chain that changed under it"
         if after and after[0] != before:
             return False, "force aborted but rewrote the note anyway"
         return True, f"rc={r.returncode}, note untouched"
@@ -1351,6 +1525,9 @@ TASKS = [
     ("memory_anchor_spoofed_remote_blocked", "malicious", "block", t_memory_anchor_spoofed_remote_ref_blocked, True),
     ("memory_anchor_hostile_git_env_blocked", "malicious", "block", t_memory_anchor_hostile_git_routing_blocked, True),
     ("memory_anchor_force_needs_evidence", "malicious", "block", t_memory_anchor_force_without_evidence_blocked, True),
+    ("memory_anchor_hostile_user_config_blocked", "malicious", "block", t_memory_anchor_hostile_user_config_blocked, True),
+    ("release_gate_unpublished_anchor_blocked", "malicious", "block", t_release_gate_unpublished_anchor_blocked, True),
+    ("memory_anchor_forced_head_race_blocked", "malicious", "block", t_memory_anchor_forced_head_race_blocked, True),
     ("history_injection_stripped", "malicious", "block", t_history_injection_stripped, False),
     ("rejected_injection_stripped", "malicious", "block", t_rejected_injection_stripped, False),
     ("handoff_forged_state_stripped", "malicious", "block", t_handoff_forged_state_stripped, False),

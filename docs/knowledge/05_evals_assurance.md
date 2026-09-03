@@ -113,6 +113,13 @@ a failed block rather than allowed to wedge the run. Evidence-suppression
 attacks are in the malicious corpus for the same reason a bypass is: an eval
 covers the gate that reads forged evidence, not only the gate that writes it.
 
+A task that SKIPS has left the denominator. Skips exist for absent backends, so
+a task whose setup silently stops reproducing its own baseline reports the same
+way a missing sandbox does and stops measuring anything without failing. That
+happened here: narrowing what counts as an anchor conflict turned one task's
+setup into a non-conflict, and it skipped rather than failed. Read the skip
+lines on any release that changes a semantic the corpus depends on.
+
 A detection task needs a companion asking whether the detection can be ERASED.
 `memory_anchor_mismatch_detected` proved a replaced memory chain was caught, and
 that stayed true while the finding could be undone by re-running the shipped

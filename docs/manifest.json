@@ -167,6 +167,15 @@
       "last_human_reviewed": "2026-09-02",
       "path": "docs/knowledge/07_agent_context_governance.md",
       "purpose": "Agent context inventory, harness scanning, budgets, and doc drift."
+    },
+    {
+      "covers": [
+        "scripts/memory_log.py",
+        "scripts/release_gate.sh"
+      ],
+      "last_human_reviewed": "2026-09-03",
+      "path": "docs/knowledge/08_memory_anchor.md",
+      "purpose": "The memory trust anchor \u2014 monotonic advance, remote confirmation, and limits."
     }
   ]
 }

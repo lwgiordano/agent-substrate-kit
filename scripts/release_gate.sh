@@ -66,7 +66,6 @@ fi
 echo "==> Pre-commit"; run_tool pre-commit run --all-files --show-diff-on-failure
 echo "==> Behavior evals"; run_py scripts/run_substrate_evals.py   # measured block-rate / FP-rate
 echo "==> Audit report"; run_py scripts/substrate_audit.py --mode quick --write-report
-echo "release-gate: passed"
 # Re-tie the memory chain to THIS commit now that every gate has passed. Done in
 # every profile: writing a note is harmless, and it is what makes the strict
 # requirement above satisfiable after a profile ratchet instead of a fresh
@@ -103,4 +102,24 @@ if [ -f .substrate/memory/events.jsonl ]; then
   else
     echo "memory-anchor: no 'origin' remote — the anchor is local-only by construction" >&2
   fi
+  # CERTIFY THE END STATE, NOT THE PRE-STATE (v3.8.54, round-36 P1b).
+  #
+  # The memory-chain check above runs BEFORE this block writes a new note, so
+  # the success line used to describe the anchor state the release
+  # started with. When the push was refused the gate still exited 0 while the
+  # repo it left behind failed `verify --anchor` outright — reproduced with an
+  # origin that rejects refs/notes/*, and lived through in this kit's own
+  # v3.8.53 release, which printed "passed" with the push refused and was
+  # reported as green. Re-run the SAME verification the profile demands, after
+  # the anchor is written and published, and let `set -e` make its result the
+  # release's result. In strict a failed publication now fails the release; in
+  # the offline-complete base tiers the unpublished anchor is not an error and
+  # the plain chain check is what applies.
+  echo "==> Memory anchor re-check (end state)"
+  if [ "$SUBSTRATE_PROFILE" = "strict" ]; then
+    run_py scripts/memory_log.py verify --anchor
+  else
+    run_py scripts/memory_log.py verify
+  fi
 fi
+echo "release-gate: passed"

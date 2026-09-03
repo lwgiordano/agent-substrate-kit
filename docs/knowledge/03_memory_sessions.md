@@ -27,46 +27,12 @@ The durable event log is hash-chained. Verification checks sequence, previous
 hash, event hash, and any optional Git-note anchor. An absent anchor is distinct
 from a broken or mismatched anchor; go-live reports those states separately.
 
-The anchor is a git note on a commit recording the chain head at that moment.
-`verify --anchor` finds the nearest annotated ancestor of HEAD and requires that
-recorded hash to be a MEMBER of the current, link-verified chain. Ordinary growth
-after anchoring therefore passes; a chain replaced wholesale by a different valid
-chain, or truncated past the anchor, fails; no anchor anywhere in the ancestry
-fails closed with the remedy named. (It once demanded EQUALITY, so a single
-append read as "rewritten", and the gate hedged around that until absence failed
-open — found by being hit; see the postmortem.) Strict requires it
-unconditionally, every release writes one, and the first strict release needs a
-one-time `./manage.sh memory anchor` as the human-established trust root.
-`substrate_doctor` delegates to the same verifier, so "anchor valid" has one
-definition.
-
-A note is mutable state in the same writable repo as the log, so detection alone
-was undoable: replace the chain, re-run `anchor`, green again. Advancing is
-MONOTONIC — the previously anchored hash must still be in the chain, which growth
-satisfies and replace-then-re-anchor does not. A reset uses `anchor --force`,
-which first appends an `anchor-forced` event naming the abandoned hash and
-aborts, note untouched, if it cannot: the discontinuity is a precondition, not a
-side effect. Confirmation comes only from the remote in this process — an
-existence check on origin, then a checked fetch — never the local
-`origin-substrate-memory` ref, which any writer can forge; and anchor-path git
-calls run under the sanitized env, or `GIT_DIR` alone redirects them to a fake
-repo. Each earlier miss was one mistake: a trust layer reading inputs its
-adversary can write.
-
-`verify --anchor` reports which anchor it has, not one line for all:
-`verified against origin`; `ANCHOR CONFLICT` (fail) when the local note
-disagrees with the remote; `LOCAL-ONLY` when an origin exists but lacks it;
-and `LOCAL (no remote)`, which PASSES
-because the base tier is offline-complete, so local is then the strongest anchor
-obtainable. Strict requires publication and fails closed.
-
-Publish FROM THE PRODUCING CLONE. Git does not transport `refs/notes/*` on a
-normal push, clone, or fetch, so another clone never receives it and cannot push
-it — delegating that step is an impossible instruction. The release gate pushes
-the note itself and, when refused, prints the payload plus the `git notes
---ref=substrate-memory add -f -m` command that recreates it anywhere: the payload
-travels in text where the ref does not. A suffix rewrite after the anchor stays undetectable by any unkeyed
-chain; the published anchor bounds it.
+The anchor itself — what `verify --anchor` requires, why advancing it is
+monotonic, where remote confirmation comes from, the reported tiers, and how a
+release publishes it — has its own doc: [the memory trust
+anchor](08_memory_anchor.md). It moved there in v3.8.54 because the anchor
+material had grown to half of this file and this file to the top of its size
+budget, and a doc that cannot take its next paragraph is one nobody updates.
 
 ## Verified skill evidence
 

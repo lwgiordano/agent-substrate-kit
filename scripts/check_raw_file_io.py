@@ -211,9 +211,12 @@ ALLOWLIST: dict[str, str] = {
         "shape: the planted-write eval and the wrapped-write eval, each staging "
         "a bad/ok pair. The second was added in v3.8.44 and silently inherited "
         "this reason until v3.8.45 started counting matches", 2),
-    "run_substrate_evals.py:SCRIPTS.read_text":
+    "run_substrate_evals.py:SCRIPTS.read_text": (
         "reads the substrate's own validator SOURCE to hash/compare it — code "
-        "under review, not agent-writable state",
+        "under review, not agent-writable state. The second site (v3.8.54) reads "
+        "release_gate.sh so the round-36 P1b eval can execute the REAL gate tail "
+        "rather than a paraphrase of it; same class, same CODEOWNED + hash-pinned "
+        "source, and the bytes are executed in a fresh temp fixture", 2),
     "run_substrate_evals.py:src.read_text":
         "stages a copy of the kit's OWN script source into a fresh temp fixture; "
         "the source is code under review (and CODEOWNED + hash-pinned), not "

@@ -36,6 +36,7 @@ KNOWLEDGE_DOCS = {
     "05_evals_assurance.md": "Behavioral evals, deterministic validators, audits, and assurance limits.",
     "06_release_distribution.md": "Release packaging, signing, manifests, and artifact verification.",
     "07_agent_context_governance.md": "Agent context inventory, harness scanning, budgets, and doc drift.",
+    "08_memory_anchor.md": "The memory trust anchor — monotonic advance, remote confirmation, and limits.",
 }
 
 KNOWLEDGE_ASSERTS = {

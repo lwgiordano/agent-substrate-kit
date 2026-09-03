@@ -12193,7 +12193,10 @@ def test_memory_anchor_growth_after_anchor_passes(tmp_path) -> None:
     m("append", "--type", "note", "--message", "two")
     r = m("verify", "--anchor")
     assert r.returncode == 0, r.stdout + r.stderr
-    assert "anchor verified" in r.stdout
+    # v3.8.52: the wording split by tier — this fixture has no remote, so local
+    # IS the strongest anchor it can hold and says so. rc is the contract; the
+    # label distinguishes what was actually proven.
+    assert "anchor verified LOCAL (no remote)" in r.stdout
 
 
 def test_memory_anchor_found_on_older_ancestor_commit(tmp_path) -> None:
@@ -12514,3 +12517,167 @@ def test_manage_check_refuses_with_one_line_when_venv_missing(tmp_path) -> None:
     assert p.returncode == 1
     assert "substrate venv missing" in p.stderr and "./manage.sh setup" in p.stderr
     assert "check-import-shadowing" not in p.stdout, "a gate ran before the precheck"
+
+
+# --- round-34: the anchor is mutable local state (v3.8.52) -------------------
+# A git note lives in the same writable repo as the log it vouches for, so
+# v3.8.51's detection was one command away from being undone: replace the chain,
+# re-run `anchor`, and verification went green over the replacement. These pin
+# the two layers that close it — monotonic advance, and saying which anchor we
+# actually have instead of one confident line for every tier.
+
+
+def _origin_repo(tmp_path, name="origin.git"):
+    bare = tmp_path / name
+    subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True,
+                   capture_output=True, timeout=20)
+    return bare
+
+
+def test_memory_anchor_refuses_to_launder_a_replaced_chain(tmp_path) -> None:
+    """round-34 P1, the reported repro verbatim: anchor, replace events.jsonl,
+    append a replacement chain, then re-run `anchor`. Before v3.8.52 that
+    returned 0 and `verify --anchor` went green over the replacement, so the
+    detection could be erased by the same process that tripped it."""
+    td, g, m = _anchor_repo(tmp_path)
+    m("append", "--type", "note", "--message", "one")
+    if m("anchor").returncode != 0:
+        pytest.skip("git notes unavailable on this host")
+    m("append", "--type", "note", "--message", "two")
+    _events_path(td).unlink()
+    m("append", "--type", "note", "--message", "replacement-chain")
+    assert m("verify", "--anchor").returncode == 1, "replacement must be detected"
+    r = m("anchor")
+    assert r.returncode == 1, "re-anchoring over a replaced chain must be REFUSED"
+    assert "REFUSING to re-anchor" in r.stderr
+    # and the refusal must not be cosmetic: the finding survives it
+    assert m("verify", "--anchor").returncode == 1
+
+
+def test_memory_anchor_force_records_the_break_in_the_chain(tmp_path) -> None:
+    """The override exists for a legitimate reset, and must not be a quiet one:
+    the abandoned anchor is APPENDED to the new chain, so a laundering attempt
+    leaves evidence in the record rather than removing it."""
+    td, g, m = _anchor_repo(tmp_path)
+    m("append", "--type", "note", "--message", "one")
+    if m("anchor").returncode != 0:
+        pytest.skip("git notes unavailable on this host")
+    _events_path(td).unlink()
+    m("append", "--type", "note", "--message", "fresh")
+    assert m("anchor").returncode == 1
+    assert m("anchor", "--force").returncode == 0
+    body = _events_path(td).read_text(encoding="utf-8")
+    assert "anchor-forced" in body, "the discontinuity must be in the log"
+    assert "abandoned_anchor_head" in body
+    assert m("verify", "--anchor").returncode == 0
+
+
+def test_memory_anchor_local_only_is_a_pass_when_no_remote_exists(tmp_path) -> None:
+    """INTENT.md promises the base tier is offline-complete. With no remote,
+    local IS the strongest anchor obtainable, so it must verify cleanly rather
+    than nag about a remote the design says is optional."""
+    td, g, m = _anchor_repo(tmp_path)
+    m("append", "--type", "note", "--message", "one")
+    if m("anchor").returncode != 0:
+        pytest.skip("git notes unavailable on this host")
+    r = m("verify", "--anchor")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "LOCAL (no remote)" in r.stdout
+
+
+def test_memory_anchor_says_local_only_when_an_origin_exists(tmp_path) -> None:
+    """Where publishing IS achievable, not having published is worth saying —
+    and must not be reported with the same words as a published anchor."""
+    td, g, m = _anchor_repo(tmp_path)
+    g("remote", "add", "origin", str(_origin_repo(tmp_path)))
+    m("append", "--type", "note", "--message", "one")
+    if m("anchor").returncode != 0:
+        pytest.skip("git notes unavailable on this host")
+    r = m("verify", "--anchor")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "LOCAL-ONLY" in r.stdout
+    assert "verified against origin" not in r.stdout
+
+
+def test_memory_anchor_verified_against_origin_when_published(tmp_path) -> None:
+    """The real guarantee: the note is on the remote and agrees."""
+    td, g, m = _anchor_repo(tmp_path)
+    bare = _origin_repo(tmp_path)
+    g("remote", "add", "origin", str(bare))
+    m("append", "--type", "note", "--message", "one")
+    if m("anchor").returncode != 0:
+        pytest.skip("git notes unavailable on this host")
+    g("push", "-q", "origin", "HEAD:refs/heads/main")
+    if g("push", "-q", "origin", "refs/notes/substrate-memory").returncode != 0:
+        pytest.skip("cannot push notes on this host")
+    r = m("verify", "--anchor")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "verified against origin" in r.stdout
+
+
+def test_memory_anchor_conflict_when_local_note_disagrees_with_origin(tmp_path) -> None:
+    """The layer that defeats a --force adversary outright: once the remote
+    publishes an anchor, a locally rewritten note is a hard failure."""
+    td, g, m = _anchor_repo(tmp_path)
+    bare = _origin_repo(tmp_path)
+    g("remote", "add", "origin", str(bare))
+    m("append", "--type", "note", "--message", "one")
+    if m("anchor").returncode != 0:
+        pytest.skip("git notes unavailable on this host")
+    g("push", "-q", "origin", "HEAD:refs/heads/main")
+    if g("push", "-q", "origin", "refs/notes/substrate-memory").returncode != 0:
+        pytest.skip("cannot push notes on this host")
+    m("append", "--type", "note", "--message", "two")
+    m("anchor")  # advances the LOCAL note only
+    r = m("verify", "--anchor")
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "ANCHOR CONFLICT" in r.stderr
+
+
+def test_memory_anchor_strict_requires_a_published_anchor(tmp_path) -> None:
+    """Strict must not accept evidence it can rewrite: an unpublished anchor
+    fails closed, with the remedy naming THIS clone (no other clone can push a
+    ref it never received)."""
+    td, g, m = _anchor_repo(tmp_path)
+    g("remote", "add", "origin", str(_origin_repo(tmp_path)))
+    (td / ".substrate").mkdir(exist_ok=True)
+    (td / ".substrate" / "config").write_text('SUBSTRATE_PROFILE="strict"\n', encoding="utf-8")
+    m("append", "--type", "note", "--message", "one")
+    if m("anchor").returncode != 0:
+        pytest.skip("git notes unavailable on this host")
+    r = m("verify", "--anchor")
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "ANCHOR NOT PUBLISHED" in r.stderr
+    assert "FROM THIS CLONE" in r.stderr
+
+
+def test_memory_anchor_unreadable_profile_config_is_treated_as_strict(tmp_path) -> None:
+    """A trust decision must not be softened by failing to read the file that
+    sets it: a present-but-unreadable config takes the strict path."""
+    td, g, m = _anchor_repo(tmp_path)
+    g("remote", "add", "origin", str(_origin_repo(tmp_path)))
+    (td / ".substrate").mkdir(exist_ok=True)
+    try:
+        os.mkfifo(td / ".substrate" / "config")
+    except (OSError, AttributeError):
+        pytest.skip("cannot create a FIFO on this host")
+    m("append", "--type", "note", "--message", "one")
+    if m("anchor").returncode != 0:
+        pytest.skip("git notes unavailable on this host")
+    r = m("verify", "--anchor")
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "ANCHOR NOT PUBLISHED" in r.stderr
+
+
+def test_release_gate_publishes_the_anchor_itself(tmp_path) -> None:
+    """round-34 P2: v3.8.51 wrote the note and told SOMEONE ELSE to push it.
+    Git does not transport refs/notes/* on a normal push/clone/fetch, so that
+    step was impossible anywhere but the producing clone. The gate must push it
+    here, and when it cannot, print the payload that lets any clone recreate it
+    — never delegate a ref the other side never received."""
+    src = (SCRIPTS / "release_gate.sh").read_text(encoding="utf-8")
+    assert "git push --quiet origin refs/notes/substrate-memory" in src, \
+        "the producer must publish the anchor itself"
+    assert "git notes --ref=substrate-memory add -f -m" in src, \
+        "the fallback must carry the payload, since the ref does not travel"
+    assert "FROM THIS CLONE" in src

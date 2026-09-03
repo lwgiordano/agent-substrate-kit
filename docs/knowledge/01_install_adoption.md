@@ -4,7 +4,7 @@ asserts:
   - bootstrap.sh::_safe_mkdir_p
   - bootstrap.sh::wappend
   - scripts/run_python_gate.sh::_ruff_args
-last_human_reviewed: 2026-09-02
+last_human_reviewed: 2026-09-03
 covers:
   - bootstrap.sh
   - manage.sh
@@ -86,6 +86,14 @@ or a sandbox backend that the host cannot prove. Its stripped-install ownership
 fallback is parity-checked against the canonical surface inventory so a missing
 helper import cannot silently remove newly governed files from the readiness
 scan.
+
+The same refusal to overclaim applies to its memory row, which delegates to
+`memory_log verify --anchor` and reports what that actually proved: `pass` for an
+anchor confirmed against the remote, `pass` for a local anchor in a repo with no
+remote (offline-complete is the documented base, so local is then the strongest
+anchor obtainable), `warn` when an origin exists but does not publish it, and
+`fail` for a strict repo with an unpublished anchor or a local note that
+disagrees with the remote.
 
 
 A present-but-unusable `.substrate/config` is tampering, not an absent config.

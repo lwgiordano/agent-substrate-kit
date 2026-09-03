@@ -6,7 +6,7 @@ asserts:
   - scripts/_doc_common.py::locked_atomic_append
   - scripts/session_handoff.py::_safe_history_line
   - scripts/session_handoff.py::_rejected_block
-last_human_reviewed: 2026-09-02
+last_human_reviewed: 2026-09-03
 covers:
   - manage.sh
   - scripts/_doc_common.py
@@ -32,21 +32,37 @@ The anchor is a git note on a commit recording the chain head at that moment.
 recorded hash to be a MEMBER of the current, link-verified chain. Ordinary growth
 after anchoring therefore passes; a chain replaced wholesale by a different valid
 chain, or truncated past the anchor, fails; no anchor anywhere in the ancestry
-fails closed with the remedy named. Until v3.8.51 the check required the head to
-EQUAL the anchored hash — so one append after anchoring read as "rewritten" — and
-consulted only HEAD's own note, so the anchor vanished at the next commit. The
-release gate had hedged around both by requiring the anchor only when a note
-happened to exist, and nothing ever wrote one: a trust anchor failing open on
-absence. It was found by being hit — a workspace restore swapped the memory
-directory for an older valid chain and plain `verify` reported OK. In strict the
-release gate now requires the anchor unconditionally, and every profile's release
-writes one once the gate has passed. The first strict release in a repo needs a
-one-time `./manage.sh memory anchor`; that is the human-established trust root,
-by design. What no unkeyed hash chain can detect is a rewrite of the suffix after
-the anchor point — anchor at every release and push `refs/notes/substrate-memory`
-to a protected remote; that is the documented limit. `substrate_doctor` delegates
-to the same verifier rather than restating the rule, so there is one definition
-of "anchor valid".
+fails closed with the remedy named. Until v3.8.51 it demanded EQUALITY, so one
+append read as "rewritten", and the release gate hedged by requiring an anchor
+only when a note happened to exist — nothing ever wrote one, so the anchor failed
+open on absence. Found by being hit: a workspace restore swapped in an older valid
+chain and plain `verify` said OK. Strict now requires it unconditionally and every
+release writes one; the first strict release needs a one-time
+`./manage.sh memory anchor` as the human-established trust root. `substrate_doctor`
+delegates to the same verifier, so there is one definition of "anchor valid".
+
+A note is mutable state in the same writable repo as the log, so v3.8.51's
+detection was one command from being undone: replace the chain, re-run `anchor`,
+green again. Advancing is now MONOTONIC — a previous anchor's hash must still be
+in the chain, which growth satisfies and replace-then-re-anchor does not. A real
+reset uses `anchor --force`, which appends an `anchor-forced` event naming the
+abandoned hash, putting the discontinuity in the record rather than erasing it.
+
+`verify --anchor` reports which anchor it has, not one line for all:
+`verified against origin`; `ANCHOR CONFLICT` (fail) when the local note
+disagrees with the remote, which defeats a forced local rewrite; `LOCAL-ONLY`
+when an origin exists but lacks it; and `LOCAL (no remote)`, which PASSES,
+because the base tier is offline-complete and local is then the strongest
+anchor obtainable. Strict requires publication and fails closed without it.
+
+Publish FROM THE PRODUCING CLONE. Git does not transport `refs/notes/*` on a
+normal push, clone, or fetch, so another clone never receives the ref and its
+push fails with `src refspec ... does not match any`; delegating that step is an
+impossible instruction. The release gate pushes the note itself and, when
+refused, prints the payload plus the `git notes --ref=substrate-memory add -f -m`
+command that recreates it anywhere — the payload travels in text where the ref
+does not. A suffix rewrite after the anchor stays undetectable by any unkeyed
+chain; the published anchor bounds it.
 
 ## Verified skill evidence
 

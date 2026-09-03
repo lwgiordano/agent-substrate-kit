@@ -636,9 +636,64 @@ def _head_hash() -> str:
     return events[-1].get("hash", ZERO) if events else ZERO
 
 
-def anchor() -> int:
-    """Write the current head hash to a git note outside events.jsonl."""
+def anchor(force: bool = False) -> int:
+    """Write the current head hash to a git note outside events.jsonl.
+
+    MONOTONIC (v3.8.52, round-34 P1). A git note lives in the same writable
+    repo state as the log it vouches for, so the detection added in v3.8.51
+    was one command away from being undone: replace `events.jsonl` with a
+    different valid chain, re-run this command, and `verify --anchor` went
+    green over the replacement. Reproduced end to end before this fix.
+
+    Advancing the anchor is therefore only allowed ALONG the chain it already
+    vouches for: if a previous anchor exists, its recorded hash must still be
+    a member of the current chain. Growth satisfies that on every legitimate
+    release; replace-then-re-anchor does not, which is exactly the laundering
+    step. A real operator-intended reset (a wiped log, a new machine) uses
+    --force, and that is not a silent escape hatch: the break is APPENDED to
+    the new chain as a `anchor-forced` event naming the abandoned hash, so
+    the discontinuity is in the record instead of erased from it.
+
+    This closes the local move. It does not make a mutable local note a
+    cryptographic authority — see the module docstring and `verify --anchor`,
+    which reports a local-only anchor as local-only and requires remote
+    confirmation under strict.
+    """
     head = _head_hash()
+    prior = _nearest_anchor()
+    if prior is not None and not force:
+        commit, anchored = prior
+        events = _read_events()
+        seen = {ZERO} | {ev.get("hash") for ev in events}
+        if anchored not in seen:
+            print(
+                f"memory-log: REFUSING to re-anchor — the hash anchored at commit "
+                f"{commit[:12]} ({anchored[:12]}) is NOT in the current chain, so this "
+                "would move the anchor onto a chain that does not descend from the "
+                "anchored state. That is the shape of a replaced or truncated log. If "
+                "the log was legitimately reset, re-run with --force, which records the "
+                "break as an event in the new chain rather than hiding it.",
+                file=sys.stderr,
+            )
+            return 1
+    forced_break = None
+    if prior is not None and force:
+        commit, anchored = prior
+        events = _read_events()
+        seen = {ZERO} | {ev.get("hash") for ev in events}
+        if anchored not in seen:
+            forced_break = (commit, anchored)
+    if forced_break is not None:
+        # Append BEFORE anchoring so the anchor covers the record of its own
+        # discontinuity; the head hash below is read after this append.
+        commit, anchored = forced_break
+        append("anchor-forced", {
+            "abandoned_anchor_commit": commit,
+            "abandoned_anchor_head": anchored,
+            "reason": "operator-forced anchor over a chain that does not contain the "
+                      "previously anchored head",
+        })
+        head = _head_hash()
     try:
         sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT,
                              capture_output=True, text=True, timeout=10)
@@ -702,6 +757,77 @@ def _nearest_anchor() -> tuple[str, str] | None:
     return None
 
 
+def _require_published_anchor() -> bool:
+    """Strict demands the anchor be on the protected remote, not just local.
+
+    Read from `.substrate/config` through the guarded reader; an unreadable or
+    absent config is NOT "standard" — a trust decision must not be softened by
+    failing to read the file that sets it, so absence here means "do not
+    demand publication" only when the file genuinely says a weaker profile,
+    and an unreadable file is treated as strict.
+    """
+    cfg = ROOT / ".substrate" / "config"
+    raw = _safe_read_text(cfg, ROOT, max_bytes=1 << 20)
+    if raw is None:
+        return cfg.exists()  # present-but-unreadable => strict; absent => not strict
+    for line in raw.splitlines():
+        line = line.strip()
+        if line.startswith("SUBSTRATE_PROFILE"):
+            return "strict" in line.split("=", 1)[-1]
+    return False
+
+
+def _has_origin() -> bool:
+    """Is there an 'origin' remote at all?
+
+    Load-bearing for honesty, not cosmetics: INTENT.md promises the base tier is
+    OFFLINE-COMPLETE, so in a repo with no remote a local-only anchor is the
+    strongest anchor that can exist and must not be reported as a deficiency.
+    Where an origin DOES exist, publishing is achievable and not doing it is
+    worth saying. Same shape as the profile tiers, where a strict-LOCAL repo is
+    not called broken for lacking a GitHub-only CODEOWNERS.
+    """
+    try:
+        r = subprocess.run(["git", "remote"], cwd=ROOT, capture_output=True,
+                           text=True, timeout=10)
+        return r.returncode == 0 and "origin" in r.stdout.split()
+    except Exception:
+        return False
+
+
+def _remote_anchor(commit: str) -> str | None:
+    """The anchored head that ORIGIN publishes for `commit`, or None.
+
+    Offline-safe and never fatal: no remote, no note on the remote, or no
+    network all return None, and the caller decides what that means (strict
+    refuses; otherwise it is reported as local-only). Uses the already-fetched
+    remote-tracking copy when present and otherwise a bounded fetch, so a
+    normal `verify` does not hang on an unreachable origin.
+    """
+    try:
+        remotes = subprocess.run(["git", "remote"], cwd=ROOT, capture_output=True,
+                                 text=True, timeout=10)
+        if remotes.returncode != 0 or "origin" not in remotes.stdout.split():
+            return None
+        subprocess.run(
+            ["git", "fetch", "--quiet", "origin",
+             "refs/notes/substrate-memory:refs/notes/origin-substrate-memory"],
+            cwd=ROOT, capture_output=True, text=True, timeout=30,
+        )
+        r = subprocess.run(
+            ["git", "notes", "--ref", "origin-substrate-memory", "show", commit],
+            cwd=ROOT, capture_output=True, text=True, timeout=10,
+        )
+        if r.returncode != 0:
+            return None
+        for line in r.stdout.splitlines():
+            if line.startswith("substrate-memory-head:"):
+                return line.split(":", 1)[1].strip()
+    except Exception:
+        return None
+    return None
+
+
 def verify(check_anchor: bool = False) -> int:
     events = _read_events()
     prev = ZERO
@@ -749,8 +875,44 @@ def verify(check_anchor: bool = False) -> int:
                   "or truncated past the anchor", file=sys.stderr)
             return 1
         at = next((ev.get("seq") for ev in events if ev.get("hash") == anchored), "genesis")
-        print(f"memory-log: chain OK + anchor verified ({len(events)} events; anchored "
-              f"at commit {commit[:12]}, chain seq {at})")
+        # LOCAL-ONLY vs REMOTE-CONFIRMED (v3.8.52, round-34 P1). A git note is
+        # mutable local state in the same writable repo as the log, so "a note
+        # exists and agrees" is evidence, not authority. `anchor` is monotonic
+        # now, which blocks the replace-then-re-anchor move, but an adversary
+        # who can also rewrite refs/notes/ directly is still only bounded by a
+        # copy kept somewhere it cannot write. Say which one we actually have
+        # instead of printing the same confident line for both.
+        published = _remote_anchor(commit)
+        if published == anchored:
+            print(f"memory-log: chain OK + anchor verified against origin "
+                  f"({len(events)} events; anchored at commit {commit[:12]}, "
+                  f"chain seq {at})")
+            return 0
+        if published is not None:
+            print(f"memory-log: ANCHOR CONFLICT — the note at commit {commit[:12]} "
+                  f"records {anchored[:12]} locally but origin publishes "
+                  f"{published[:12]}: the local note was rewritten", file=sys.stderr)
+            return 1
+        if _require_published_anchor():
+            print(f"memory-log: ANCHOR NOT PUBLISHED — the note at commit {commit[:12]} "
+                  "exists only locally, where whatever can rewrite the log can rewrite "
+                  "it too. Strict requires the anchor to be on the protected remote: "
+                  "`git push origin refs/notes/substrate-memory` FROM THIS CLONE (a "
+                  "normal push/clone does not carry refs/notes/*, so no other clone "
+                  "can publish it for you).", file=sys.stderr)
+            return 1
+        if _has_origin():
+            print(f"memory-log: chain OK + anchor present LOCAL-ONLY ({len(events)} "
+                  f"events; anchored at commit {commit[:12]}, chain seq {at}) — an "
+                  "origin exists but does not publish it, so it bounds accident and a "
+                  "single re-anchor, not an adversary with write access to "
+                  "refs/notes/. Publish FROM THIS CLONE: `git push origin "
+                  "refs/notes/substrate-memory`")
+            return 0
+        print(f"memory-log: chain OK + anchor verified LOCAL (no remote) ({len(events)} "
+              f"events; anchored at commit {commit[:12]}, chain seq {at}) — local is "
+              "the strongest anchor an offline repo can hold; it bounds accident and a "
+              "single re-anchor, not an adversary with write access to refs/notes/")
         return 0
     print(f"memory-log: chain OK ({len(events)} events)")
     return 0
@@ -791,7 +953,12 @@ def main(argv: list[str]) -> int:
     ap_app.add_argument("--message", default="")
     ap_ver = sub.add_parser("verify")
     ap_ver.add_argument("--anchor", action="store_true")
-    sub.add_parser("anchor")
+    ap_anc = sub.add_parser("anchor")
+    ap_anc.add_argument(
+        "--force", action="store_true",
+        help="advance the anchor even though the previously anchored head is no "
+             "longer in the chain (a legitimate log reset). The break is APPENDED "
+             "to the new chain as an `anchor-forced` event, never hidden.")
     ap_tail = sub.add_parser("tail")
     ap_tail.add_argument("n", nargs="?", type=int, default=10)
     sub.add_parser("tasks")
@@ -819,7 +986,7 @@ def main(argv: list[str]) -> int:
     if a.cmd == "verify":
         return verify(check_anchor=a.anchor)
     if a.cmd == "anchor":
-        return anchor()
+        return anchor(force=a.force)
     if a.cmd == "tail":
         return tail(a.n)
     if a.cmd == "tasks":

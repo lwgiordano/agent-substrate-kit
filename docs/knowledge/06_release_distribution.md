@@ -1,6 +1,6 @@
 ---
 purpose: Release packaging, signing, manifests, and artifact verification.
-last_human_reviewed: 2026-09-02
+last_human_reviewed: 2026-09-03
 covers:
   - manage.sh
   - package_release.sh
@@ -58,6 +58,15 @@ the v3.8.50 self-audit's P1: a trust anchor failing open on absence). Once the
 whole gate has passed, every profile's release writes a fresh anchor for that
 commit, so each release re-ties the chain to a known-good state; the first
 strict release in a repo needs a one-time `./manage.sh memory anchor`.
+
+The gate PUBLISHES that anchor itself rather than delegating it. Git does not
+transport `refs/notes/*` on a normal push, clone, or fetch, so a different clone
+never receives the ref and cannot push it — v3.8.51 asked an operator to do
+exactly that, which was impossible anywhere but the producing clone. When the
+push is refused (no remote, no permission, an egress policy) the gate prints the
+note payload and the `git notes --ref=substrate-memory add -f -m` command that
+recreates it on any clone, because the payload travels in text where the ref
+does not.
 
 The release gate runs deterministic validators, project tests, policy evals, and
 artifact verification in sequence. A finalizer or verifier failure is a release

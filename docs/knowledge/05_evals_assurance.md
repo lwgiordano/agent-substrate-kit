@@ -1,6 +1,6 @@
 ---
 purpose: Behavioral evals, deterministic validators, audits, and assurance limits.
-last_human_reviewed: 2026-09-02
+last_human_reviewed: 2026-09-03
 covers:
   - manage.sh
   - extras/calibrate_diy_ultrareview.py
@@ -112,6 +112,14 @@ fails fast inside the per-subprocess cap, and a `TimeoutExpired` is reported as
 a failed block rather than allowed to wedge the run. Evidence-suppression
 attacks are in the malicious corpus for the same reason a bypass is: an eval
 covers the gate that reads forged evidence, not only the gate that writes it.
+
+A detection task needs a companion asking whether the detection can be ERASED.
+`memory_anchor_mismatch_detected` proved a replaced memory chain was caught, and
+that stayed true while the finding could be undone by re-running the shipped
+`anchor` command over the replacement — the round-34 P1. `memory_anchor_relaunder_blocked`
+covers the escalation. Where a gate records its own verdict somewhere writable,
+assume an attacker's next move is against the record, and put that move in the
+corpus too.
 
 `evals --report` regenerates `BENCHMARK.md` with version, counts, surfaced skips,
 and a reproduction command. Exact commit, source-tree, and artifact provenance

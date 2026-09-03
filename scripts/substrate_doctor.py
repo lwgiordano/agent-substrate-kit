@@ -339,10 +339,31 @@ def _go_live(blocks, warns, as_json=False):
             mem_status, mem_reason = 'fail', 'memory hash-chain BROKEN (tamper evidence) — run `./manage.sh memory verify`'
         else:
             rc_anc, out_anc = run([sys.executable, '-I', 'scripts/memory_log.py', 'verify', '--anchor'])
-            if rc_anc == 0:
-                mem_status, mem_reason = 'pass', 'hash-chain ok + anchor verified (anchored head is in the chain)'
+            # v3.8.52 (round-34 P1): rc==0 no longer means one thing. A note that
+            # exists only in this clone lives in the same writable state as the log,
+            # so reporting it as "verified" was the overclaim this row was written to
+            # avoid. Published and local-only are now separate rows.
+            if rc_anc == 0 and 'LOCAL (no remote)' in out_anc:
+                mem_status, mem_reason = 'pass', ('hash-chain ok + anchor verified locally (no remote exists, so '
+                                                  'local is the strongest anchor this repo can hold)')
+            elif rc_anc == 0 and 'LOCAL-ONLY' in out_anc:
+                mem_status, mem_reason = 'warn', ('hash-chain ok + anchor present but LOCAL-ONLY — not published to '
+                                                  'the remote, so it bounds accident and a single re-anchor, not an '
+                                                  'adversary with write access to refs/notes/; push it FROM THIS '
+                                                  'CLONE with `git push origin refs/notes/substrate-memory`')
+            elif rc_anc == 0:
+                mem_status, mem_reason = 'pass', 'hash-chain ok + anchor verified against the remote'
             elif 'NO ANCHOR' in out_anc:
                 mem_status, mem_reason = 'warn', 'hash-chain ok but not anchored — run `./manage.sh memory anchor`'
+            elif 'ANCHOR NOT PUBLISHED' in out_anc:
+                mem_status, mem_reason = 'fail', ('strict requires a PUBLISHED anchor — the note exists only locally; '
+                                                  'push it FROM THIS CLONE with `git push origin '
+                                                  'refs/notes/substrate-memory` (a normal push/clone does not carry '
+                                                  'refs/notes/*, so no other clone can publish it for you)')
+            elif 'ANCHOR CONFLICT' in out_anc:
+                mem_status, mem_reason = 'fail', ('memory anchor CONFLICT — the local note disagrees with the one the '
+                                                  'remote publishes: the local note was rewritten; run '
+                                                  '`./manage.sh memory verify --anchor`')
             else:
                 mem_status, mem_reason = 'fail', ('memory anchor MISMATCH — the anchored head is not in the current '
                                                   'chain (history replaced or truncated past the anchor); run '

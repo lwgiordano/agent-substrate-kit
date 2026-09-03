@@ -32,7 +32,7 @@
         "scripts/update_manifest.py",
         "scripts/write_install_json.py"
       ],
-      "last_human_reviewed": "2026-09-02",
+      "last_human_reviewed": "2026-09-03",
       "path": "docs/knowledge/01_install_adoption.md",
       "purpose": "Installation and adoption across new and existing repositories."
     },
@@ -66,7 +66,7 @@
         "scripts/session_handoff.py",
         "scripts/todo_state_hook.py"
       ],
-      "last_human_reviewed": "2026-09-02",
+      "last_human_reviewed": "2026-09-03",
       "path": "docs/knowledge/03_memory_sessions.md",
       "purpose": "Tamper-evident memory, session restore, completion, and append-only logs."
     },
@@ -125,7 +125,7 @@
         "scripts/run_substrate_evals.py",
         "scripts/substrate_audit.py"
       ],
-      "last_human_reviewed": "2026-09-02",
+      "last_human_reviewed": "2026-09-03",
       "path": "docs/knowledge/05_evals_assurance.md",
       "purpose": "Behavioral evals, deterministic validators, audits, and assurance limits."
     },
@@ -142,7 +142,7 @@
         "scripts/verify_release.py",
         "scripts/write_install_json.py"
       ],
-      "last_human_reviewed": "2026-09-02",
+      "last_human_reviewed": "2026-09-03",
       "path": "docs/knowledge/06_release_distribution.md",
       "purpose": "Release packaging, signing, manifests, and artifact verification."
     },

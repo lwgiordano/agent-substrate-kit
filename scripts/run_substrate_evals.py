@@ -658,6 +658,36 @@ def t_memory_anchor_mismatch_detected():
         return r.returncode != 0, f"rc={r.returncode}"
 
 
+def t_memory_anchor_relaunder_blocked():
+    """The escalation of the mismatch task (round-34 P1): detection is worthless if
+    the same process can erase it. Replace the chain, then re-run the SHIPPED anchor
+    command — before v3.8.52 that returned 0 and `verify --anchor` went green over
+    the replacement, so a laundering step undid the finding. `anchor` must REFUSE to
+    advance onto a chain that no longer contains the hash it already vouches for."""
+    ml = str(SCRIPTS / "memory_log.py")
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td); env = _ml_env(td)
+
+        def g(*a):
+            return subprocess.run(["git", *a], cwd=str(td), capture_output=True, text=True, timeout=20)
+
+        def m(*a):
+            return subprocess.run([PY, "-I", ml, *a], env=env, cwd=str(td),
+                                  capture_output=True, text=True, timeout=20)
+        g("init", "-q"); g("config", "user.email", "x@x"); g("config", "user.name", "x")
+        (td / "f").write_text("x"); g("add", "."); g("commit", "-qm", "init")
+        m("append", "--type", "note", "--message", "one")
+        if m("anchor").returncode != 0:
+            return True, "skipped: anchor unavailable on this host"
+        (td / ".substrate" / "memory" / "events.jsonl").unlink()
+        m("append", "--type", "note", "--message", "replacement-chain")
+        relaunder = m("anchor")
+        if relaunder.returncode == 0:
+            return False, "re-anchor over a replaced chain SUCCEEDED (laundering)"
+        still = m("verify", "--anchor")
+        return still.returncode != 0, f"anchor rc={relaunder.returncode}, verify rc={still.returncode}"
+
+
 def t_memory_anchor_growth_allowed():
     """BENIGN twin of anchor-mismatch: anchoring then APPENDING is the normal life of
     the chain and must pass `verify --anchor` (rc==0). Without this positive path a
@@ -1187,6 +1217,7 @@ TASKS = [
     ("injection_says_safe_blocks_exfil", "malicious", "block", t_injection_says_safe_blocks_exfil, True),
     ("memory_chain_rewrite_detected", "malicious", "block", t_memory_chain_rewrite_detected, True),
     ("memory_anchor_mismatch_detected", "malicious", "block", t_memory_anchor_mismatch_detected, True),
+    ("memory_anchor_relaunder_blocked", "malicious", "block", t_memory_anchor_relaunder_blocked, True),
     ("history_injection_stripped", "malicious", "block", t_history_injection_stripped, False),
     ("rejected_injection_stripped", "malicious", "block", t_rejected_injection_stripped, False),
     ("handoff_forged_state_stripped", "malicious", "block", t_handoff_forged_state_stripped, False),

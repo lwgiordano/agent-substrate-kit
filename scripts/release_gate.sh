@@ -70,8 +70,37 @@ echo "release-gate: passed"
 # Re-tie the memory chain to THIS commit now that every gate has passed. Done in
 # every profile: writing a note is harmless, and it is what makes the strict
 # requirement above satisfiable after a profile ratchet instead of a fresh
-# chicken-and-egg. The note is only as strong as where it lives — push
-# refs/notes/substrate-memory to a protected remote for the real guarantee.
+# chicken-and-egg.
+#
+# v3.8.52 (round-34 P2): THE PRODUCER PUBLISHES. The previous version wrote the
+# note and left a comment telling someone to push it. That step is impossible
+# anywhere but here: git does not transport refs/notes/* on a normal push,
+# clone, or fetch, so another clone never receives the ref and
+# `git push origin refs/notes/substrate-memory` there fails with
+# "src refspec ... does not match any" (reproduced). Delegating it was a
+# handoff that could not be executed. So: push it from this clone, and when
+# that is refused (no remote, no permission, an egress policy) print the exact
+# payload and the one command that recreates the note anywhere, because the
+# payload travels in text where the ref does not.
 if [ -f .substrate/memory/events.jsonl ]; then
   echo "==> Memory anchor"; run_py scripts/memory_log.py anchor
+  if git remote | grep -qx origin; then
+    if git push --quiet origin refs/notes/substrate-memory 2>/dev/null; then
+      echo "memory-anchor: published refs/notes/substrate-memory to origin"
+    else
+      _anchor_commit="$(git rev-parse HEAD)"
+      _anchor_payload="$(git notes --ref=substrate-memory show "$_anchor_commit" 2>/dev/null | head -1)"
+      echo "memory-anchor: WARNING — could not push refs/notes/substrate-memory to origin." >&2
+      echo "  The anchor exists only in this clone, where whatever can rewrite the log" >&2
+      echo "  can rewrite it too. A normal push/clone does NOT carry refs/notes/*, so no" >&2
+      echo "  other clone can publish it for you. Either push FROM THIS CLONE:" >&2
+      echo "    git push origin refs/notes/substrate-memory" >&2
+      echo "  or recreate it from this payload on any clone and push from there:" >&2
+      echo "    git notes --ref=substrate-memory add -f -m '${_anchor_payload}' ${_anchor_commit}" >&2
+      echo "    git push origin refs/notes/substrate-memory" >&2
+      echo "  Confirm either way with: git ls-remote origin 'refs/notes/*'" >&2
+    fi
+  else
+    echo "memory-anchor: no 'origin' remote — the anchor is local-only by construction" >&2
+  fi
 fi

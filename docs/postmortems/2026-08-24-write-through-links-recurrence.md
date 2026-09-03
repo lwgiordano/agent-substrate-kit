@@ -900,6 +900,62 @@ constantly. Do not ship the hedge; fix what makes X unsatisfiable. And when an
 eval asserts the hedge's behaviour as correct, the corpus has become a record of
 the defect, and passing it proves nothing.
 
+## Round 14 — v3.8.52 (round-34): the guard one command from being undone
+
+v3.8.51 fixed a trust anchor that failed open. Round 34 found the fix was one
+command deep. Both findings reproduced before acceptance.
+
+**P1.** A git note lives in the same writable repo as the log it vouches for.
+So: anchor, replace `events.jsonl` with a different valid chain, re-run the
+*shipped* `anchor` command — and `verify --anchor` goes green over the
+replacement. Detection worked; it just could be erased by the same process that
+tripped it. My own v3.8.51 docs said the real mitigation was pushing the note to
+a protected remote, so I *knew* a local note was weaker — but the code had no
+guard and the output printed the same confident "anchor verified" either way.
+That is the recurring shape one level up: not a control that lies about what it
+does, but a control whose **documented** limit was never **implemented**.
+
+Closed in two layers. Advancing the anchor is now MONOTONIC: if a previous
+anchor exists, its hash must still be in the chain, which growth satisfies and
+replace-then-re-anchor does not. A genuine reset uses `--force`, which appends
+an `anchor-forced` event naming the abandoned hash — the escape hatch writes the
+discontinuity into the record rather than removing it, and repeated laundering
+accumulates evidence instead of erasing it. Then `verify --anchor` stopped
+conflating tiers: `verified against origin`, `ANCHOR CONFLICT` when the local
+note disagrees with the remote (this is the layer that defeats a forced local
+rewrite outright), `LOCAL-ONLY` when an origin exists but does not carry it, and
+strict fails closed on an unpublished anchor.
+
+The judgment worth recording is what I did *not* do: make an unpublished anchor a
+failure everywhere. `INTENT.md` promises the base tier is offline-complete, so in
+a repo with no remote a local anchor is the strongest one obtainable and reporting
+it as deficient would be a false positive of exactly the kind that gets gates
+switched off — the same mistake as telling a strict-LOCAL repo it is broken for
+lacking a GitHub-only CODEOWNERS. Two existing tests asserting `pass` for that
+case were right, and they caught the overreach.
+
+**P2 was my error, not the code's.** v3.8.51's handoff told the operator to push
+`refs/notes/substrate-memory` "from a machine without the egress policy." Git does
+not transport `refs/notes/*` on a normal push, clone, or fetch: a fresh clone gets
+zero notes and the command fails with `src refspec ... does not match any`. I
+wrote an instruction that cannot be executed anywhere except the clone that was
+blocked from executing it. The producer now publishes the note itself, and when
+refused prints the payload plus the `git notes add -f -m` command that recreates
+it anywhere — the payload travels in text where the ref does not.
+
+**Carry-forward rule, part 19 — a documented limit is not an implemented one.**
+Writing "the real guarantee needs X" in a docstring while shipping the version
+without X leaves a control that reads as authoritative and behaves as advisory.
+Either implement the bound, or make the output say plainly which one the caller
+actually has. This gate now prints a different sentence per tier for exactly that
+reason.
+
+**Carry-forward rule, part 20 — a handoff step must be executable by whoever
+receives it.** Before delegating a manual action, check that the receiving side
+has what the action needs. A ref, a file, a credential, or a piece of state that
+never reaches them makes the instruction impossible, and an impossible instruction
+in a security remedy is worse than no instruction: it reads as covered.
+
 ## (Optional) Reproduction
 
 In a disposable repo: `ln victim.txt AGENT_BUS.md` then

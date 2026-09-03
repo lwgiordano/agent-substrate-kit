@@ -12626,6 +12626,22 @@ def test_memory_anchor_verified_against_origin_when_published(tmp_path) -> None:
     assert "verified against origin" in r.stdout
 
 
+def _note_on(repo, payload, commit):
+    """Write a substrate-memory note in a fixture repo, identity supplied EXPLICITLY.
+
+    A bare fixture repo has no local identity, and `git notes add` writes a
+    commit. This passed locally only because the developer's GLOBAL git config
+    happened to supply user.email — CI has none, so the setup exited 128 and four
+    tests failed there while passing here. A fixture must not depend on ambient
+    config; that is the same class these tests are about.
+    """
+    return subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.email=t@example.invalid", "-c", "user.name=t",
+         "notes", "--ref=substrate-memory", "add", "-f", "-m", payload, commit],
+        check=True, capture_output=True, text=True, timeout=20,
+    )
+
+
 def _published_anchor_repo(tmp_path):
     """A repo whose anchor is genuinely published to origin. (td, g, m, bare, commit)."""
     td, g, m = _anchor_repo(tmp_path)
@@ -12651,9 +12667,7 @@ def test_memory_anchor_conflict_when_origin_publishes_a_hash_not_in_the_chain(tm
     a chain this log does not contain, so the log cannot descend from it.
     """
     td, g, m, bare, commit = _published_anchor_repo(tmp_path)
-    subprocess.run(["git", "-C", str(bare), "notes", "--ref=substrate-memory", "add", "-f",
-                    "-m", "substrate-memory-head:" + "a" * 64, commit],
-                   check=True, capture_output=True, timeout=20)
+    _note_on(bare, "substrate-memory-head:" + "a" * 64, commit)
     r = m("verify", "--anchor")
     assert r.returncode == 1, r.stdout + r.stderr
     assert "ANCHOR CONFLICT" in r.stderr
@@ -12694,11 +12708,8 @@ def _conflicting_origin(tmp_path, g, bare, commit):
     subprocess.run(["git", "-C", str(fake), "fetch", "-q", str(bare),
                     "refs/heads/main:refs/heads/main"], check=True, capture_output=True, timeout=20)
     payload = g("notes", "--ref=substrate-memory", "show", "HEAD").stdout.splitlines()[0]
-    subprocess.run(["git", "-C", str(fake), "notes", "--ref=substrate-memory", "add", "-f",
-                    "-m", payload, commit], check=True, capture_output=True, timeout=20)
-    subprocess.run(["git", "-C", str(bare), "notes", "--ref=substrate-memory", "add", "-f",
-                    "-m", "substrate-memory-head:" + "a" * 64, commit],
-                   check=True, capture_output=True, timeout=20)
+    _note_on(fake, payload, commit)
+    _note_on(bare, "substrate-memory-head:" + "a" * 64, commit)
     return fake
 
 
@@ -12998,9 +13009,7 @@ def test_memory_anchor_ignores_hostile_git_routing_env(tmp_path) -> None:
     # A GENUINE conflict as the baseline: origin publishes a hash this chain does
     # not contain. (Before v3.8.54 this test used a local note merely ahead of the
     # published one, which is a refused push, not tampering.)
-    subprocess.run(["git", "-C", str(bare), "notes", "--ref=substrate-memory", "add", "-f",
-                    "-m", "substrate-memory-head:" + "a" * 64, commit],
-                   check=True, capture_output=True, timeout=20)
+    _note_on(bare, "substrate-memory-head:" + "a" * 64, commit)
     assert m("verify", "--anchor").returncode == 1, "baseline conflict must be detected"
 
     fake = tmp_path / "fake"

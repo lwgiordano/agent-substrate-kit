@@ -759,9 +759,8 @@ def t_memory_anchor_hostile_git_routing_blocked():
         # failing, which is how coverage disappears without anyone noticing. The
         # genuine conflict is an origin publishing a hash this chain lacks.
         commit = g("rev-parse", "HEAD").stdout.strip()
-        subprocess.run(["git", "-C", str(bare), "notes", "--ref=substrate-memory", "add",
-                        "-f", "-m", "substrate-memory-head:" + "a" * 64, commit],
-                       capture_output=True, timeout=20)
+        if _eval_note_on(bare, "substrate-memory-head:" + "a" * 64, commit) != 0:
+            return True, "skipped: cannot write notes in a bare repo on this host"
         if m("verify", "--anchor").returncode == 0:
             return True, "skipped: baseline conflict not reproducible here"
         fake.mkdir(exist_ok=True)
@@ -825,6 +824,18 @@ def t_memory_anchor_force_without_evidence_blocked():
         return True, f"rc={r.returncode}, note untouched"
 
 
+def _eval_note_on(repo, payload, commit):
+    """substrate-memory note in a fixture repo with identity supplied explicitly,
+    and the return code CHECKED. A bare repo has no identity and `git notes add`
+    writes a commit; relying on the caller's global config made the same setup
+    exit 128 in CI while passing locally. An unchecked setup step turns a task
+    into a vacuous pass or a silent skip."""
+    return subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.email=x@x", "-c", "user.name=x",
+         "notes", "--ref=substrate-memory", "add", "-f", "-m", payload, commit],
+        capture_output=True, text=True, timeout=20).returncode
+
+
 def _anchored_with_origin(td, g, m):
     """(bare, commit) for a repo whose anchor is genuinely published to origin,
     or (None, reason) when this host cannot do notes/pushes."""
@@ -868,11 +879,10 @@ def t_memory_anchor_hostile_user_config_blocked():
         payload = g("notes", "--ref=substrate-memory", "show", "HEAD").stdout.splitlines()
         if not payload:
             return True, "skipped: note unreadable on this host"
-        subprocess.run(["git", "-C", str(fake), "notes", "--ref=substrate-memory", "add", "-f",
-                        "-m", payload[0], commit], capture_output=True, timeout=20)
-        subprocess.run(["git", "-C", str(bare), "notes", "--ref=substrate-memory", "add", "-f",
-                        "-m", "substrate-memory-head:" + "a" * 64, commit],
-                       capture_output=True, timeout=20)
+        if _eval_note_on(fake, payload[0], commit) != 0:
+            return True, "skipped: cannot write notes in a bare repo on this host"
+        if _eval_note_on(bare, "substrate-memory-head:" + "a" * 64, commit) != 0:
+            return True, "skipped: cannot write notes in a bare repo on this host"
         if m("verify", "--anchor").returncode != 1:
             return True, "skipped: baseline conflict not reproducible on this host"
         results = []

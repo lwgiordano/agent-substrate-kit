@@ -343,7 +343,19 @@ def _go_live(blocks, warns, as_json=False):
             # exists only in this clone lives in the same writable state as the log,
             # so reporting it as "verified" was the overclaim this row was written to
             # avoid. Published and local-only are now separate rows.
-            if rc_anc == 0 and 'LOCAL (no remote)' in out_anc:
+            #
+            # v3.8.54 (in-release security-auditor BLOCK, my own defect): the
+            # strongest verdict used to be the CATCH-ALL — "none of the known
+            # local tiers matched, so it must be remote-verified". Adding a
+            # fifth rc==0 tier (LOCAL AHEAD) therefore made this row claim
+            # "verified against the remote" for an anchor that is not published
+            # at all, from state a local writer controls. A positive claim must
+            # rest on positive evidence, never on the absence of known
+            # negatives, so the remote row now requires the verifier to have
+            # SAID so and an unrecognised tier degrades to warn.
+            if rc_anc == 0 and 'verified against origin' in out_anc:
+                mem_status, mem_reason = 'pass', 'hash-chain ok + anchor verified against the remote'
+            elif rc_anc == 0 and 'LOCAL (no remote)' in out_anc:
                 mem_status, mem_reason = 'pass', ('hash-chain ok + anchor verified locally (no remote exists, so '
                                                   'local is the strongest anchor this repo can hold)')
             elif rc_anc == 0 and 'LOCAL-ONLY' in out_anc:
@@ -351,8 +363,15 @@ def _go_live(blocks, warns, as_json=False):
                                                   'the remote, so it bounds accident and a single re-anchor, not an '
                                                   'adversary with write access to refs/notes/; push it FROM THIS '
                                                   'CLONE with `git push origin refs/notes/substrate-memory`')
+            elif rc_anc == 0 and 'LOCAL AHEAD' in out_anc:
+                mem_status, mem_reason = 'warn', ('hash-chain ok but the local anchor has ADVANCED PAST the '
+                                                  'published one — the chain still descends from what the remote '
+                                                  'publishes, but the newer note was never pushed; push it FROM '
+                                                  'THIS CLONE with `git push origin refs/notes/substrate-memory`')
             elif rc_anc == 0:
-                mem_status, mem_reason = 'pass', 'hash-chain ok + anchor verified against the remote'
+                mem_status, mem_reason = 'warn', ('hash-chain ok but the anchor tier was not recognised — treat as '
+                                                  'UNVERIFIED and read the verifier output: '
+                                                  + (out_anc.strip().splitlines() or [''])[0][:160])
             elif 'NO ANCHOR' in out_anc:
                 mem_status, mem_reason = 'warn', 'hash-chain ok but not anchored — run `./manage.sh memory anchor`'
             elif 'ANCHOR NOT PUBLISHED' in out_anc:

@@ -1091,6 +1091,46 @@ sandbox backend, excluded from the rate, and measuring nothing. A task that can
 no longer build its own baseline must fail, not skip; failing that, read the
 skip lines on any release that changes a semantic the corpus depends on.
 
+### Two in-release auditor findings, and the BLOCK was mine
+
+The security auditor was pointed at the fourth item and told to attack it. It
+came back with a **BLOCK**, and it was right about the part that mattered.
+
+`substrate_doctor` selected its memory row by ELIMINATION: the catch-all for
+`rc == 0` produced *"hash-chain ok + anchor verified against the remote"*. I
+added a fifth passing tier and did not update the reader, so `LOCAL AHEAD` — an
+anchor that is explicitly **not** published — fell through to that catch-all and
+was reported as verified against the remote. The branch immediately above it
+carried a v3.8.52 comment saying rc == 0 no longer means one thing and that this
+row existed to avoid exactly that overclaim. I wrote a new tier past a comment
+warning me about new tiers. The remote row now requires the verifier to have said
+`verified against origin`; an unrecognised tier degrades to a warning.
+
+The auditor also called `LOCAL AHEAD` a detection regression, since the old code
+returned 1 for that state. Literally true, and I checked it rather than arguing:
+the attack it "caught" is *keep the prefix through the published anchor,
+refabricate the suffix, then advance the local note*. Dropping the last step —
+leaving the note alone — verifies with `anchor verified against origin` and
+always did. Reproduced both. So the blocked variant was the same attack plus a
+move that gains the attacker nothing and merely got them caught; blocking it
+protected nothing, and the new tier reports the unpublished state more honestly
+than the old pass did.
+
+The checklist auditor's ast-parsing walk found the shape test matched
+`subprocess.run` by literal name, so aliasing the import, or moving the call into
+a helper, would have made every call invisible and the test green over
+unsanitized code — and a stub function satisfying the "both functions present"
+assertion would pass vacuously. The test now pins the import shape, covers the
+other subprocess entry points, and requires each evidence function to actually
+contain a matched call.
+
+**Carry-forward rule, part 25 — adding a case to a producer is a change to every
+reader that classifies by elimination.** A reader whose strongest verdict is the
+`else` branch silently reclassifies every new state as its best outcome. Grep for
+who consumes a status before adding one, and make positive claims require
+positive evidence so the failure direction of an unknown value is a warning
+rather than an endorsement.
+
 ## (Optional) Reproduction
 
 In a disposable repo: `ln victim.txt AGENT_BUS.md` then

@@ -96,7 +96,26 @@ a refused push left a strict release green over a repo whose next
 re-verified with the profile's own check before the success line prints, and in
 strict a failed publication fails the release.
 
+Readers of those tiers must key on the tier they mean. `substrate_doctor`
+selected its strongest row — "anchor verified against the remote" — by
+ELIMINATION, so adding a fifth passing tier made it claim remote verification
+for an anchor that was never published. The remote row now requires the verifier
+to have said `verified against origin`, and an unrecognised tier degrades to a
+warning: a positive claim rests on positive evidence, never on the absence of
+known negatives.
+
 ## The limit
 
 A suffix rewrite after the anchor point stays undetectable by any unkeyed chain;
 the published anchor is what bounds it. Anchor at every release, and publish.
+
+This is worth stating concretely, because it is what `LOCAL AHEAD` does and does
+not give up. Keep the chain prefix through the published anchor, refabricate
+every event after it, and leave the note alone: that verifies, prints
+`verified against origin`, and always has. Advancing the local note as well used
+to be caught — but it is the same attack plus a step that gains nothing, so
+catching it protected nothing. Both are bounded the same way: by how recently
+the published anchor was advanced. `anchor` also re-checks membership immediately
+before writing the note and refuses if the chain moved under it; a replacement in
+the remaining instants before the write is caught by the next `verify`, not by
+that check.

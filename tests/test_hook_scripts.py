@@ -12748,24 +12748,72 @@ def test_every_remote_evidence_git_call_is_isolated_from_user_config() -> None:
     src = (SCRIPTS / "memory_log.py").read_text(encoding="utf-8")
     tree = ast.parse(src)
     evidence = {"_remote_anchor", "_has_origin"}
+    # The walker matches `subprocess.<entrypoint>` by name, so an aliased import
+    # would make every call invisible to it and the test would pass over
+    # unsanitized code. Pin the import shape instead of hoping (in-release
+    # checklist-auditor WARN).
+    for node in ast.walk(tree):
+        assert not (isinstance(node, ast.ImportFrom) and node.module == "subprocess"), \
+            "`from subprocess import ...` defeats the call matching below"
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                assert not (alias.name == "subprocess" and alias.asname), \
+                    "aliasing subprocess defeats the call matching below"
+
+    ENTRYPOINTS = ("run", "check_output", "check_call", "call", "Popen")
     unsanitized = []
-    seen = set()
+    seen, called_in = set(), {}
     for fn in ast.walk(tree):
-        if not isinstance(fn, ast.FunctionDef) or fn.name not in evidence:
+        if not isinstance(fn, ast.FunctionDef | ast.AsyncFunctionDef) or fn.name not in evidence:
             continue
         seen.add(fn.name)
         for node in ast.walk(fn):
             if not isinstance(node, ast.Call):
                 continue
             target = ast.unparse(node.func)
-            if target not in ("subprocess.run", "subprocess.check_output"):
+            if not any(target == f"subprocess.{e}" or target.endswith(f".{e}") and "subprocess" in target
+                       for e in ENTRYPOINTS):
                 continue
+            called_in[fn.name] = called_in.get(fn.name, 0) + 1
             envs = [kw for kw in node.keywords if kw.arg == "env"]
             if len(envs) != 1 or ast.unparse(envs[0].value) != "_evidence_env()":
-                unsanitized.append(f"{fn.name}:{node.lineno} {ast.unparse(node.func)}")
+                unsanitized.append(f"{fn.name}:{node.lineno} {target}")
     assert seen == evidence, f"evidence functions renamed or removed: {evidence - seen}"
+    # A stub named `_has_origin` that satisfies `seen` while the real logic moves
+    # elsewhere would otherwise pass with an empty finding list.
+    assert all(called_in.get(name) for name in evidence), (
+        "an evidence function contains no subprocess call — the guard cannot be "
+        f"vacuously satisfied: {called_in}"
+    )
     assert not unsanitized, (
         "remote-evidence git calls must run under _evidence_env(): " + "; ".join(unsanitized)
+    )
+
+
+def test_doctor_never_claims_remote_verification_without_positive_evidence() -> None:
+    """In-release security-auditor BLOCK, and it was mine.
+
+    substrate_doctor mapped the memory row by elimination: the CATCH-ALL for
+    rc==0 produced "anchor verified against the remote". Adding a fifth rc==0
+    tier (LOCAL AHEAD) therefore made the doctor claim remote verification for
+    an anchor that is not published at all — from state a local writer controls.
+    A positive claim must rest on positive evidence.
+    """
+    src = (SCRIPTS / "substrate_doctor.py").read_text(encoding="utf-8")
+    lines = src.splitlines()
+    claim = "hash-chain ok + anchor verified against the remote"
+    idx = [i for i, ln in enumerate(lines) if claim in ln]
+    assert len(idx) == 1, f"expected exactly one remote-verified claim, found {len(idx)}"
+    guard = next(lines[i] for i in range(idx[0], -1, -1)
+                 if lines[i].lstrip().startswith(("if ", "elif ")))
+    assert "verified against origin" in guard, (
+        "the remote-verified row must require the verifier to have SAID so, not "
+        f"merely that no local tier matched: {guard.strip()}"
+    )
+    catch_all = next(i for i, ln in enumerate(lines) if ln.strip() == "elif rc_anc == 0:")
+    body = "\n".join(lines[catch_all + 1:catch_all + 5])
+    assert "'pass'" not in body, (
+        "an UNRECOGNISED rc==0 anchor tier must not be reported as a pass: " + body
     )
 
 

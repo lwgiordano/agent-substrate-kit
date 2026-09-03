@@ -12681,3 +12681,107 @@ def test_release_gate_publishes_the_anchor_itself(tmp_path) -> None:
     assert "git notes --ref=substrate-memory add -f -m" in src, \
         "the fallback must carry the payload, since the ref does not travel"
     assert "FROM THIS CLONE" in src
+
+
+# --- round-35: the confirmation layer was built on writable inputs (v3.8.53) --
+# v3.8.52 added remote confirmation, monotonic anchoring, and a forced-break
+# event — and got all three wrong the same way: each trusted something the
+# adversary can write. A local tracking ref is not the remote; an ambient env
+# var is not the repo; an unchecked append is not a record.
+
+
+def test_memory_anchor_rejects_a_locally_spoofed_remote_note(tmp_path) -> None:
+    """round-35 P1: `_remote_anchor` ignored the fetch rc and then read
+    refs/notes/origin-substrate-memory — a LOCAL ref. One `git notes
+    --ref=origin-substrate-memory add` forged a full "verified against origin"
+    pass in strict against an origin publishing no note at all."""
+    td, g, m = _anchor_repo(tmp_path)
+    g("remote", "add", "origin", str(_origin_repo(tmp_path)))
+    (td / ".substrate").mkdir(exist_ok=True)
+    (td / ".substrate" / "config").write_text('SUBSTRATE_PROFILE="strict"\n', encoding="utf-8")
+    m("append", "--type", "note", "--message", "one")
+    if m("anchor").returncode != 0:
+        pytest.skip("git notes unavailable on this host")
+    commit = g("rev-parse", "HEAD").stdout.strip()
+    payload = g("notes", "--ref=substrate-memory", "show", commit).stdout.splitlines()[0]
+    # plant the forgery the old code would have believed
+    g("notes", "--ref=origin-substrate-memory", "add", "-f", "-m", payload, commit)
+    r = m("verify", "--anchor")
+    assert r.returncode == 1, "a locally planted ref must never confirm: " + r.stdout + r.stderr
+    assert "ANCHOR NOT PUBLISHED" in r.stderr
+    assert "verified against origin" not in r.stdout
+
+
+def test_memory_anchor_ignores_hostile_git_routing_env(tmp_path) -> None:
+    """round-35 P1: the anchor path's git calls ran under ambient env, so GIT_DIR
+    pointed at a fake repo (matching note, no origin) turned a real ANCHOR
+    CONFLICT into a clean "LOCAL (no remote)" pass. `_clean_env` already existed
+    for exactly this and five other call sites in the module used it."""
+    td, g, m = _anchor_repo(tmp_path)
+    bare = _origin_repo(tmp_path)
+    g("remote", "add", "origin", str(bare))
+    m("append", "--type", "note", "--message", "one")
+    if m("anchor").returncode != 0:
+        pytest.skip("git notes unavailable on this host")
+    g("push", "-q", "origin", "HEAD:refs/heads/main")
+    if g("push", "-q", "origin", "refs/notes/substrate-memory").returncode != 0:
+        pytest.skip("cannot push notes on this host")
+    m("append", "--type", "note", "--message", "two")
+    m("anchor")  # local note now ahead of what origin publishes
+    assert m("verify", "--anchor").returncode == 1, "baseline conflict must be detected"
+
+    fake = tmp_path / "fake"
+    fake.mkdir()
+    subprocess.run(["git", "init", "-q", str(fake)], check=True, capture_output=True, timeout=20)
+    for k, v in (("user.email", "t@example.invalid"), ("user.name", "t")):
+        subprocess.run(["git", "-C", str(fake), "config", k, v], check=True,
+                       capture_output=True, timeout=20)
+    (fake / "f").write_text("x\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(fake), "add", "."], check=True, capture_output=True, timeout=20)
+    subprocess.run(["git", "-C", str(fake), "commit", "-qm", "init"], check=True,
+                   capture_output=True, timeout=20)
+    fcommit = subprocess.run(["git", "-C", str(fake), "rev-parse", "HEAD"],
+                             capture_output=True, text=True, check=True, timeout=20).stdout.strip()
+    payload = g("notes", "--ref=substrate-memory", "show", "HEAD").stdout.splitlines()[0]
+    subprocess.run(["git", "-C", str(fake), "notes", "--ref=substrate-memory", "add",
+                    "-f", "-m", payload, fcommit], capture_output=True, timeout=20)
+
+    hostile = dict(os.environ)
+    hostile["SUBSTRATE_PROJECT_DIR"] = str(td)
+    hostile["GIT_DIR"] = str(fake / ".git")
+    r = subprocess.run(
+        [sys.executable, "-I", str(td / "scripts" / "memory_log.py"), "verify", "--anchor"],
+        cwd=str(td), env=hostile, capture_output=True, text=True, timeout=30,
+    )
+    assert r.returncode == 1, "hostile GIT_DIR must not hide the conflict: " + r.stdout + r.stderr
+
+
+def test_memory_anchor_force_aborts_when_evidence_cannot_be_written(tmp_path) -> None:
+    """round-35 P2: --force appended the `anchor-forced` event without checking
+    the result, then rewrote the note regardless. With the lock a FIFO the append
+    refused, no event was written, and the note moved anyway — the recorded
+    discontinuity was the whole justification for the override and it was
+    optional. Evidence is now a precondition."""
+    td, g, m = _anchor_repo(tmp_path)
+    m("append", "--type", "note", "--message", "one")
+    if m("anchor").returncode != 0:
+        pytest.skip("git notes unavailable on this host")
+    before = g("notes", "--ref=substrate-memory", "show", "HEAD").stdout.splitlines()[0]
+    _events_path(td).unlink()
+    m("append", "--type", "note", "--message", "replacement")
+    lock = td / ".substrate" / "memory" / ".lock"
+    if lock.exists():
+        lock.unlink()
+    try:
+        os.mkfifo(lock)
+    except (OSError, AttributeError):
+        pytest.skip("cannot create a FIFO on this host")
+    r = m("anchor", "--force")
+    assert r.returncode != 0, "force must abort when its evidence cannot be recorded"
+    lock.unlink()
+    after = g("notes", "--ref=substrate-memory", "show", "HEAD").stdout.splitlines()[0]
+    assert before == after, "the note must be UNTOUCHED when the override aborts"
+    assert m("verify", "--anchor").returncode == 1, "the mismatch must still stand"
+    # and the override still works once the log is healthy
+    assert m("anchor", "--force").returncode == 0
+    assert "anchor-forced" in _events_path(td).read_text(encoding="utf-8")

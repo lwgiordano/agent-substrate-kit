@@ -32,36 +32,40 @@ The anchor is a git note on a commit recording the chain head at that moment.
 recorded hash to be a MEMBER of the current, link-verified chain. Ordinary growth
 after anchoring therefore passes; a chain replaced wholesale by a different valid
 chain, or truncated past the anchor, fails; no anchor anywhere in the ancestry
-fails closed with the remedy named. Until v3.8.51 it demanded EQUALITY, so one
-append read as "rewritten", and the release gate hedged by requiring an anchor
-only when a note happened to exist — nothing ever wrote one, so the anchor failed
-open on absence. Found by being hit: a workspace restore swapped in an older valid
-chain and plain `verify` said OK. Strict now requires it unconditionally and every
-release writes one; the first strict release needs a one-time
-`./manage.sh memory anchor` as the human-established trust root. `substrate_doctor`
-delegates to the same verifier, so there is one definition of "anchor valid".
+fails closed with the remedy named. (It once demanded EQUALITY, so a single
+append read as "rewritten", and the gate hedged around that until absence failed
+open — found by being hit; see the postmortem.) Strict requires it
+unconditionally, every release writes one, and the first strict release needs a
+one-time `./manage.sh memory anchor` as the human-established trust root.
+`substrate_doctor` delegates to the same verifier, so "anchor valid" has one
+definition.
 
-A note is mutable state in the same writable repo as the log, so v3.8.51's
-detection was one command from being undone: replace the chain, re-run `anchor`,
-green again. Advancing is now MONOTONIC — a previous anchor's hash must still be
-in the chain, which growth satisfies and replace-then-re-anchor does not. A real
-reset uses `anchor --force`, which appends an `anchor-forced` event naming the
-abandoned hash, putting the discontinuity in the record rather than erasing it.
+A note is mutable state in the same writable repo as the log, so detection alone
+was undoable: replace the chain, re-run `anchor`, green again. Advancing is
+MONOTONIC — the previously anchored hash must still be in the chain, which growth
+satisfies and replace-then-re-anchor does not. A reset uses `anchor --force`,
+which first appends an `anchor-forced` event naming the abandoned hash and
+aborts, note untouched, if it cannot: the discontinuity is a precondition, not a
+side effect. Confirmation comes only from the remote in this process — an
+existence check on origin, then a checked fetch — never the local
+`origin-substrate-memory` ref, which any writer can forge; and anchor-path git
+calls run under the sanitized env, or `GIT_DIR` alone redirects them to a fake
+repo. Each earlier miss was one mistake: a trust layer reading inputs its
+adversary can write.
 
 `verify --anchor` reports which anchor it has, not one line for all:
 `verified against origin`; `ANCHOR CONFLICT` (fail) when the local note
-disagrees with the remote, which defeats a forced local rewrite; `LOCAL-ONLY`
-when an origin exists but lacks it; and `LOCAL (no remote)`, which PASSES,
-because the base tier is offline-complete and local is then the strongest
-anchor obtainable. Strict requires publication and fails closed without it.
+disagrees with the remote; `LOCAL-ONLY` when an origin exists but lacks it;
+and `LOCAL (no remote)`, which PASSES
+because the base tier is offline-complete, so local is then the strongest anchor
+obtainable. Strict requires publication and fails closed.
 
 Publish FROM THE PRODUCING CLONE. Git does not transport `refs/notes/*` on a
-normal push, clone, or fetch, so another clone never receives the ref and its
-push fails with `src refspec ... does not match any`; delegating that step is an
-impossible instruction. The release gate pushes the note itself and, when
-refused, prints the payload plus the `git notes --ref=substrate-memory add -f -m`
-command that recreates it anywhere — the payload travels in text where the ref
-does not. A suffix rewrite after the anchor stays undetectable by any unkeyed
+normal push, clone, or fetch, so another clone never receives it and cannot push
+it — delegating that step is an impossible instruction. The release gate pushes
+the note itself and, when refused, prints the payload plus the `git notes
+--ref=substrate-memory add -f -m` command that recreates it anywhere: the payload
+travels in text where the ref does not. A suffix rewrite after the anchor stays undetectable by any unkeyed
 chain; the published anchor bounds it.
 
 ## Verified skill evidence

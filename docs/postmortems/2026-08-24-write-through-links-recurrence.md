@@ -956,6 +956,60 @@ has what the action needs. A ref, a file, a credential, or a piece of state that
 never reaches them makes the instruction impossible, and an impossible instruction
 in a security remedy is worse than no instruction: it reads as covered.
 
+## Round 15 — v3.8.53 (round-35): the trust layer read what the attacker writes
+
+v3.8.52 closed the laundering path from round 34 by adding remote confirmation,
+monotonic anchoring, and a recorded forced-break event. Round 35 found all three
+were wrong, in the same way, and every one of them was mine, shipped in that
+release. All three reproduced here before acceptance.
+
+1. **The remote confirmation read a local ref.** `_remote_anchor` ignored the
+   fetch's return code and then read `refs/notes/origin-substrate-memory` — a
+   *local* ref any writer can create. One `git notes --ref=origin-substrate-memory
+   add` turned a correctly-failing strict check (rc 1) into `anchor verified
+   against origin` (rc 0), against an origin publishing no note at all.
+2. **The git calls ran under ambient env.** `GIT_DIR` pointed at a fake repo
+   carrying a matching note and no origin turned a genuine `ANCHOR CONFLICT` into
+   a clean `LOCAL (no remote)` pass. `_clean_env()` had existed since v3.8.10 for
+   precisely this, and five other call sites in the same module used it. I added
+   new git calls to that module and did not follow its own convention.
+3. **The evidence was optional.** `--force` appended its `anchor-forced` event
+   without checking the result, then rewrote the note regardless. With the lock a
+   FIFO, the event was never written, the note moved anyway, and verification went
+   green — the recorded discontinuity was the entire justification for permitting
+   the override.
+
+One sentence covers all three: **I built a trust layer out of inputs the adversary
+can write.** A local tracking ref is not the remote. An ambient environment
+variable is not the repository. An unchecked append is not a record. Each is the
+same unasked question in a different dimension, and the release that shipped them
+was the one where I had just congratulated myself for closing round 34.
+
+Fixes: confirmation now comes only from the remote *in this process* (an existence
+check against origin, then a forced fetch whose rc is checked, so a failed or
+absent fetch can never leave a planted ref readable); every git call in the anchor
+path runs under `_clean_env()` with `cwd=ROOT`; and `--force` aborts with the note
+untouched if its evidence append fails.
+
+A methodological note worth more than the fixes. My first discriminating check
+reverted the fetch-rc guard alone and **no test failed** — I nearly recorded that
+as "verified discriminating". The two P1a guards are redundant for this attack:
+either alone blocks it, so only reverting *both* fails the test. Redundancy is
+good defence and bad evidence, and a single-line revert that proves nothing looks
+exactly like one that proves something.
+
+**Carry-forward rule, part 21 — ask what writes each input a control trusts.**
+For every value a security check reads, name the parties who can write it. If the
+adversary is among them, it is not evidence, however authoritative its name
+sounds: `origin-*` refs, environment variables, and return values you discard all
+read as trustworthy and are not.
+
+**Carry-forward rule, part 22 — a redundant guard cannot be pinned by a
+single-line revert.** When two checks independently block the same attack,
+reverting either alone leaves the test green, which reads identically to a test
+that never discriminated. Revert the whole mechanism to prove the test catches the
+regression, and say which specific line each remaining test actually pins.
+
 ## (Optional) Reproduction
 
 In a disposable repo: `ln victim.txt AGENT_BUS.md` then

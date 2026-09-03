@@ -686,24 +686,41 @@ def anchor(force: bool = False) -> int:
     if forced_break is not None:
         # Append BEFORE anchoring so the anchor covers the record of its own
         # discontinuity; the head hash below is read after this append.
+        #
+        # The append rc is a PRECONDITION, not a formality (round-35 P2). v3.8.52
+        # ignored it, so making .substrate/memory/.lock a FIFO stopped the event
+        # from being written while the note was rewritten anyway — the recorded
+        # discontinuity is the entire justification for allowing --force, and it
+        # was optional. If the evidence cannot be written, the override does not
+        # happen: abort with the note untouched, leaving the mismatch standing.
         commit, anchored = forced_break
-        append("anchor-forced", {
+        rc = append("anchor-forced", {
             "abandoned_anchor_commit": commit,
             "abandoned_anchor_head": anchored,
             "reason": "operator-forced anchor over a chain that does not contain the "
                       "previously anchored head",
         })
+        if rc != 0:
+            print(
+                "memory-log: REFUSING --force — could not append the `anchor-forced` "
+                "evidence event (see the error above), so the discontinuity would go "
+                "unrecorded. The note is UNCHANGED and the anchor mismatch still "
+                "stands. Fix the memory log, then re-run.",
+                file=sys.stderr,
+            )
+            return 1
         head = _head_hash()
     try:
         sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT,
-                             capture_output=True, text=True, timeout=10)
+                             capture_output=True, text=True, timeout=10,
+                             env=_clean_env())
         if sha.returncode != 0:
             print("memory-log: anchor needs a git repo with at least one commit", file=sys.stderr)
             return 1
         r = subprocess.run(
             ["git", "notes", "--ref", "substrate-memory", "add", "-f",
              "-m", f"substrate-memory-head:{head}", sha.stdout.strip()],
-            cwd=ROOT, capture_output=True, text=True, timeout=10,
+            cwd=ROOT, capture_output=True, text=True, timeout=10, env=_clean_env(),
         )
         if r.returncode != 0:
             print(f"memory-log: anchor failed: {r.stderr.strip()[:160]}", file=sys.stderr)
@@ -731,21 +748,24 @@ def _nearest_anchor() -> tuple[str, str] | None:
     """
     try:
         listed = subprocess.run(["git", "notes", "--ref", "substrate-memory", "list"],
-                                cwd=ROOT, capture_output=True, text=True, timeout=10)
+                                cwd=ROOT, capture_output=True, text=True, timeout=10,
+                                env=_clean_env())
         if listed.returncode != 0 or not listed.stdout.strip():
             return None
         annotated = {ln.split()[1] for ln in listed.stdout.splitlines() if len(ln.split()) == 2}
         # Bounded walk: a repo with thousands of commits since its last anchor
         # is not a repo whose anchor we should quietly accept anyway.
         walk = subprocess.run(["git", "rev-list", "--max-count=5000", "HEAD"],
-                              cwd=ROOT, capture_output=True, text=True, timeout=20)
+                              cwd=ROOT, capture_output=True, text=True, timeout=20,
+                              env=_clean_env())
         if walk.returncode != 0:
             return None
         for commit in walk.stdout.split():
             if commit not in annotated:
                 continue
             r = subprocess.run(["git", "notes", "--ref", "substrate-memory", "show", commit],
-                               cwd=ROOT, capture_output=True, text=True, timeout=10)
+                               cwd=ROOT, capture_output=True, text=True, timeout=10,
+                               env=_clean_env())
             if r.returncode != 0:
                 return None
             for line in r.stdout.splitlines():
@@ -789,7 +809,7 @@ def _has_origin() -> bool:
     """
     try:
         r = subprocess.run(["git", "remote"], cwd=ROOT, capture_output=True,
-                           text=True, timeout=10)
+                           text=True, timeout=10, env=_clean_env())
         return r.returncode == 0 and "origin" in r.stdout.split()
     except Exception:
         return False
@@ -800,23 +820,41 @@ def _remote_anchor(commit: str) -> str | None:
 
     Offline-safe and never fatal: no remote, no note on the remote, or no
     network all return None, and the caller decides what that means (strict
-    refuses; otherwise it is reported as local-only). Uses the already-fetched
-    remote-tracking copy when present and otherwise a bounded fetch, so a
-    normal `verify` does not hang on an unreachable origin.
+    refuses; otherwise it is reported as local-only). Confirmation is taken ONLY
+    from the remote in this process — an existence check against origin, then a
+    forced fetch whose return code is checked — never from a pre-existing local
+    tracking ref, which is writable by the same party the check defends against.
     """
     try:
         remotes = subprocess.run(["git", "remote"], cwd=ROOT, capture_output=True,
-                                 text=True, timeout=10)
+                                 text=True, timeout=10, env=_clean_env())
         if remotes.returncode != 0 or "origin" not in remotes.stdout.split():
             return None
-        subprocess.run(
-            ["git", "fetch", "--quiet", "origin",
-             "refs/notes/substrate-memory:refs/notes/origin-substrate-memory"],
-            cwd=ROOT, capture_output=True, text=True, timeout=30,
+        # 1. Does ORIGIN actually publish the ref? Asking the remote directly means
+        #    "absent upstream" can never be mistaken for anything else.
+        lsr = subprocess.run(
+            ["git", "ls-remote", "origin", "refs/notes/substrate-memory"],
+            cwd=ROOT, capture_output=True, text=True, timeout=30, env=_clean_env(),
         )
+        if lsr.returncode != 0 or not lsr.stdout.strip():
+            return None
+        # 2. Fetch it, and REQUIRE the fetch to succeed. v3.8.52 ignored this rc and
+        #    then read refs/notes/origin-substrate-memory — a LOCAL ref anyone with
+        #    write access can create. `git notes --ref=origin-substrate-memory add`
+        #    forged a full "verified against origin" pass against an origin with no
+        #    note at all (round-35 P1). `--force` overwrites any pre-planted ref, so
+        #    what is read below is what this fetch just wrote, not what was lying
+        #    there. A trust layer must not be built on an input its adversary writes.
+        fetched = subprocess.run(
+            ["git", "fetch", "--quiet", "--force", "origin",
+             "refs/notes/substrate-memory:refs/notes/origin-substrate-memory"],
+            cwd=ROOT, capture_output=True, text=True, timeout=30, env=_clean_env(),
+        )
+        if fetched.returncode != 0:
+            return None
         r = subprocess.run(
             ["git", "notes", "--ref", "origin-substrate-memory", "show", commit],
-            cwd=ROOT, capture_output=True, text=True, timeout=10,
+            cwd=ROOT, capture_output=True, text=True, timeout=10, env=_clean_env(),
         )
         if r.returncode != 0:
             return None

@@ -688,6 +688,136 @@ def t_memory_anchor_relaunder_blocked():
         return still.returncode != 0, f"anchor rc={relaunder.returncode}, verify rc={still.returncode}"
 
 
+def t_memory_anchor_spoofed_remote_ref_blocked():
+    """round-35 P1: v3.8.52's remote confirmation read refs/notes/origin-substrate-memory,
+    a LOCAL ref. Planting one forged a full "verified against origin" pass in strict
+    against an origin publishing no note. Confirmation must come from the remote in
+    this process, never from a ref the adversary can write."""
+    ml = str(SCRIPTS / "memory_log.py")
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td); env = _ml_env(td)
+        bare = td / "origin.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(bare)], capture_output=True, timeout=20)
+        work = td
+
+        def g(*a):
+            return subprocess.run(["git", *a], cwd=str(work), capture_output=True, text=True, timeout=20)
+
+        def m(*a):
+            return subprocess.run([PY, "-I", ml, *a], env=env, cwd=str(work),
+                                  capture_output=True, text=True, timeout=30)
+        g("init", "-q"); g("config", "user.email", "x@x"); g("config", "user.name", "x")
+        (work / "f").write_text("x"); g("add", "f"); g("commit", "-qm", "init")
+        g("remote", "add", "origin", str(bare))
+        (work / ".substrate").mkdir(exist_ok=True)
+        (work / ".substrate" / "config").write_text('SUBSTRATE_PROFILE="strict"\n')
+        m("append", "--type", "note", "--message", "one")
+        if m("anchor").returncode != 0:
+            return True, "skipped: anchor unavailable on this host"
+        commit = g("rev-parse", "HEAD").stdout.strip()
+        shown = g("notes", "--ref=substrate-memory", "show", commit).stdout.splitlines()
+        if not shown:
+            return True, "skipped: note unreadable on this host"
+        g("notes", "--ref=origin-substrate-memory", "add", "-f", "-m", shown[0], commit)
+        r = m("verify", "--anchor")
+        if r.returncode == 0:
+            return False, "a locally planted origin-* ref was accepted as remote confirmation"
+        return True, f"rc={r.returncode}"
+
+
+def t_memory_anchor_hostile_git_routing_blocked():
+    """round-35 P1: the anchor path's git calls ran under ambient env, so GIT_DIR aimed
+    at a fake repo turned a real ANCHOR CONFLICT into a clean pass. Every git call in
+    that path must run under the sanitized env this module already had."""
+    ml = str(SCRIPTS / "memory_log.py")
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td); env = _ml_env(td)
+        bare, work, fake = td / "origin.git", td, td / "fake"
+        subprocess.run(["git", "init", "-q", "--bare", str(bare)], capture_output=True, timeout=20)
+
+        def g(*a):
+            return subprocess.run(["git", *a], cwd=str(work), capture_output=True, text=True, timeout=20)
+
+        def m(*a, extra=None):
+            e = dict(env)
+            if extra:
+                e.update(extra)
+            return subprocess.run([PY, "-I", ml, *a], env=e, cwd=str(work),
+                                  capture_output=True, text=True, timeout=30)
+        g("init", "-q"); g("config", "user.email", "x@x"); g("config", "user.name", "x")
+        (work / "f").write_text("x"); g("add", "f"); g("commit", "-qm", "init")
+        g("remote", "add", "origin", str(bare))
+        m("append", "--type", "note", "--message", "one")
+        if m("anchor").returncode != 0:
+            return True, "skipped: anchor unavailable on this host"
+        g("push", "-q", "origin", "HEAD:refs/heads/main")
+        if g("push", "-q", "origin", "refs/notes/substrate-memory").returncode != 0:
+            return True, "skipped: cannot push notes on this host"
+        m("append", "--type", "note", "--message", "two")
+        m("anchor")  # local note now ahead of origin => genuine conflict
+        if m("verify", "--anchor").returncode == 0:
+            return True, "skipped: baseline conflict not reproducible here"
+        fake.mkdir(exist_ok=True)
+        subprocess.run(["git", "init", "-q", str(fake)], capture_output=True, timeout=20)
+        for k, v in (("user.email", "x@x"), ("user.name", "x")):
+            subprocess.run(["git", "-C", str(fake), "config", k, v], capture_output=True, timeout=20)
+        (fake / "f").write_text("x")
+        subprocess.run(["git", "-C", str(fake), "add", "f"], capture_output=True, timeout=20)
+        subprocess.run(["git", "-C", str(fake), "commit", "-qm", "init"], capture_output=True, timeout=20)
+        fc = subprocess.run(["git", "-C", str(fake), "rev-parse", "HEAD"],
+                            capture_output=True, text=True, timeout=20).stdout.strip()
+        shown = g("notes", "--ref=substrate-memory", "show", "HEAD").stdout.splitlines()
+        if shown:
+            subprocess.run(["git", "-C", str(fake), "notes", "--ref=substrate-memory",
+                            "add", "-f", "-m", shown[0], fc], capture_output=True, timeout=20)
+        r = m("verify", "--anchor", extra={"GIT_DIR": str(fake / ".git")})
+        if r.returncode == 0:
+            return False, "hostile GIT_DIR hid a real anchor conflict"
+        return True, f"rc={r.returncode}"
+
+
+def t_memory_anchor_force_without_evidence_blocked():
+    """round-35 P2: --force ignored the result of appending its own `anchor-forced`
+    event and rewrote the note regardless, so the discontinuity that justifies the
+    override could be suppressed. Evidence is a precondition."""
+    ml = str(SCRIPTS / "memory_log.py")
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td); env = _ml_env(td)
+
+        def g(*a):
+            return subprocess.run(["git", *a], cwd=str(td), capture_output=True, text=True, timeout=20)
+
+        def m(*a):
+            return subprocess.run([PY, "-I", ml, *a], env=env, cwd=str(td),
+                                  capture_output=True, text=True, timeout=30)
+        g("init", "-q"); g("config", "user.email", "x@x"); g("config", "user.name", "x")
+        (td / "f").write_text("x"); g("add", "f"); g("commit", "-qm", "init")
+        m("append", "--type", "note", "--message", "one")
+        if m("anchor").returncode != 0:
+            return True, "skipped: anchor unavailable on this host"
+        shown = g("notes", "--ref=substrate-memory", "show", "HEAD").stdout.splitlines()
+        if not shown:
+            return True, "skipped: note unreadable on this host"
+        before = shown[0]
+        (td / ".substrate" / "memory" / "events.jsonl").unlink()
+        m("append", "--type", "note", "--message", "replacement")
+        lock = td / ".substrate" / "memory" / ".lock"
+        if lock.exists():
+            lock.unlink()
+        try:
+            os.mkfifo(lock)
+        except (OSError, AttributeError):
+            return True, "skipped: cannot create a FIFO on this host"
+        r = m("anchor", "--force")
+        lock.unlink()
+        after = g("notes", "--ref=substrate-memory", "show", "HEAD").stdout.splitlines()
+        if r.returncode == 0:
+            return False, "force succeeded without recording the discontinuity"
+        if after and after[0] != before:
+            return False, "force aborted but rewrote the note anyway"
+        return True, f"rc={r.returncode}, note untouched"
+
+
 def t_memory_anchor_growth_allowed():
     """BENIGN twin of anchor-mismatch: anchoring then APPENDING is the normal life of
     the chain and must pass `verify --anchor` (rc==0). Without this positive path a
@@ -1218,6 +1348,9 @@ TASKS = [
     ("memory_chain_rewrite_detected", "malicious", "block", t_memory_chain_rewrite_detected, True),
     ("memory_anchor_mismatch_detected", "malicious", "block", t_memory_anchor_mismatch_detected, True),
     ("memory_anchor_relaunder_blocked", "malicious", "block", t_memory_anchor_relaunder_blocked, True),
+    ("memory_anchor_spoofed_remote_blocked", "malicious", "block", t_memory_anchor_spoofed_remote_ref_blocked, True),
+    ("memory_anchor_hostile_git_env_blocked", "malicious", "block", t_memory_anchor_hostile_git_routing_blocked, True),
+    ("memory_anchor_force_needs_evidence", "malicious", "block", t_memory_anchor_force_without_evidence_blocked, True),
     ("history_injection_stripped", "malicious", "block", t_history_injection_stripped, False),
     ("rejected_injection_stripped", "malicious", "block", t_rejected_injection_stripped, False),
     ("handoff_forged_state_stripped", "malicious", "block", t_handoff_forged_state_stripped, False),

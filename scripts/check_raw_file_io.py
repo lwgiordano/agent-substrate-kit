@@ -216,7 +216,10 @@ ALLOWLIST: dict[str, str] = {
         "under review, not agent-writable state. The second site (v3.8.54) reads "
         "release_gate.sh so the round-36 P1b eval can execute the REAL gate tail "
         "rather than a paraphrase of it; same class, same CODEOWNED + hash-pinned "
-        "source, and the bytes are executed in a fresh temp fixture", 2),
+        "source, and the bytes are executed in a fresh temp fixture. The third "
+        "(v3.8.55) is that read moved into the shared _release_gate_tail builder, "
+        "which both gate tasks now use so neither can hand-build a tail that exits "
+        "on an unbound variable and scores as a block", 3),
     "run_substrate_evals.py:src.read_text":
         "stages a copy of the kit's OWN script source into a fresh temp fixture; "
         "the source is code under review (and CODEOWNED + hash-pinned), not "

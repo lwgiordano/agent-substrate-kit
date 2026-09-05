@@ -12844,21 +12844,163 @@ def test_release_gate_fails_when_the_fresh_anchor_cannot_be_published(tmp_path) 
     hook.chmod(0o755)
     m("append", "--type", "note", "--message", "two")  # this "release" advances the chain
 
-    src = (SCRIPTS / "release_gate.sh").read_text(encoding="utf-8")
-    marker = "# Re-tie the memory chain"
-    assert marker in src, "release_gate.sh lost the marker this test splits on"
-    tail = td / "gate_tail.sh"
-    tail.write_text(
-        'set -euo pipefail\nSUBSTRATE_PROFILE=strict\n'
-        'run_py(){ "%s" -I "$@"; }\n' % sys.executable + src[src.index(marker):],
-        encoding="utf-8",
-    )
-    r = subprocess.run(["bash", str(tail)], cwd=str(td),
-                       env={**os.environ, "SUBSTRATE_PROJECT_DIR": str(td)},
+    r = subprocess.run(["bash", str(_gate_tail(td, profile_line='SUBSTRATE_PROFILE=strict'))],
+                       cwd=str(td), env={**os.environ, "SUBSTRATE_PROJECT_DIR": str(td)},
                        capture_output=True, text=True, timeout=120)
     assert r.returncode != 0, \
         "a strict release that cannot publish its anchor must fail: " + r.stdout + r.stderr
     assert "release-gate: passed" not in r.stdout
+    # Assert the REASON, not just the exit code. This test built its own tail until
+    # v3.8.55 added two variables to the top of the gate; under `set -u` the
+    # unbound reference alone exited 1, so it would have kept passing over an
+    # anchor path that no longer ran at all. A nonzero rc is not evidence of the
+    # failure you meant unless something ties it to that failure.
+    assert "ANCHOR NOT PUBLISHED" in r.stderr, \
+        "the failure must be the unpublished anchor, not an unrelated error: " + r.stdout + r.stderr
+
+
+def _gate_tail(td, profile_line="SUBSTRATE_PROFILE=standard", start_fingerprint=None):
+    """The REAL tail of scripts/release_gate.sh, split at its own marker comment and
+    otherwise unmodified, wrapped with the two definitions it inherits from the top
+    of the file. `profile_line` is deliberately settable so a test can supply the
+    STALE value the shell would be carrying."""
+    src = (SCRIPTS / "release_gate.sh").read_text(encoding="utf-8")
+    marker = "# Re-tie the memory chain"
+    assert marker in src, "release_gate.sh lost the marker this test splits on"
+    fp = ('_substrate_config_fingerprint(){ %s -c '
+          "'import hashlib,pathlib,sys;p=pathlib.Path(\".substrate/config\");"
+          'sys.stdout.write(hashlib.sha256(p.read_bytes()).hexdigest() if p.is_file()'
+          ' else "nonregular" if p.exists() else "absent")\'; }\n'
+          % sys.executable)
+    tail = td / "gate_tail.sh"
+    tail.write_text(
+        'set -euo pipefail\n' + profile_line + '\n'
+        + 'run_py(){ "%s" -I "$@"; }\n' % sys.executable
+        + fp
+        + '_SUBSTRATE_CONFIG_AT_START=%s\n' % (
+            start_fingerprint if start_fingerprint is not None else '"$(_substrate_config_fingerprint)"')
+        + src[src.index(marker):],
+        encoding="utf-8",
+    )
+    return tail
+
+
+def test_release_gate_end_state_check_reads_the_live_profile(tmp_path) -> None:
+    """round-37 P1: the end-state re-check branched on the SUBSTRATE_PROFILE loaded
+    at gate START, so a config raised to strict DURING the run was certified by the
+    standard-tier check — the gate re-read the anchor but not the policy, and judged
+    the end state by a rule from a different moment.
+
+    The fix is not a fresher read of the shell variable but not asking the shell:
+    `verify --anchor` decides strictness inside memory_log from the live config at
+    the instant it runs. The stale value is supplied here on purpose.
+    """
+    td, g, m, bare, commit = _published_anchor_repo(tmp_path)
+    hook = bare / "hooks" / "pre-receive"
+    hook.write_text('#!/bin/sh\nwhile read _o _n ref; do\n'
+                    '  case "$ref" in refs/notes/*) exit 1;; esac\ndone\nexit 0\n', encoding="utf-8")
+    hook.chmod(0o755)
+    m("append", "--type", "note", "--message", "two")
+    # LIVE config is strict; the shell still carries what it loaded at start.
+    (td / ".substrate" / "config").write_text('SUBSTRATE_PROFILE="strict"\n', encoding="utf-8")
+
+    r = subprocess.run(["bash", str(_gate_tail(td))], cwd=str(td),
+                       env={**os.environ, "SUBSTRATE_PROJECT_DIR": str(td)},
+                       capture_output=True, text=True, timeout=120)
+    assert r.returncode != 0, \
+        "a strict LIVE config must fail the release even when the shell says standard: " + r.stdout + r.stderr
+    assert "release-gate: passed" not in r.stdout
+
+
+def test_release_gate_refuses_success_when_the_config_changes_mid_run(tmp_path) -> None:
+    """round-37, the general form: the gate certifies ONE configuration.
+
+    Every check reads policy from `.substrate/config`, so if that file changes while
+    the gate runs, the results above were produced under a policy the repository no
+    longer has. Success would be a claim about a configuration that no longer exists,
+    so the gate refuses instead of reporting.
+    """
+    td, g, m = _anchor_repo(tmp_path)
+    (td / ".substrate").mkdir(exist_ok=True)
+    (td / ".substrate" / "config").write_text('SUBSTRATE_PROFILE="standard"\n', encoding="utf-8")
+    m("append", "--type", "note", "--message", "one")
+    if m("anchor").returncode != 0:
+        pytest.skip("git notes unavailable on this host")
+
+    # Baseline: a matching fingerprint reaches the success line.
+    ok = subprocess.run(["bash", str(_gate_tail(td))], cwd=str(td),
+                        env={**os.environ, "SUBSTRATE_PROJECT_DIR": str(td)},
+                        capture_output=True, text=True, timeout=120)
+    assert ok.returncode == 0, ok.stdout + ok.stderr
+    assert "release-gate: passed" in ok.stdout
+
+    # A fingerprint from before an edit: the config moved under the run.
+    drifted = subprocess.run(["bash", str(_gate_tail(td, start_fingerprint='"stale-fingerprint"'))],
+                             cwd=str(td), env={**os.environ, "SUBSTRATE_PROJECT_DIR": str(td)},
+                             capture_output=True, text=True, timeout=120)
+    assert drifted.returncode != 0, drifted.stdout + drifted.stderr
+    assert "release-gate: passed" not in drifted.stdout
+    assert "changed while the gate ran" in drifted.stderr
+
+
+def test_release_gate_distinguishes_a_failed_fingerprint_from_config_drift(tmp_path) -> None:
+    """A fingerprint the tool could not compute is not evidence that the file changed.
+
+    Reporting it as drift would send the operator hunting an edit nobody made — the
+    same "a failure is not the failure you meant" mistake this release fixes in two
+    evals. Both outcomes still refuse; only the stated cause differs.
+    """
+    td, g, m = _anchor_repo(tmp_path)
+    (td / ".substrate").mkdir(exist_ok=True)
+    (td / ".substrate" / "config").write_text('SUBSTRATE_PROFILE="standard"\n', encoding="utf-8")
+    m("append", "--type", "note", "--message", "one")
+    if m("anchor").returncode != 0:
+        pytest.skip("git notes unavailable on this host")
+
+    # A valid start value, then break the tool AFTER it is captured, so only the
+    # end-of-run call fails and the config itself is never touched.
+    tail = _gate_tail(td, start_fingerprint='"deadbeef"')
+    text = tail.read_text(encoding="utf-8").replace(
+        '_SUBSTRATE_CONFIG_AT_START="deadbeef"',
+        '_SUBSTRATE_CONFIG_AT_START="deadbeef"\n_substrate_config_fingerprint(){ return 3; }', 1)
+    assert "return 3" in text, "the fingerprint override was not injected"
+    tail.write_text(text, encoding="utf-8")
+    r = subprocess.run(["bash", str(tail)], cwd=str(td),
+                       env={**os.environ, "SUBSTRATE_PROJECT_DIR": str(td)},
+                       capture_output=True, text=True, timeout=120)
+    assert r.returncode != 0, r.stdout + r.stderr
+    assert "release-gate: passed" not in r.stdout
+    assert "NOT a drift finding" in r.stderr, \
+        "an unverifiable fingerprint must not be reported as a changed config: " + r.stderr
+    assert "changed while the gate ran" not in r.stderr
+
+
+def test_release_gate_config_fingerprint_separates_absent_from_non_regular() -> None:
+    """A config swapped for a FIFO or a directory is drift even where none existed.
+
+    Folding both into one "absent" bucket made that substitution invisible whenever
+    the file was absent at the start of the run.
+    """
+    src = (SCRIPTS / "release_gate.sh").read_text(encoding="utf-8")
+    fn = src[src.index("_substrate_config_fingerprint()"):src.index("_SUBSTRATE_CONFIG_AT_START=")]
+    assert '"nonregular"' in fn and '"absent"' in fn, \
+        "absent and non-regular must be distinct fingerprint values: " + fn
+    assert "p.is_file()" in fn, "the regular-file test is what separates them"
+    assert "|| echo" not in fn, \
+        "a tool failure must not be mapped to a fingerprint VALUE; it must return nonzero"
+
+
+def test_release_gate_fingerprints_the_config_before_any_validator() -> None:
+    """The fingerprint must be taken BEFORE the checks it vouches for. Captured after
+    them, it would agree with itself no matter when the file changed."""
+    src = (SCRIPTS / "release_gate.sh").read_text(encoding="utf-8")
+    assert "_SUBSTRATE_CONFIG_AT_START=" in src, "the start-of-run config fingerprint is gone"
+    assert src.index("_SUBSTRATE_CONFIG_AT_START=") < src.index("check_import_shadowing.py"), \
+        "the config must be fingerprinted before the first validator runs"
+    assert src.index("_SUBSTRATE_CONFIG_AT_START") < src.index('echo "release-gate: passed"')
+    end_block = src[src.index("==> Memory anchor re-check"):src.index('echo "release-gate: passed"')]
+    assert "$SUBSTRATE_PROFILE" not in end_block, \
+        "the end-state check must not branch on the profile loaded at process start"
 
 
 def test_memory_anchor_force_binds_the_head_to_its_evidence_append(tmp_path) -> None:

@@ -1,6 +1,6 @@
 ---
 purpose: Behavioral evals, deterministic validators, audits, and assurance limits.
-last_human_reviewed: 2026-09-03
+last_human_reviewed: 2026-09-05
 covers:
   - manage.sh
   - extras/calibrate_diy_ultrareview.py
@@ -112,6 +112,12 @@ fails fast inside the per-subprocess cap, and a `TimeoutExpired` is reported as
 a failed block rather than allowed to wedge the run. Evidence-suppression
 attacks are in the malicious corpus for the same reason a bypass is: an eval
 covers the gate that reads forged evidence, not only the gate that writes it.
+
+A NONZERO exit is not evidence of the failure a task means: by exit code alone, a
+missing file, a typo, or an unbound variable scores as a block. Two release-gate
+tasks did exactly that — one hand-built a copy of a shell tail referencing a
+variable the real file defines above the split, the other ran a script never
+staged into its fixture. Assert the REASON the refusal prints.
 
 A task that SKIPS has left the denominator. Skips exist for absent backends, so
 a task whose setup silently stops reproducing its own baseline reports the same

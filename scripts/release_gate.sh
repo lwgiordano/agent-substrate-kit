@@ -24,6 +24,25 @@ run_tool(){ local t="$1"; shift || true; local -a c
 # Configured LINT_CMD/TYPECHECK_CMD/TEST_CMD are executable PROJECT code → contained too.
 run_lang(){ local label="$1" cmd="$2"; [ -z "$cmd" ] && return 0; echo "==> $label: $cmd"
   if [ "${SUBSTRATE_SANDBOX:-0}" = "1" ]; then scripts/sandbox_exec.sh bash -c "$cmd"; else bash -c "$cmd"; fi; }
+# The gate certifies ONE configuration, and every check below reads policy from it.
+# Fingerprint it NOW (round-37 P1) so the success line at the end can refuse if the
+# file changed underneath the run. Absent and unreadable are distinct VALUES here,
+# not skips: a config that appears or disappears mid-run is drift like any other.
+# ABSENT and NON-REGULAR are distinct values, not one bucket: a config replaced by
+# a FIFO or a directory is drift even where none existed at start. Tool failure is
+# NOT a value at all — this returns nonzero and the caller says so, rather than
+# reporting a fingerprint it could not compute as a changed file.
+_substrate_config_fingerprint(){
+  run_py -c 'import hashlib, pathlib, sys
+p = pathlib.Path(".substrate/config")
+sys.stdout.write(hashlib.sha256(p.read_bytes()).hexdigest() if p.is_file()
+                 else "nonregular" if p.exists() else "absent")' 2>/dev/null
+}
+_SUBSTRATE_CONFIG_AT_START="$(_substrate_config_fingerprint)" || {
+  echo "release-gate: cannot fingerprint .substrate/config — refusing to start a run" >&2
+  echo "  whose configuration it could not pin. Fix the environment and re-run." >&2
+  exit 1
+}
 echo "==> Import shadowing"; run_py scripts/check_import_shadowing.py  # no repo-local stdlib shadow can subvert hash validators
 echo "==> Doctor"; run_py scripts/substrate_doctor.py
 echo "==> Manifest"; run_py scripts/update_manifest.py --check
@@ -110,16 +129,38 @@ if [ -f .substrate/memory/events.jsonl ]; then
   # repo it left behind failed `verify --anchor` outright — reproduced with an
   # origin that rejects refs/notes/*, and lived through in this kit's own
   # v3.8.53 release, which printed "passed" with the push refused and was
-  # reported as green. Re-run the SAME verification the profile demands, after
-  # the anchor is written and published, and let `set -e` make its result the
-  # release's result. In strict a failed publication now fails the release; in
-  # the offline-complete base tiers the unpublished anchor is not an error and
-  # the plain chain check is what applies.
+  # reported as green.
+  #
+  # v3.8.54 branched here on "$SUBSTRATE_PROFILE" — the value `load_substrate_config`
+  # read at process START. So a config raised to strict DURING the run was certified
+  # by the standard-tier check: the gate re-read the anchor but not the policy, and
+  # the end state it certified was judged by a rule from a different moment (round-37
+  # P1, reproduced). The fix is not to re-read the variable here but to stop asking
+  # the shell at all: `verify --anchor` decides strictness inside memory_log, from
+  # the LIVE .substrate/config, at the instant it runs. Base tiers still pass with an
+  # unpublished anchor (LOCAL-ONLY, LOCAL AHEAD, LOCAL (no remote) are all rc 0), so
+  # this is unconditional without breaking the offline-complete promise.
   echo "==> Memory anchor re-check (end state)"
-  if [ "$SUBSTRATE_PROFILE" = "strict" ]; then
-    run_py scripts/memory_log.py verify --anchor
-  else
-    run_py scripts/memory_log.py verify
-  fi
+  run_py scripts/memory_log.py verify --anchor
+fi
+# The gate certifies ONE configuration. If .substrate/config changed while the gate
+# ran, every result above was produced under a policy that is no longer the
+# repository's, so success would be a claim about a config that no longer exists.
+# Refuse rather than report; a re-run under the settled config is the remedy.
+# Report the RIGHT cause. A fingerprint the tool could not compute is not evidence
+# that the file changed, and saying it changed would send the operator looking for
+# an edit nobody made — the same "a failure is not the failure you meant" mistake
+# this release fixes in two evals.
+if ! _end_config_fp="$(_substrate_config_fingerprint)"; then
+  echo "release-gate: REFUSING to report success — could not re-read .substrate/config" >&2
+  echo "  to confirm it is unchanged. This is NOT a drift finding: the fingerprint" >&2
+  echo "  itself failed, so the run is unverifiable either way. Re-run the gate." >&2
+  exit 1
+fi
+if [ "$_end_config_fp" != "$_SUBSTRATE_CONFIG_AT_START" ]; then
+  echo "release-gate: REFUSING to report success — .substrate/config changed while the gate ran." >&2
+  echo "  Everything above was checked under the configuration loaded at start, so this" >&2
+  echo "  run cannot certify the configuration the repository now has. Re-run the gate." >&2
+  exit 1
 fi
 echo "release-gate: passed"

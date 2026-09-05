@@ -1,6 +1,6 @@
 ---
 purpose: Release packaging, signing, manifests, and artifact verification.
-last_human_reviewed: 2026-09-03
+last_human_reviewed: 2026-09-05
 covers:
   - manage.sh
   - package_release.sh
@@ -54,10 +54,20 @@ human or another agent to reproduce the decision.
 The gate also verifies the tamper-evident memory chain, and in the strict
 profile requires its git-note anchor unconditionally — an absent anchor is a
 named failure, never a silent downgrade to the unanchored check (that hedge was
-the v3.8.50 self-audit's P1: a trust anchor failing open on absence). Once the
-whole gate has passed, every profile's release writes a fresh anchor for that
+the v3.8.50 self-audit's P1: a trust anchor failing open on absence). Once every
+other gate has passed, each profile's release writes a fresh anchor for that
 commit, so each release re-ties the chain to a known-good state; the first
 strict release in a repo needs a one-time `./manage.sh memory anchor`.
+
+The success line comes AFTER that, not before. The gate certifies the state it
+LEAVES: the anchor is written, published, and re-verified, and only then is the
+release called passed. The re-verification asks no shell variable — branching on
+the profile loaded at gate start let a config raised to strict mid-run be
+certified by the standard-tier check, so `verify --anchor` runs unconditionally
+and reads the live profile itself. The gate also pins `.substrate/config` with a
+fingerprint taken before its first validator and refuses to announce success if
+that file changed while it ran: a run cannot certify a configuration the
+repository no longer has. See [the memory trust anchor](08_memory_anchor.md).
 
 The gate PUBLISHES that anchor itself rather than delegating it. Git does not
 transport `refs/notes/*` on a normal push, clone, or fetch, so a different clone

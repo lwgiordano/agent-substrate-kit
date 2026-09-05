@@ -1131,6 +1131,73 @@ who consumes a status before adding one, and make positive claims require
 positive evidence so the failure direction of an unknown value is a warning
 rather than an endorsement.
 
+## Round 17 — v3.8.55 (round-37): the policy was read at a different moment than the state
+
+One finding, and it is the v3.8.54 fix judged by its own rule. The end-state
+re-check I added branched on `"$SUBSTRATE_PROFILE"` — the value
+`load_substrate_config` read at gate START. A `.substrate/config` raised from
+standard to strict *during* the run was therefore certified by the standard-tier
+check: the gate re-read the anchor but not the policy. Reproduced with an origin
+rejecting `refs/notes/*` and a live strict config: `tail_rc=0`,
+`release-gate: passed`, and an immediate `verify --anchor` returning 1.
+
+I fixed round 36 by re-reading the *state* and left the *rule* stale. "Certify
+the end state" is only half the sentence; the other half is "under the policy in
+force at that moment."
+
+The fix is not a fresher read of the shell variable. `verify --anchor` now runs
+unconditionally, because it decides strictness inside `memory_log` from the live
+config at the instant it runs — the base tiers all pass with an unpublished
+anchor, so unconditional costs the offline-complete promise nothing. Asking the
+shell at all was the defect. The gate additionally fingerprints
+`.substrate/config` before its first validator and refuses to report success if
+that file changed underneath the run, which covers every other field the same way
+rather than the one that was reported.
+
+### The reason assertion earned its keep in the first minute
+
+While hardening the round-36 regression I noticed it had started passing for the
+wrong reason: v3.8.55 added two variables above the split point, so a hand-built
+tail exited 1 on an *unbound variable* under `set -u` — nonzero, and therefore
+indistinguishable from the block under test refusing. I added "assert the reason,
+not the exit code" to that test and to its eval twin.
+
+The eval twin then failed immediately, and had been vacuous since the day I wrote
+it: `scripts/memory_log.py` was never staged into its fixture, so the tail died
+with *can't open file*, exited nonzero, and scored as a block. **A task I added in
+v3.8.54 to prove the gate refuses had never once exercised the gate.** Both tasks
+now stage what they run and assert on `ANCHOR NOT PUBLISHED`.
+
+### Two in-release auditor WARNs, both about reporting the wrong cause
+
+The security auditor confirmed the tier analysis I most wanted attacked — no
+profile/tier combination now fails that previously passed, because `anchor` runs
+unconditionally just above and the base tiers pass with an unpublished one — and
+returned two WARNs worth fixing.
+
+The fingerprint helper mapped ANY failure of its own tool to the literal
+`"unreadable"`, so a transient error at the end of a run would have been reported
+as *"the config changed while the gate ran"*: a refusal for a real reason under a
+false name, sending the operator to look for an edit nobody made. That is the same
+mistake as scoring an unbound variable as a block, one layer over. A failed
+fingerprint is now not a value at all — the helper returns nonzero and the gate
+says the run is unverifiable rather than accusing the file.
+
+The second: `absent` and `non-regular` were one bucket, so a config swapped for a
+FIFO or a directory was invisible whenever none existed at start. They are
+distinct fingerprints now.
+
+**Carry-forward rule, part 26 — when you re-read state to fix a stale check, ask
+whether the RULE is stale too.** A control has two inputs: the state it inspects
+and the policy it applies. Refreshing one and not the other leaves the same defect
+with a smaller window. Prefer pushing the decision into the component that reads
+policy at call time over caching a copy of the policy in the caller.
+
+**Carry-forward rule, part 27 — a nonzero exit is not evidence of the failure you
+meant.** Any test or eval that asserts refusal by exit code alone scores a missing
+file, a typo, or an unbound variable as a pass. Assert the message the refusal
+prints. Two of these were live here at once, and one had never tested anything.
+
 ## (Optional) Reproduction
 
 In a disposable repo: `ln victim.txt AGENT_BUS.md` then

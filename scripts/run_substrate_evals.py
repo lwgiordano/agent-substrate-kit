@@ -900,6 +900,79 @@ def t_memory_anchor_hostile_user_config_blocked():
         return True, ", ".join(results)
 
 
+def _release_gate_tail(repo, profile_line="SUBSTRATE_PROFILE=standard"):
+    """The REAL tail of scripts/release_gate.sh from its marker comment, wrapped with
+    the definitions it inherits from the top of the file.
+
+    Those wrappers are not decoration. v3.8.55 added `_SUBSTRATE_CONFIG_AT_START` and
+    its fingerprint helper above the marker; a tail built without them exits nonzero
+    on an UNBOUND VARIABLE under `set -u`, which looks exactly like the block under
+    test refusing. A task that cannot tell those apart measures nothing.
+    """
+    gate = (SCRIPTS / "release_gate.sh").read_text(encoding="utf-8")
+    marker = "# Re-tie the memory chain"
+    if marker not in gate:
+        return None
+    fp = ('_substrate_config_fingerprint(){ %s -c '
+          "'import hashlib,pathlib,sys;p=pathlib.Path(\".substrate/config\");"
+          'sys.stdout.write(hashlib.sha256(p.read_bytes()).hexdigest() if p.is_file() else "absent")\'; }\n'
+          % PY)
+    tail = repo / "gate_tail.sh"
+    tail.write_text('set -euo pipefail\n' + profile_line + '\n'
+                    + 'run_py(){ "%s" -I "$@"; }\n' % PY
+                    + fp
+                    + '_SUBSTRATE_CONFIG_AT_START="$(_substrate_config_fingerprint)"\n'
+                    + gate[gate.index(marker):])
+    return tail
+
+
+def t_release_gate_stale_profile_blocked():
+    """round-37 P1: the end-state re-check branched on the SUBSTRATE_PROFILE loaded at
+    gate START, so a config raised to strict during the run was certified by the
+    standard-tier check — the gate re-read the anchor but not the policy."""
+    ml = str(SCRIPTS / "memory_log.py")
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td); env = _ml_env(td)
+        repo = td / "repo"; repo.mkdir()
+
+        def g(*a):
+            return subprocess.run(["git", *a], cwd=str(repo), capture_output=True, text=True, timeout=20)
+
+        def m(*a):
+            return subprocess.run([PY, "-I", ml, *a], env=env, cwd=str(repo),
+                                  capture_output=True, text=True, timeout=60)
+        env["SUBSTRATE_PROJECT_DIR"] = str(repo)
+        # The gate tail runs `run_py scripts/memory_log.py` RELATIVE to the repo,
+        # so the script has to be there. Without it the tail failed with "can't
+        # open file" — nonzero, and therefore indistinguishable from the block
+        # under test refusing. The reason assertion below is what exposed it.
+        _stage(repo, "memory_log.py")
+        g("init", "-q"); g("config", "user.email", "x@x"); g("config", "user.name", "x")
+        (repo / "f").write_text("x"); g("add", "."); g("commit", "-qm", "init")
+        bare, commit = _anchored_with_origin(td, g, m)
+        if bare is None:
+            return True, commit
+        hook = bare / "hooks" / "pre-receive"
+        hook.write_text('#!/bin/sh\nwhile read _o _n ref; do\n'
+                        '  case "$ref" in refs/notes/*) exit 1;; esac\ndone\nexit 0\n')
+        hook.chmod(0o755)
+        m("append", "--type", "note", "--message", "two")
+        # LIVE config is strict; the shell still carries what it loaded at start.
+        (repo / ".substrate" / "config").write_text('SUBSTRATE_PROFILE="strict"\n')
+        tail = _release_gate_tail(repo, profile_line="SUBSTRATE_PROFILE=standard")
+        if tail is None:
+            return False, "release_gate.sh lost the memory-anchor block"
+        r = subprocess.run(["bash", str(tail)], cwd=str(repo), env=env,
+                           capture_output=True, text=True, timeout=120)
+        if r.returncode == 0:
+            return False, "stale shell profile certified a strict live config"
+        if "release-gate: passed" in r.stdout:
+            return False, "the gate announced success under a stale profile"
+        if "ANCHOR NOT PUBLISHED" not in r.stderr:
+            return False, "failed for an unrelated reason: " + (r.stderr or r.stdout)[:160]
+        return True, f"rc={r.returncode}, strict live config enforced"
+
+
 def t_release_gate_unpublished_anchor_blocked():
     """round-36 P1b: the gate printed its success line BEFORE writing and pushing
     the fresh anchor, so a refused refs/notes push left a strict release green over
@@ -920,6 +993,11 @@ def t_release_gate_unpublished_anchor_blocked():
             return subprocess.run([PY, "-I", ml, *a], env=env, cwd=str(repo),
                                   capture_output=True, text=True, timeout=60)
         env["SUBSTRATE_PROJECT_DIR"] = str(repo)
+        # The gate tail runs `run_py scripts/memory_log.py` RELATIVE to the repo,
+        # so the script has to be there. Without it the tail failed with "can't
+        # open file" — nonzero, and therefore indistinguishable from the block
+        # under test refusing. The reason assertion below is what exposed it.
+        _stage(repo, "memory_log.py")
         g("init", "-q"); g("config", "user.email", "x@x"); g("config", "user.name", "x")
         (repo / "f").write_text("x"); g("add", "."); g("commit", "-qm", "init")
         bare, commit = _anchored_with_origin(td, g, m)
@@ -931,15 +1009,17 @@ def t_release_gate_unpublished_anchor_blocked():
                         '  case "$ref" in refs/notes/*) exit 1;; esac\ndone\nexit 0\n')
         hook.chmod(0o755)
         m("append", "--type", "note", "--message", "two")
-        tail = repo / "gate_tail.sh"
-        tail.write_text('set -euo pipefail\nSUBSTRATE_PROFILE=strict\n'
-                        'run_py(){ "%s" -I "$@"; }\n' % PY + gate[gate.index(marker):])
+        tail = _release_gate_tail(repo, profile_line="SUBSTRATE_PROFILE=strict")
+        if tail is None:
+            return False, "release_gate.sh lost the memory-anchor block"
         r = subprocess.run(["bash", str(tail)], cwd=str(repo), env=env,
                            capture_output=True, text=True, timeout=120)
         if r.returncode == 0:
             return False, "strict release passed with an unpublished fresh anchor"
         if "release-gate: passed" in r.stdout:
             return False, "the gate announced success before certifying the end state"
+        if "ANCHOR NOT PUBLISHED" not in r.stderr:
+            return False, "failed for an unrelated reason: " + (r.stderr or r.stdout)[:160]
         return True, f"rc={r.returncode}, success line withheld"
 
 
@@ -1537,6 +1617,7 @@ TASKS = [
     ("memory_anchor_force_needs_evidence", "malicious", "block", t_memory_anchor_force_without_evidence_blocked, True),
     ("memory_anchor_hostile_user_config_blocked", "malicious", "block", t_memory_anchor_hostile_user_config_blocked, True),
     ("release_gate_unpublished_anchor_blocked", "malicious", "block", t_release_gate_unpublished_anchor_blocked, True),
+    ("release_gate_stale_profile_blocked", "malicious", "block", t_release_gate_stale_profile_blocked, True),
     ("memory_anchor_forced_head_race_blocked", "malicious", "block", t_memory_anchor_forced_head_race_blocked, True),
     ("history_injection_stripped", "malicious", "block", t_history_injection_stripped, False),
     ("rejected_injection_stripped", "malicious", "block", t_rejected_injection_stripped, False),

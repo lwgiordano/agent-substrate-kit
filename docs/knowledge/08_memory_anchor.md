@@ -1,6 +1,6 @@
 ---
 purpose: The memory trust anchor — monotonic advance, remote confirmation, and limits.
-last_human_reviewed: 2026-09-03
+last_human_reviewed: 2026-09-05
 covers:
   - scripts/memory_log.py
   - scripts/release_gate.sh
@@ -93,8 +93,23 @@ The gate certifies the END state. Its memory check runs before the fresh note is
 written, so announcing success there described the state the release started in:
 a refused push left a strict release green over a repo whose next
 `verify --anchor` failed outright. The anchor is written, published, and
-re-verified with the profile's own check before the success line prints, and in
-strict a failed publication fails the release.
+re-verified before the success line prints, and in strict a failed publication
+fails the release.
+
+That re-check asks no shell variable. Branching on the `SUBSTRATE_PROFILE` loaded
+at gate start meant a config raised to strict DURING the run was certified by the
+standard-tier check — the anchor was re-read but the policy was not, so the end
+state was judged by a rule from a different moment. `verify --anchor` runs
+unconditionally instead and decides strictness inside `memory_log` from the live
+config at the instant it runs; the base tiers all pass with an unpublished anchor,
+so being unconditional costs the offline-complete promise nothing. The gate also
+fingerprints `.substrate/config` before its first validator and REFUSES to report
+success if that file changed while it ran: every result was produced under the
+configuration loaded at start, so a run cannot certify a configuration the
+repository no longer has. Absent and non-regular are distinct fingerprints — a
+config swapped for a FIFO is drift even where none existed — and a fingerprint
+the tool could not COMPUTE is not a value at all: it refuses under its own
+message rather than claiming the file changed.
 
 Readers of those tiers must key on the tier they mean. `substrate_doctor`
 selected its strongest row — "anchor verified against the remote" — by

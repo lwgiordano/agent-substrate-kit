@@ -211,9 +211,15 @@ ALLOWLIST: dict[str, str] = {
         "shape: the planted-write eval and the wrapped-write eval, each staging "
         "a bad/ok pair. The second was added in v3.8.44 and silently inherited "
         "this reason until v3.8.45 started counting matches", 2),
-    "run_substrate_evals.py:SCRIPTS.read_text":
+    "run_substrate_evals.py:SCRIPTS.read_text": (
         "reads the substrate's own validator SOURCE to hash/compare it — code "
-        "under review, not agent-writable state",
+        "under review, not agent-writable state. The second site (v3.8.54) reads "
+        "release_gate.sh so the round-36 P1b eval can execute the REAL gate tail "
+        "rather than a paraphrase of it; same class, same CODEOWNED + hash-pinned "
+        "source, and the bytes are executed in a fresh temp fixture. The third "
+        "(v3.8.55) is that read moved into the shared _release_gate_tail builder, "
+        "which both gate tasks now use so neither can hand-build a tail that exits "
+        "on an unbound variable and scores as a block", 3),
     "run_substrate_evals.py:src.read_text":
         "stages a copy of the kit's OWN script source into a fresh temp fixture; "
         "the source is code under review (and CODEOWNED + hash-pinned), not "
@@ -277,10 +283,9 @@ ALLOWLIST: dict[str, str] = {
         "IS the guarded reader for current.json — O_NOFOLLOW plus st_nlink==1 "
         "refusal, the check that keeps restore from pulling an outside file "
         "into model context",
-    "memory_log.py:path.os.open":
-        "IS the guarded reader — strict containment against `root` on the lines "
-        "immediately above, then O_NOFOLLOW|O_NONBLOCK plus fstat S_ISREG and "
-        "st_nlink==1; kept inline so the memory chain has no import dependency",
+    # v3.8.51: the "memory_log.py:path.os.open" exemption is gone with the inline
+    # reader it excused — that mirror was two fixes behind the canonical primitive
+    # and is now a fail-closed stub. The gate itself flagged the stale entry.
     "session_handoff.py:path.os.open":
         "IS this hook's inline mirror of safe_read_text (_safe_read_text) — "
         "_within_root, O_NOFOLLOW|O_NONBLOCK, fstat S_ISREG and st_nlink==1; "
@@ -1168,6 +1173,13 @@ class _ScopeResolver(ast.NodeVisitor):
             if item.optional_vars is not None:
                 self._bind(item.optional_vars, item.context_expr)
         self.generic_visit(node)
+
+    # v3.8.51 (self-audit, ast checklist): `async with` binds its targets the
+    # same way and had no visitor, so `async with governed() as p: p.write_text()`
+    # left `p` unbound. That degraded to UNRESOLVED (visible), not to silence —
+    # the invariant held — but it was an undocumented residual. Same binding,
+    # same visitor.
+    visit_AsyncWith = visit_With
 
     # --- classification -------------------------------------------------
     def _classify_expr(self, expr: ast.AST) -> str:

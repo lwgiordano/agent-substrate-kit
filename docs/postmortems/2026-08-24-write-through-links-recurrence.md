@@ -821,6 +821,383 @@ record it acts on.** For an ordered, append-only log the dimensions are at least
 when the exception is written; an unscoped dimension is not a smaller hole than a
 missing check, it is the same hole.
 
+## Round 13 — v3.8.51: the self-audit, and the trust anchor that failed open
+
+Not an audit round from the other agent. The first full self-audit of `main`
+after the merge — seven read-only auditors plus the deterministic gates — returned
+zero BLOCKs. The finding that mattered was not in any of their reports. It was
+hit.
+
+During the audit the workspace was replaced under me: shallow re-clone, venv
+gone, and `.substrate/memory/` swapped for an Aug-27 snapshot. The 113-event
+tamper-evident chain vanished; a 2-event chain from a different state took its
+place; **`memory verify` reported "chain OK."** It was not lying — the chain it
+had was internally valid. It could not tell *intact* from *replaced wholesale*,
+and `memory_log.py`'s own docstring said that was exactly what `anchor` /
+`verify --anchor` existed for. Then `release_gate.sh:44`:
+
+```sh
+if [ "$SUBSTRATE_PROFILE" = "strict" ] && [ -n "$(git notes --ref=substrate-memory list)" ]; then
+    verify --anchor
+else
+    verify
+fi
+```
+
+No ritual had ever written a note. So even in strict, the *absence* of the trust
+anchor silently downgraded to the unanchored check. `INTENT.md` forbids this in
+so many words: *absence and unreadability are different states with different
+verdicts.* Pre-existing, not from the merge; on `main`; guarding objectives #1
+and #3 at once.
+
+Why the hedge existed is the part worth keeping. `verify --anchor` required the
+chain head to **equal** the anchored hash, so one legitimate append after
+anchoring read as "history was rewritten", and it consulted only HEAD's own note,
+so the anchor vanished at the very next commit. Under those semantics requiring
+the anchor would have failed every run — so the gate was written to require it
+only when it happened to be satisfiable. The eval corpus then **pinned the false
+positive**: `memory_anchor_mismatch_detected` asserted that growth past the
+anchor must be detected as tampering. A malicious task encoding the defect as the
+expected behaviour, and a doctor row (`substrate_doctor.py:344`) restating the
+same equality rule as a second definition of "anchor valid".
+
+The fix is membership, not equality: `verify --anchor` finds the nearest
+annotated ancestor of HEAD and requires that hash to be a member of the already
+link-verified chain. Growth passes; replacement and truncation past the anchor
+fail; no anchor anywhere in the ancestry fails closed with the remedy named. The
+release gate requires it unconditionally in strict and *writes* one in every
+profile once it has passed. The doctor delegates to the same verifier. The eval
+was re-targeted at the real threat with a benign twin for growth. What no unkeyed
+hash chain can detect — a rewrite of the suffix after the anchor point — is now
+stated as the limit rather than implied away.
+
+Three siblings landed in the same unit, all the same class:
+
+- `check_history_sha` in a **shallow clone** reported every pre-boundary SHA as
+  unresolvable and printed the append-a-Correction remedy. Followed, that
+  corrupts HISTORY permanently — in every full clone those corrections name
+  *resolving* SHAs, which v3.8.50's own guard rightly treats as drift on a file
+  that cannot be edited back. GitHub Actions checks out `depth: 1` by default;
+  this kit's CI escaped only via `fetch-depth: 0`, and the workaround had been
+  written into a knowledge note instead of into the gate. It now refuses to
+  judge what it cannot see.
+- `manage.sh check` on a fresh clone auto-created its own venv, passed the
+  validator chain, then failed fourteen pre-commit hooks with the one real cause
+  buried per hook. One honest line before any gate runs.
+- The `_doc_common` safety primitives had two "same algorithm" mirrors in
+  fallback paths — `memory_log._safe_read_text`, `session_handoff._safe_atomic_write`
+  — still opening the parent by multi-component path, the exact window v3.8.44
+  closed, with no post-op liveness check. Two fixes behind, in dead code
+  (`_doc_common` is never stripped) that would have silently reintroduced a
+  closed class the day it ran. They are fail-closed stubs now, and a discovery
+  test asserts every such fallback is stub-shaped — the v3.8.48 inventory
+  lock-down, applied to the primitives that actually gate writes.
+
+**Carry-forward rule, part 18 — when a control has to be hedged to stay
+satisfiable, the semantics are wrong, not the hedge.** A gate that reads "require
+X only if X happens to exist" is a confession that requiring X would fail
+constantly. Do not ship the hedge; fix what makes X unsatisfiable. And when an
+eval asserts the hedge's behaviour as correct, the corpus has become a record of
+the defect, and passing it proves nothing.
+
+## Round 14 — v3.8.52 (round-34): the guard one command from being undone
+
+v3.8.51 fixed a trust anchor that failed open. Round 34 found the fix was one
+command deep. Both findings reproduced before acceptance.
+
+**P1.** A git note lives in the same writable repo as the log it vouches for.
+So: anchor, replace `events.jsonl` with a different valid chain, re-run the
+*shipped* `anchor` command — and `verify --anchor` goes green over the
+replacement. Detection worked; it just could be erased by the same process that
+tripped it. My own v3.8.51 docs said the real mitigation was pushing the note to
+a protected remote, so I *knew* a local note was weaker — but the code had no
+guard and the output printed the same confident "anchor verified" either way.
+That is the recurring shape one level up: not a control that lies about what it
+does, but a control whose **documented** limit was never **implemented**.
+
+Closed in two layers. Advancing the anchor is now MONOTONIC: if a previous
+anchor exists, its hash must still be in the chain, which growth satisfies and
+replace-then-re-anchor does not. A genuine reset uses `--force`, which appends
+an `anchor-forced` event naming the abandoned hash — the escape hatch writes the
+discontinuity into the record rather than removing it, and repeated laundering
+accumulates evidence instead of erasing it. Then `verify --anchor` stopped
+conflating tiers: `verified against origin`, `ANCHOR CONFLICT` when the local
+note disagrees with the remote (this is the layer that defeats a forced local
+rewrite outright), `LOCAL-ONLY` when an origin exists but does not carry it, and
+strict fails closed on an unpublished anchor.
+
+The judgment worth recording is what I did *not* do: make an unpublished anchor a
+failure everywhere. `INTENT.md` promises the base tier is offline-complete, so in
+a repo with no remote a local anchor is the strongest one obtainable and reporting
+it as deficient would be a false positive of exactly the kind that gets gates
+switched off — the same mistake as telling a strict-LOCAL repo it is broken for
+lacking a GitHub-only CODEOWNERS. Two existing tests asserting `pass` for that
+case were right, and they caught the overreach.
+
+**P2 was my error, not the code's.** v3.8.51's handoff told the operator to push
+`refs/notes/substrate-memory` "from a machine without the egress policy." Git does
+not transport `refs/notes/*` on a normal push, clone, or fetch: a fresh clone gets
+zero notes and the command fails with `src refspec ... does not match any`. I
+wrote an instruction that cannot be executed anywhere except the clone that was
+blocked from executing it. The producer now publishes the note itself, and when
+refused prints the payload plus the `git notes add -f -m` command that recreates
+it anywhere — the payload travels in text where the ref does not.
+
+**Carry-forward rule, part 19 — a documented limit is not an implemented one.**
+Writing "the real guarantee needs X" in a docstring while shipping the version
+without X leaves a control that reads as authoritative and behaves as advisory.
+Either implement the bound, or make the output say plainly which one the caller
+actually has. This gate now prints a different sentence per tier for exactly that
+reason.
+
+**Carry-forward rule, part 20 — a handoff step must be executable by whoever
+receives it.** Before delegating a manual action, check that the receiving side
+has what the action needs. A ref, a file, a credential, or a piece of state that
+never reaches them makes the instruction impossible, and an impossible instruction
+in a security remedy is worse than no instruction: it reads as covered.
+
+## Round 15 — v3.8.53 (round-35): the trust layer read what the attacker writes
+
+v3.8.52 closed the laundering path from round 34 by adding remote confirmation,
+monotonic anchoring, and a recorded forced-break event. Round 35 found all three
+were wrong, in the same way, and every one of them was mine, shipped in that
+release. All three reproduced here before acceptance.
+
+1. **The remote confirmation read a local ref.** `_remote_anchor` ignored the
+   fetch's return code and then read `refs/notes/origin-substrate-memory` — a
+   *local* ref any writer can create. One `git notes --ref=origin-substrate-memory
+   add` turned a correctly-failing strict check (rc 1) into `anchor verified
+   against origin` (rc 0), against an origin publishing no note at all.
+2. **The git calls ran under ambient env.** `GIT_DIR` pointed at a fake repo
+   carrying a matching note and no origin turned a genuine `ANCHOR CONFLICT` into
+   a clean `LOCAL (no remote)` pass. `_clean_env()` had existed since v3.8.10 for
+   precisely this, and five other call sites in the same module used it. I added
+   new git calls to that module and did not follow its own convention.
+3. **The evidence was optional.** `--force` appended its `anchor-forced` event
+   without checking the result, then rewrote the note regardless. With the lock a
+   FIFO, the event was never written, the note moved anyway, and verification went
+   green — the recorded discontinuity was the entire justification for permitting
+   the override.
+
+One sentence covers all three: **I built a trust layer out of inputs the adversary
+can write.** A local tracking ref is not the remote. An ambient environment
+variable is not the repository. An unchecked append is not a record. Each is the
+same unasked question in a different dimension, and the release that shipped them
+was the one where I had just congratulated myself for closing round 34.
+
+Fixes: confirmation now comes only from the remote *in this process* (an existence
+check against origin, then a forced fetch whose rc is checked, so a failed or
+absent fetch can never leave a planted ref readable); every git call in the anchor
+path runs under `_clean_env()` with `cwd=ROOT`; and `--force` aborts with the note
+untouched if its evidence append fails.
+
+A methodological note worth more than the fixes. My first discriminating check
+reverted the fetch-rc guard alone and **no test failed** — I nearly recorded that
+as "verified discriminating". The two P1a guards are redundant for this attack:
+either alone blocks it, so only reverting *both* fails the test. Redundancy is
+good defence and bad evidence, and a single-line revert that proves nothing looks
+exactly like one that proves something.
+
+**Carry-forward rule, part 21 — ask what writes each input a control trusts.**
+For every value a security check reads, name the parties who can write it. If the
+adversary is among them, it is not evidence, however authoritative its name
+sounds: `origin-*` refs, environment variables, and return values you discard all
+read as trustworthy and are not.
+
+**Carry-forward rule, part 22 — a redundant guard cannot be pinned by a
+single-line revert.** When two checks independently block the same attack,
+reverting either alone leaves the test green, which reads identically to a test
+that never discriminated. Revert the whole mechanism to prove the test catches the
+regression, and say which specific line each remaining test actually pins.
+
+## Round 16 — v3.8.54 (round-36): the check and the thing it authorized were not the same
+
+Three findings, all in the layer v3.8.53 had just hardened, and all three the
+same shape: **the thing that was checked and the thing that was used were not
+the same object.** Different environment input, different moment, different read
+of the same file.
+
+**P1a — a config file outside the repo chose which server answered.** `_clean_env`
+strips the variables that redirect which *repository* git reads. It was written
+in v3.8.10, when every git call in the module was local. v3.8.52 added calls
+whose verdict comes from a *server*, and the denylist was never re-derived for
+them: `XDG_CONFIG_HOME` still selected the user config file, so a
+`url.<attacker>.insteadOf` entry rewrote the origin URL and a genuine
+`ANCHOR CONFLICT` printed as `anchor verified against origin`. I reproduced the
+reported vector and then the one that was not reported — the same config as
+`~/.gitconfig`, reached through `HOME` — because fixing only the named variable
+would have left the attack one variable away. Config files are now taken out of
+the loop for the evidence calls (`GIT_CONFIG_GLOBAL`/`SYSTEM` at `/dev/null`,
+system config refused, `XDG_CONFIG_HOME` dropped, no credential prompt), and
+where that is impossible — git older than 2.32 — the anchor is reported
+unconfirmed rather than confirmed on weaker evidence.
+
+Isolation has a real cost: a globally configured credential helper, proxy, or
+`safe.directory` goes with it. The trade is right — a remote reachable only
+through a file outside the repository is not evidence about that repository —
+but a cost that presents as an unexplained "local-only" is a gate people switch
+off, so the fetch is retried once, purely to classify the failure, and the
+message says user config is why. That retry never contributes to a verdict.
+
+**P1b — the gate certified the state it started in.** The memory check runs
+before the block that writes and pushes the fresh note, and `release-gate:
+passed` printed before that block too. So an origin refusing `refs/notes/*` left
+a strict release green over a repo whose very next `verify --anchor` failed.
+Reproduced by executing the real gate tail verbatim against an origin with a
+rejecting `pre-receive` — and the end state was worse than the report said: not
+merely unpublished but `ANCHOR CONFLICT`, the tier that accuses the operator of
+rewriting the note. **This one had already happened to me.** The v3.8.53 release
+printed "passed" with its own note push refused, and I reported it as green.
+The anchor is now written, published, and re-verified with the profile's own
+check before the success line prints.
+
+**P2 — the precondition held; what it authorized was bound to a different read.**
+v3.8.53 made `--force` require its `anchor-forced` evidence append to succeed.
+It then re-read `events.jsonl` to choose the note payload. `append` releases its
+lock when it returns, so a writer in that gap produced rc 0, a note over a chain
+containing no `anchor-forced` event, and `verify --anchor` green. `anchor` now
+reads the chain once and certifies the hash the successful append returned.
+
+**A fourth item, mine, found by my own P1b repro rather than reported.**
+`ANCHOR CONFLICT` fired whenever the local note differed from the published one
+— including when the local note is a legitimate *advance* whose push was
+refused, with the published hash still in the chain. That called a failure the
+tooling had just reported "the local note was rewritten". CONFLICT now means the
+published hash is **not** in the chain; the benign case is reported as
+not-yet-published, which still fails strict.
+
+### The reverts that proved nothing, again
+
+Seven revert cases, one per guard. Two came back green — reverting the
+`ls-remote` call alone (the fetch that follows still reached the real remote)
+and removing the anchor post-condition alone (the head binding already blocked
+it). Both were fixed rather than recorded: an AST test now pins the env of every
+evidence call site by shape, and the race regression asserts the note is
+*untouched* and the return code is 1, which the binding alone does not produce.
+After that, all seven reverts fail a test.
+
+**Carry-forward rule, part 23 — a control's coverage must be re-derived when the
+surface it protects changes.** `_clean_env` was correct for the calls that
+existed when it was written. Adding calls of a different KIND — local reads
+became remote evidence — silently changed what "sanitized" had to mean, and
+nothing re-asked the question. When a helper's callers gain a new capability,
+re-derive the helper's set from scratch rather than assuming the old list still
+spans it.
+
+**Carry-forward rule, part 24 — a skipped eval has left the denominator.**
+Narrowing the conflict semantics turned one existing task's setup into a
+non-conflict, and it reported `skipped` — indistinguishable from an absent
+sandbox backend, excluded from the rate, and measuring nothing. A task that can
+no longer build its own baseline must fail, not skip; failing that, read the
+skip lines on any release that changes a semantic the corpus depends on.
+
+### Two in-release auditor findings, and the BLOCK was mine
+
+The security auditor was pointed at the fourth item and told to attack it. It
+came back with a **BLOCK**, and it was right about the part that mattered.
+
+`substrate_doctor` selected its memory row by ELIMINATION: the catch-all for
+`rc == 0` produced *"hash-chain ok + anchor verified against the remote"*. I
+added a fifth passing tier and did not update the reader, so `LOCAL AHEAD` — an
+anchor that is explicitly **not** published — fell through to that catch-all and
+was reported as verified against the remote. The branch immediately above it
+carried a v3.8.52 comment saying rc == 0 no longer means one thing and that this
+row existed to avoid exactly that overclaim. I wrote a new tier past a comment
+warning me about new tiers. The remote row now requires the verifier to have said
+`verified against origin`; an unrecognised tier degrades to a warning.
+
+The auditor also called `LOCAL AHEAD` a detection regression, since the old code
+returned 1 for that state. Literally true, and I checked it rather than arguing:
+the attack it "caught" is *keep the prefix through the published anchor,
+refabricate the suffix, then advance the local note*. Dropping the last step —
+leaving the note alone — verifies with `anchor verified against origin` and
+always did. Reproduced both. So the blocked variant was the same attack plus a
+move that gains the attacker nothing and merely got them caught; blocking it
+protected nothing, and the new tier reports the unpublished state more honestly
+than the old pass did.
+
+The checklist auditor's ast-parsing walk found the shape test matched
+`subprocess.run` by literal name, so aliasing the import, or moving the call into
+a helper, would have made every call invisible and the test green over
+unsanitized code — and a stub function satisfying the "both functions present"
+assertion would pass vacuously. The test now pins the import shape, covers the
+other subprocess entry points, and requires each evidence function to actually
+contain a matched call.
+
+**Carry-forward rule, part 25 — adding a case to a producer is a change to every
+reader that classifies by elimination.** A reader whose strongest verdict is the
+`else` branch silently reclassifies every new state as its best outcome. Grep for
+who consumes a status before adding one, and make positive claims require
+positive evidence so the failure direction of an unknown value is a warning
+rather than an endorsement.
+
+## Round 17 — v3.8.55 (round-37): the policy was read at a different moment than the state
+
+One finding, and it is the v3.8.54 fix judged by its own rule. The end-state
+re-check I added branched on `"$SUBSTRATE_PROFILE"` — the value
+`load_substrate_config` read at gate START. A `.substrate/config` raised from
+standard to strict *during* the run was therefore certified by the standard-tier
+check: the gate re-read the anchor but not the policy. Reproduced with an origin
+rejecting `refs/notes/*` and a live strict config: `tail_rc=0`,
+`release-gate: passed`, and an immediate `verify --anchor` returning 1.
+
+I fixed round 36 by re-reading the *state* and left the *rule* stale. "Certify
+the end state" is only half the sentence; the other half is "under the policy in
+force at that moment."
+
+The fix is not a fresher read of the shell variable. `verify --anchor` now runs
+unconditionally, because it decides strictness inside `memory_log` from the live
+config at the instant it runs — the base tiers all pass with an unpublished
+anchor, so unconditional costs the offline-complete promise nothing. Asking the
+shell at all was the defect. The gate additionally fingerprints
+`.substrate/config` before its first validator and refuses to report success if
+that file changed underneath the run, which covers every other field the same way
+rather than the one that was reported.
+
+### The reason assertion earned its keep in the first minute
+
+While hardening the round-36 regression I noticed it had started passing for the
+wrong reason: v3.8.55 added two variables above the split point, so a hand-built
+tail exited 1 on an *unbound variable* under `set -u` — nonzero, and therefore
+indistinguishable from the block under test refusing. I added "assert the reason,
+not the exit code" to that test and to its eval twin.
+
+The eval twin then failed immediately, and had been vacuous since the day I wrote
+it: `scripts/memory_log.py` was never staged into its fixture, so the tail died
+with *can't open file*, exited nonzero, and scored as a block. **A task I added in
+v3.8.54 to prove the gate refuses had never once exercised the gate.** Both tasks
+now stage what they run and assert on `ANCHOR NOT PUBLISHED`.
+
+### Two in-release auditor WARNs, both about reporting the wrong cause
+
+The security auditor confirmed the tier analysis I most wanted attacked — no
+profile/tier combination now fails that previously passed, because `anchor` runs
+unconditionally just above and the base tiers pass with an unpublished one — and
+returned two WARNs worth fixing.
+
+The fingerprint helper mapped ANY failure of its own tool to the literal
+`"unreadable"`, so a transient error at the end of a run would have been reported
+as *"the config changed while the gate ran"*: a refusal for a real reason under a
+false name, sending the operator to look for an edit nobody made. That is the same
+mistake as scoring an unbound variable as a block, one layer over. A failed
+fingerprint is now not a value at all — the helper returns nonzero and the gate
+says the run is unverifiable rather than accusing the file.
+
+The second: `absent` and `non-regular` were one bucket, so a config swapped for a
+FIFO or a directory was invisible whenever none existed at start. They are
+distinct fingerprints now.
+
+**Carry-forward rule, part 26 — when you re-read state to fix a stale check, ask
+whether the RULE is stale too.** A control has two inputs: the state it inspects
+and the policy it applies. Refreshing one and not the other leaves the same defect
+with a smaller window. Prefer pushing the decision into the component that reads
+policy at call time over caching a copy of the policy in the caller.
+
+**Carry-forward rule, part 27 — a nonzero exit is not evidence of the failure you
+meant.** Any test or eval that asserts refusal by exit code alone scores a missing
+file, a typo, or an unbound variable as a pass. Assert the message the refusal
+prints. Two of these were live here at once, and one had never tested anything.
+
 ## (Optional) Reproduction
 
 In a disposable repo: `ln victim.txt AGENT_BUS.md` then

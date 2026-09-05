@@ -24,6 +24,25 @@ run_tool(){ local t="$1"; shift || true; local -a c
 # Configured LINT_CMD/TYPECHECK_CMD/TEST_CMD are executable PROJECT code → contained too.
 run_lang(){ local label="$1" cmd="$2"; [ -z "$cmd" ] && return 0; echo "==> $label: $cmd"
   if [ "${SUBSTRATE_SANDBOX:-0}" = "1" ]; then scripts/sandbox_exec.sh bash -c "$cmd"; else bash -c "$cmd"; fi; }
+# The gate certifies ONE configuration, and every check below reads policy from it.
+# Fingerprint it NOW (round-37 P1) so the success line at the end can refuse if the
+# file changed underneath the run. Absent and unreadable are distinct VALUES here,
+# not skips: a config that appears or disappears mid-run is drift like any other.
+# ABSENT and NON-REGULAR are distinct values, not one bucket: a config replaced by
+# a FIFO or a directory is drift even where none existed at start. Tool failure is
+# NOT a value at all — this returns nonzero and the caller says so, rather than
+# reporting a fingerprint it could not compute as a changed file.
+_substrate_config_fingerprint(){
+  run_py -c 'import hashlib, pathlib, sys
+p = pathlib.Path(".substrate/config")
+sys.stdout.write(hashlib.sha256(p.read_bytes()).hexdigest() if p.is_file()
+                 else "nonregular" if p.exists() else "absent")' 2>/dev/null
+}
+_SUBSTRATE_CONFIG_AT_START="$(_substrate_config_fingerprint)" || {
+  echo "release-gate: cannot fingerprint .substrate/config — refusing to start a run" >&2
+  echo "  whose configuration it could not pin. Fix the environment and re-run." >&2
+  exit 1
+}
 echo "==> Import shadowing"; run_py scripts/check_import_shadowing.py  # no repo-local stdlib shadow can subvert hash validators
 echo "==> Doctor"; run_py scripts/substrate_doctor.py
 echo "==> Manifest"; run_py scripts/update_manifest.py --check
@@ -39,9 +58,20 @@ echo "==> Secrets"; run_py scripts/check_secrets.py
 echo "==> History"; run_py scripts/check_history_sha.py
 # Durable memory integrity: verify the hash chain, and the anchor in strict
 # (the structured handoff + event log are the tamper-evident record).
+#
+# v3.8.51 (self-audit P1): this used to require the anchor only when a note
+# happened to exist — `strict && [ -n "$(git notes list)" ]`. Nothing ever
+# wrote a note, so in strict the ABSENCE of the trust anchor silently
+# downgraded to the unanchored check: a trust anchor failing open, which
+# INTENT.md forbids ("absence and unreadability are different states").
+# Observed live: the memory directory was replaced wholesale by an older
+# valid chain and `verify` reported OK. In strict the anchor is now REQUIRED
+# and its absence is a gate failure with the remedy named; the anchor itself
+# is written below once the whole gate has passed, so every release re-ties
+# the chain to a known-good commit.
 if [ -f .substrate/memory/events.jsonl ]; then
   echo "==> Memory chain"
-  if [ "$SUBSTRATE_PROFILE" = "strict" ] && [ -n "$(git notes --ref=substrate-memory list 2>/dev/null)" ]; then
+  if [ "$SUBSTRATE_PROFILE" = "strict" ]; then
     run_py scripts/memory_log.py verify --anchor
   else
     run_py scripts/memory_log.py verify
@@ -55,4 +85,82 @@ fi
 echo "==> Pre-commit"; run_tool pre-commit run --all-files --show-diff-on-failure
 echo "==> Behavior evals"; run_py scripts/run_substrate_evals.py   # measured block-rate / FP-rate
 echo "==> Audit report"; run_py scripts/substrate_audit.py --mode quick --write-report
+# Re-tie the memory chain to THIS commit now that every gate has passed. Done in
+# every profile: writing a note is harmless, and it is what makes the strict
+# requirement above satisfiable after a profile ratchet instead of a fresh
+# chicken-and-egg.
+#
+# v3.8.52 (round-34 P2): THE PRODUCER PUBLISHES. The previous version wrote the
+# note and left a comment telling someone to push it. That step is impossible
+# anywhere but here: git does not transport refs/notes/* on a normal push,
+# clone, or fetch, so another clone never receives the ref and
+# `git push origin refs/notes/substrate-memory` there fails with
+# "src refspec ... does not match any" (reproduced). Delegating it was a
+# handoff that could not be executed. So: push it from this clone, and when
+# that is refused (no remote, no permission, an egress policy) print the exact
+# payload and the one command that recreates the note anywhere, because the
+# payload travels in text where the ref does not.
+if [ -f .substrate/memory/events.jsonl ]; then
+  echo "==> Memory anchor"; run_py scripts/memory_log.py anchor
+  if git remote | grep -qx origin; then
+    if git push --quiet origin refs/notes/substrate-memory 2>/dev/null; then
+      echo "memory-anchor: published refs/notes/substrate-memory to origin"
+    else
+      _anchor_commit="$(git rev-parse HEAD)"
+      _anchor_payload="$(git notes --ref=substrate-memory show "$_anchor_commit" 2>/dev/null | head -1)"
+      echo "memory-anchor: WARNING — could not push refs/notes/substrate-memory to origin." >&2
+      echo "  The anchor exists only in this clone, where whatever can rewrite the log" >&2
+      echo "  can rewrite it too. A normal push/clone does NOT carry refs/notes/*, so no" >&2
+      echo "  other clone can publish it for you. Either push FROM THIS CLONE:" >&2
+      echo "    git push origin refs/notes/substrate-memory" >&2
+      echo "  or recreate it from this payload on any clone and push from there:" >&2
+      echo "    git notes --ref=substrate-memory add -f -m '${_anchor_payload}' ${_anchor_commit}" >&2
+      echo "    git push origin refs/notes/substrate-memory" >&2
+      echo "  Confirm either way with: git ls-remote origin 'refs/notes/*'" >&2
+    fi
+  else
+    echo "memory-anchor: no 'origin' remote — the anchor is local-only by construction" >&2
+  fi
+  # CERTIFY THE END STATE, NOT THE PRE-STATE (v3.8.54, round-36 P1b).
+  #
+  # The memory-chain check above runs BEFORE this block writes a new note, so
+  # the success line used to describe the anchor state the release
+  # started with. When the push was refused the gate still exited 0 while the
+  # repo it left behind failed `verify --anchor` outright — reproduced with an
+  # origin that rejects refs/notes/*, and lived through in this kit's own
+  # v3.8.53 release, which printed "passed" with the push refused and was
+  # reported as green.
+  #
+  # v3.8.54 branched here on "$SUBSTRATE_PROFILE" — the value `load_substrate_config`
+  # read at process START. So a config raised to strict DURING the run was certified
+  # by the standard-tier check: the gate re-read the anchor but not the policy, and
+  # the end state it certified was judged by a rule from a different moment (round-37
+  # P1, reproduced). The fix is not to re-read the variable here but to stop asking
+  # the shell at all: `verify --anchor` decides strictness inside memory_log, from
+  # the LIVE .substrate/config, at the instant it runs. Base tiers still pass with an
+  # unpublished anchor (LOCAL-ONLY, LOCAL AHEAD, LOCAL (no remote) are all rc 0), so
+  # this is unconditional without breaking the offline-complete promise.
+  echo "==> Memory anchor re-check (end state)"
+  run_py scripts/memory_log.py verify --anchor
+fi
+# The gate certifies ONE configuration. If .substrate/config changed while the gate
+# ran, every result above was produced under a policy that is no longer the
+# repository's, so success would be a claim about a config that no longer exists.
+# Refuse rather than report; a re-run under the settled config is the remedy.
+# Report the RIGHT cause. A fingerprint the tool could not compute is not evidence
+# that the file changed, and saying it changed would send the operator looking for
+# an edit nobody made — the same "a failure is not the failure you meant" mistake
+# this release fixes in two evals.
+if ! _end_config_fp="$(_substrate_config_fingerprint)"; then
+  echo "release-gate: REFUSING to report success — could not re-read .substrate/config" >&2
+  echo "  to confirm it is unchanged. This is NOT a drift finding: the fingerprint" >&2
+  echo "  itself failed, so the run is unverifiable either way. Re-run the gate." >&2
+  exit 1
+fi
+if [ "$_end_config_fp" != "$_SUBSTRATE_CONFIG_AT_START" ]; then
+  echo "release-gate: REFUSING to report success — .substrate/config changed while the gate ran." >&2
+  echo "  Everything above was checked under the configuration loaded at start, so this" >&2
+  echo "  run cannot certify the configuration the repository now has. Re-run the gate." >&2
+  exit 1
+fi
 echo "release-gate: passed"

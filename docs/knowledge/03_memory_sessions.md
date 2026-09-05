@@ -6,7 +6,7 @@ asserts:
   - scripts/_doc_common.py::locked_atomic_append
   - scripts/session_handoff.py::_safe_history_line
   - scripts/session_handoff.py::_rejected_block
-last_human_reviewed: 2026-08-27
+last_human_reviewed: 2026-09-03
 covers:
   - manage.sh
   - scripts/_doc_common.py
@@ -25,7 +25,14 @@ covers:
 
 The durable event log is hash-chained. Verification checks sequence, previous
 hash, event hash, and any optional Git-note anchor. An absent anchor is distinct
-from a broken or stale anchor; go-live reports those states separately.
+from a broken or mismatched anchor; go-live reports those states separately.
+
+The anchor itself — what `verify --anchor` requires, why advancing it is
+monotonic, where remote confirmation comes from, the reported tiers, and how a
+release publishes it — has its own doc: [the memory trust
+anchor](08_memory_anchor.md). It moved there in v3.8.54 because the anchor
+material had grown to half of this file and this file to the top of its size
+budget, and a doc that cannot take its next paragraph is one nobody updates.
 
 ## Verified skill evidence
 

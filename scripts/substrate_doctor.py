@@ -321,17 +321,15 @@ def _go_live(blocks, warns, as_json=False):
         rc, _ = run([sys.executable, '-I', str(ev), '--fast', '--no-trace'])
         eval_ok = (rc == 0)
     tb = (ROOT / '.github' / 'workflows' / 'trusted-base-audit.yml').exists()
-    _mem_mod = None
-    try:
-        sys.path.insert(0, str(ROOT / 'scripts'))
-        import memory_log as _mem_mod
-    except Exception:
-        _mem_mod = None
     # Memory posture. v3.7.6 (audit P1): a present anchor NOTE is not a verified anchor —
-    # the row must compare the anchored head to the CURRENT head, not merely check that a
-    # note exists, or it overclaims `pass` on a stale/mismatched anchor (new events since
-    # the last anchor, or a rewrite). 4-state: no-log → warn | chain-broken → fail |
-    # anchored_head==current_head → pass | unanchored → warn | mismatch/stale → fail.
+    # the row must check the anchor against the chain, not merely that a note exists, or
+    # it overclaims `pass`. v3.8.51 (self-audit P1): this row used to REIMPLEMENT the
+    # rule (anchored_head == current_head) alongside memory_log.verify — two definitions
+    # of "anchor valid", and the one here reported ordinary growth as STALE. One
+    # definition now: delegate to `memory_log.py verify --anchor` (nearest annotated
+    # ancestor; anchored hash must be a MEMBER of the link-verified chain) and map its
+    # outcome. 4-state: no-log → warn | chain-broken → fail | anchor verified → pass |
+    # no anchor in ancestry → warn | anchor not in chain (replaced/truncated) → fail.
     mem_events = ROOT / '.substrate' / 'memory' / 'events.jsonl'
     if not mem_events.exists():
         mem_status, mem_reason = 'warn', 'no memory log yet (events.jsonl absent)'
@@ -340,19 +338,55 @@ def _go_live(blocks, warns, as_json=False):
         if rc_mem != 0:
             mem_status, mem_reason = 'fail', 'memory hash-chain BROKEN (tamper evidence) — run `./manage.sh memory verify`'
         else:
-            try:
-                anchored_head = _mem_mod._anchored_head() if _mem_mod else None
-                current_head = _mem_mod._head_hash() if _mem_mod else None
-            except Exception:
-                anchored_head, current_head = None, None
-            if anchored_head is None:
+            rc_anc, out_anc = run([sys.executable, '-I', 'scripts/memory_log.py', 'verify', '--anchor'])
+            # v3.8.52 (round-34 P1): rc==0 no longer means one thing. A note that
+            # exists only in this clone lives in the same writable state as the log,
+            # so reporting it as "verified" was the overclaim this row was written to
+            # avoid. Published and local-only are now separate rows.
+            #
+            # v3.8.54 (in-release security-auditor BLOCK, my own defect): the
+            # strongest verdict used to be the CATCH-ALL — "none of the known
+            # local tiers matched, so it must be remote-verified". Adding a
+            # fifth rc==0 tier (LOCAL AHEAD) therefore made this row claim
+            # "verified against the remote" for an anchor that is not published
+            # at all, from state a local writer controls. A positive claim must
+            # rest on positive evidence, never on the absence of known
+            # negatives, so the remote row now requires the verifier to have
+            # SAID so and an unrecognised tier degrades to warn.
+            if rc_anc == 0 and 'verified against origin' in out_anc:
+                mem_status, mem_reason = 'pass', 'hash-chain ok + anchor verified against the remote'
+            elif rc_anc == 0 and 'LOCAL (no remote)' in out_anc:
+                mem_status, mem_reason = 'pass', ('hash-chain ok + anchor verified locally (no remote exists, so '
+                                                  'local is the strongest anchor this repo can hold)')
+            elif rc_anc == 0 and 'LOCAL-ONLY' in out_anc:
+                mem_status, mem_reason = 'warn', ('hash-chain ok + anchor present but LOCAL-ONLY — not published to '
+                                                  'the remote, so it bounds accident and a single re-anchor, not an '
+                                                  'adversary with write access to refs/notes/; push it FROM THIS '
+                                                  'CLONE with `git push origin refs/notes/substrate-memory`')
+            elif rc_anc == 0 and 'LOCAL AHEAD' in out_anc:
+                mem_status, mem_reason = 'warn', ('hash-chain ok but the local anchor has ADVANCED PAST the '
+                                                  'published one — the chain still descends from what the remote '
+                                                  'publishes, but the newer note was never pushed; push it FROM '
+                                                  'THIS CLONE with `git push origin refs/notes/substrate-memory`')
+            elif rc_anc == 0:
+                mem_status, mem_reason = 'warn', ('hash-chain ok but the anchor tier was not recognised — treat as '
+                                                  'UNVERIFIED and read the verifier output: '
+                                                  + (out_anc.strip().splitlines() or [''])[0][:160])
+            elif 'NO ANCHOR' in out_anc:
                 mem_status, mem_reason = 'warn', 'hash-chain ok but not anchored — run `./manage.sh memory anchor`'
-            elif anchored_head == current_head:
-                mem_status, mem_reason = 'pass', 'hash-chain ok + anchor verified (head matches the git-note anchor)'
+            elif 'ANCHOR NOT PUBLISHED' in out_anc:
+                mem_status, mem_reason = 'fail', ('strict requires a PUBLISHED anchor — the note exists only locally; '
+                                                  'push it FROM THIS CLONE with `git push origin '
+                                                  'refs/notes/substrate-memory` (a normal push/clone does not carry '
+                                                  'refs/notes/*, so no other clone can publish it for you)')
+            elif 'ANCHOR CONFLICT' in out_anc:
+                mem_status, mem_reason = 'fail', ('memory anchor CONFLICT — the local note disagrees with the one the '
+                                                  'remote publishes: the local note was rewritten; run '
+                                                  '`./manage.sh memory verify --anchor`')
             else:
-                mem_status, mem_reason = 'fail', ('memory anchor STALE/MISMATCH — head differs from the git-note '
-                                                  'anchor (new events since last anchor, or a rewrite); run '
-                                                  '`./manage.sh memory verify --anchor`, then re-anchor if expected')
+                mem_status, mem_reason = 'fail', ('memory anchor MISMATCH — the anchored head is not in the current '
+                                                  'chain (history replaced or truncated past the anchor); run '
+                                                  '`./manage.sh memory verify --anchor`')
     # Remote tier (v3.6.0): OFFLINE detection only — is there a GitHub remote? Drives
     # the remote-expansion section. remote_detect.py reads .git/config (no network, no
     # token), so go-live stays side-effect-light. LIVE branch-protection state needs an

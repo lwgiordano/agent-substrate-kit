@@ -11608,17 +11608,34 @@ def test_go_live_memory_anchor_verified_is_pass(tmp_path) -> None:
     assert sum(1 for _ in (repo / ".substrate" / "memory" / "events.jsonl").open()) == 1
 
 
-def test_go_live_memory_anchor_stale_is_fail(tmp_path) -> None:
-    """v3.7.6 (audit P1): an anchor NOTE that exists but no longer matches the current
-    head (new events since the last anchor, or a rewrite) → fail, NOT a false pass."""
+def test_go_live_memory_anchor_growth_is_pass(tmp_path) -> None:
+    """v3.8.51 (self-audit P1): appending AFTER anchoring is the chain's normal life and
+    must stay `pass`. This row used to reimplement the anchor rule as head==anchored and
+    reported growth as STALE — a second definition of validity alongside memory_log's,
+    and a false positive that made the anchor unusable one event after it was written."""
     if not (ROOT / "bootstrap.sh").exists():
         return
     repo = _bootstrapped_git_repo(tmp_path)
     _ml(repo, "append", "--type", "note", "--message", "one")
     _ml(repo, "anchor")
-    _ml(repo, "append", "--type", "note", "--message", "two")  # head now past the anchor
+    _ml(repo, "append", "--type", "note", "--message", "two")  # legitimate growth
     row = _memrow(repo)
-    assert row and row["status"] == "fail" and "STALE" in row["reason"].upper(), row
+    assert row and row["status"] == "pass", row
+
+
+def test_go_live_memory_anchor_replaced_is_fail(tmp_path) -> None:
+    """v3.7.6 intent, v3.8.51 target: an anchor NOTE that exists but whose head is NOT in
+    the current chain (the chain was replaced wholesale or truncated past the anchor —
+    the v3.8.50 self-audit's live scenario) → fail, NOT a false pass."""
+    if not (ROOT / "bootstrap.sh").exists():
+        return
+    repo = _bootstrapped_git_repo(tmp_path)
+    _ml(repo, "append", "--type", "note", "--message", "one")
+    _ml(repo, "anchor")
+    (repo / ".substrate" / "memory" / "events.jsonl").unlink()
+    _ml(repo, "append", "--type", "note", "--message", "other-history")  # a different valid chain
+    row = _memrow(repo)
+    assert row and row["status"] == "fail" and "MISMATCH" in row["reason"].upper(), row
 
 
 def test_go_live_memory_unanchored_is_warn(tmp_path) -> None:
@@ -12105,7 +12122,11 @@ def test_history_sha_correction_cannot_pre_forgive_a_later_entry(tmp_path) -> No
         ],
     )
     assert rc == 1, out
-    assert "does not resolve" in out or "no EARLIER" in out
+    # Both findings are expected: the correction supersedes nothing above it
+    # ("no EARLIER"), AND the later entry it tried to pre-forgive is still
+    # unresolvable. An OR here (v3.8.50) would have let a refactor drop either
+    # finding silently — self-audit test-auditor WARN.
+    assert "does not resolve" in out and "no EARLIER" in out
 
 
 def test_history_sha_correction_does_not_retire_a_reused_later_sha(tmp_path) -> None:
@@ -12122,3 +12143,1069 @@ def test_history_sha_correction_does_not_retire_a_reused_later_sha(tmp_path) -> 
     )
     assert rc == 1, out
     assert "does not resolve" in out
+
+
+# --- memory_log anchor: membership semantics + fail-closed absence (v3.8.51) --
+# Self-audit P1. `verify --anchor` used to require the chain head to EQUAL the
+# anchored hash (so ordinary growth was reported as "rewritten") and looked only
+# at the note on HEAD (so the anchor vanished at the next commit). The release
+# gate hedged around both by requiring the anchor only when a note happened to
+# exist — a trust anchor failing open on absence. These pin the corrected
+# semantics: nearest annotated ancestor; anchored hash must be a MEMBER of the
+# (already link-verified) chain.
+
+
+def _anchor_repo(tmp_path):
+    """Throwaway git repo with memory_log staged and the project dir pointed at it."""
+    td = tmp_path / "anchorrepo"
+    (td / "scripts").mkdir(parents=True)
+    for name in ("memory_log.py", "_doc_common.py", "_substrate_root.py"):
+        src = SCRIPTS / name
+        if src.exists():
+            (td / "scripts" / name).write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+    env = {**os.environ, "SUBSTRATE_PROJECT_DIR": str(td)}
+
+    def g(*a):
+        return subprocess.run(["git", *a], cwd=str(td), capture_output=True, text=True, timeout=20)
+
+    def m(*a):
+        return subprocess.run(
+            [sys.executable, "-I", str(td / "scripts" / "memory_log.py"), *a],
+            cwd=str(td), env=env, capture_output=True, text=True, timeout=20,
+        )
+
+    g("init", "-q"); g("config", "user.email", "t@example.invalid"); g("config", "user.name", "t")
+    (td / "f").write_text("x\n", encoding="utf-8"); g("add", "."); g("commit", "-qm", "init")
+    return td, g, m
+
+
+def _events_path(td):
+    return td / ".substrate" / "memory" / "events.jsonl"
+
+
+def test_memory_anchor_growth_after_anchor_passes(tmp_path) -> None:
+    """The former false positive: appending after anchoring is the chain's normal
+    life and must verify."""
+    td, g, m = _anchor_repo(tmp_path)
+    m("append", "--type", "note", "--message", "one")
+    if m("anchor").returncode != 0:
+        pytest.skip("git notes unavailable on this host")
+    m("append", "--type", "note", "--message", "two")
+    r = m("verify", "--anchor")
+    assert r.returncode == 0, r.stdout + r.stderr
+    # v3.8.52: the wording split by tier — this fixture has no remote, so local
+    # IS the strongest anchor it can hold and says so. rc is the contract; the
+    # label distinguishes what was actually proven.
+    assert "anchor verified LOCAL (no remote)" in r.stdout
+
+
+def test_memory_anchor_found_on_older_ancestor_commit(tmp_path) -> None:
+    """The anchor must survive ordinary commits: looked up on the nearest annotated
+    ANCESTOR, not only on HEAD."""
+    td, g, m = _anchor_repo(tmp_path)
+    m("append", "--type", "note", "--message", "one")
+    if m("anchor").returncode != 0:
+        pytest.skip("git notes unavailable on this host")
+    (td / "f").write_text("y\n", encoding="utf-8"); g("add", "."); g("commit", "-qm", "later")
+    m("append", "--type", "note", "--message", "two")
+    r = m("verify", "--anchor")
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_memory_anchor_detects_wholesale_replacement(tmp_path) -> None:
+    """The real threat, observed live in the v3.8.50 self-audit: a different valid
+    chain swapped in. Plain `verify` says OK; `--anchor` must not."""
+    td, g, m = _anchor_repo(tmp_path)
+    m("append", "--type", "note", "--message", "one")
+    if m("anchor").returncode != 0:
+        pytest.skip("git notes unavailable on this host")
+    m("append", "--type", "note", "--message", "two")
+    _events_path(td).unlink()
+    m("append", "--type", "note", "--message", "other-history")
+    assert m("verify").returncode == 0, "control: the swapped chain is internally valid"
+    r = m("verify", "--anchor")
+    assert r.returncode == 1
+    assert "not in the current chain" in r.stderr
+
+
+def test_memory_anchor_detects_truncation_past_anchor(tmp_path) -> None:
+    td, g, m = _anchor_repo(tmp_path)
+    m("append", "--type", "note", "--message", "one")
+    m("append", "--type", "note", "--message", "two")
+    if m("anchor").returncode != 0:
+        pytest.skip("git notes unavailable on this host")
+    lines = _events_path(td).read_text(encoding="utf-8").splitlines(keepends=True)
+    _events_path(td).write_text("".join(lines[:1]), encoding="utf-8")
+    r = m("verify", "--anchor")
+    assert r.returncode == 1
+    assert "not in the current chain" in r.stderr
+
+
+def test_memory_anchor_absence_fails_closed(tmp_path) -> None:
+    """No note anywhere in the ancestry is a refusal with the remedy named, never a
+    silent downgrade — the shape INTENT.md forbids and the release gate now relies on."""
+    td, g, m = _anchor_repo(tmp_path)
+    m("append", "--type", "note", "--message", "one")
+    r = m("verify", "--anchor")
+    assert r.returncode == 1
+    assert "NO ANCHOR" in r.stderr and "memory_log.py anchor" in r.stderr
+
+
+def test_memory_anchor_plain_verify_unchanged(tmp_path) -> None:
+    """Discriminating control: without --anchor nothing changed."""
+    td, g, m = _anchor_repo(tmp_path)
+    m("append", "--type", "note", "--message", "one")
+    r = m("verify")
+    assert r.returncode == 0 and "chain OK" in r.stdout
+
+
+def test_release_gate_requires_anchor_in_strict_unconditionally() -> None:
+    """The gate must no longer hedge on note existence: in strict, `verify --anchor`
+    is unconditional, and the gate writes an anchor once it has passed."""
+    src = (SCRIPTS / "release_gate.sh").read_text(encoding="utf-8")
+    assert "git notes --ref=substrate-memory list" not in src, "the fail-open hedge is back"
+    strict_block = src[src.index('"$SUBSTRATE_PROFILE" = "strict"'):]
+    assert "verify --anchor" in strict_block[:200]
+    assert "memory_log.py anchor" in src, "the gate must write an anchor after passing"
+    # v3.8.54 (round-36 P1b): the gate must certify the END state. "passed" used
+    # to print BEFORE the note was written and published, so a refused push left
+    # the release green over a repo that immediately failed `verify --anchor`
+    # (reproduced against an origin rejecting refs/notes/*, and lived through in
+    # this kit's own v3.8.53 release). The anchor write, the push, and a re-run of
+    # the profile's own verification all come first now.
+    passed_line = 'echo "release-gate: passed"'
+    assert src.index("memory_log.py anchor") < src.index(passed_line), \
+        "the anchor must be written BEFORE the gate claims to have passed"
+    after_anchor = src[src.index("memory_log.py anchor"):src.index(passed_line)]
+    assert "verify --anchor" in after_anchor, \
+        "strict must re-verify the anchor AFTER publishing it, not only before"
+
+
+# --- check_history_sha: shallow clones (v3.8.51, self-audit P2) ---------------
+
+
+def _shallow_clone_of(tmp_path):
+    """A full repo with a HISTORY naming its own commits, then a depth-1 clone of it
+    (the GitHub Actions default) in which the older SHAs are absent objects."""
+    import datetime
+    src = tmp_path / "src"
+    src.mkdir()
+    run = lambda *a, cwd=src: subprocess.run(  # noqa: E731
+        ["git", "-C", str(cwd), *a], check=True, capture_output=True, text=True
+    ).stdout.strip()
+    subprocess.run(["git", "init", "-q", str(src)], check=True, capture_output=True)
+    run("config", "user.email", "t@example.invalid"); run("config", "user.name", "t")
+    (src / "docs").mkdir(); (src / "scripts").mkdir()
+    for name in ("check_history_sha.py", "_doc_common.py"):
+        (src / "scripts" / name).write_text((SCRIPTS / name).read_text(encoding="utf-8"), encoding="utf-8")
+    shas = []
+    for i in range(3):
+        (src / f"f{i}").write_text(f"{i}\n", encoding="utf-8")
+        run("add", "-A"); run("commit", "-qm", f"c{i}")
+        shas.append(run("rev-parse", "--short", "HEAD"))
+    now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    (src / "docs" / "HISTORY.md").write_text(
+        _HIST_HEADER + "".join(_hist_entry(now, s) for s in shas), encoding="utf-8"
+    )
+    run("add", "-A"); run("commit", "-qm", "history")
+    shallow = tmp_path / "shallow"
+    subprocess.run(["git", "clone", "-q", "--depth", "1", f"file://{src}", str(shallow)],
+                   check=True, capture_output=True)
+    return src, shallow
+
+
+def _run_gate_in(repo):
+    return subprocess.run(
+        [sys.executable, "-I", str(repo / "scripts" / "check_history_sha.py")],
+        capture_output=True, text=True, cwd=str(repo),
+    )
+
+
+def test_history_sha_shallow_clone_refuses_and_names_unshallow(tmp_path) -> None:
+    """In a shallow clone the older SHAs are absent objects, not drift. The gate used
+    to report each one unresolvable and print the append-a-Correction remedy —
+    which, followed, corrupts HISTORY permanently (in a full clone those corrections
+    name RESOLVING SHAs). It must refuse to judge, name `git fetch --unshallow`, and
+    never print the Correction advice in this state."""
+    src, shallow = _shallow_clone_of(tmp_path)
+    p = _run_gate_in(shallow)
+    assert p.returncode == 2, p.stdout + p.stderr
+    assert "SHALLOW CLONE" in p.stderr and "unshallow" in p.stderr
+    assert "Correction-of" not in p.stderr, "must not prescribe the corrupting remedy"
+    assert "does not resolve" not in p.stderr
+
+
+def test_history_sha_full_clone_is_not_flagged_as_shallow(tmp_path) -> None:
+    """Discriminating control: the same HISTORY in the full repo verifies normally."""
+    src, shallow = _shallow_clone_of(tmp_path)
+    p = _run_gate_in(src)
+    assert p.returncode == 0, p.stdout + p.stderr
+    assert "verified" in p.stdout and "SHALLOW" not in p.stderr
+
+
+# --- _doc_common fallbacks must be STUBS, never reimplementations (v3.8.51) ----
+
+
+def test_doc_common_fallbacks_are_fail_closed_stubs() -> None:
+    """Self-audit architecture P3. Every `except: def _safe_*` fallback behind a
+    `from _doc_common import ...` must be a fail-closed stub — return None / a
+    constant, or raise — never a reimplementation. Two "same algorithm" mirrors
+    (memory_log._safe_read_text, session_handoff._safe_atomic_write) were found
+    two fixes behind the canonical primitive: still opening the parent by
+    multi-component path (the v3.8.44 window) with no liveness check (v3.8.45).
+    _doc_common is never stripped (only tests are), so the fallbacks are dead code
+    in every profile — dead code that would silently reintroduce a fixed class if
+    it ever ran. Discovery-based, so a new reimplementation cannot appear
+    unclassified; the inventory-fallback lock-down of v3.8.48 in the same shape."""
+    import ast
+
+    offenders = []
+    seen = 0
+    for path in sorted(SCRIPTS.glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Try):
+                continue
+            if not any(isinstance(s, ast.ImportFrom) and s.module == "_doc_common" for s in node.body):
+                continue
+            for handler in node.handlers:
+                for stmt in handler.body:
+                    if not isinstance(stmt, ast.FunctionDef):
+                        continue
+                    seen += 1
+                    body = [
+                        b for b in stmt.body
+                        if not (isinstance(b, ast.Expr) and isinstance(getattr(b, "value", None), ast.Constant))
+                    ]
+                    calls_fs = any(
+                        isinstance(n, ast.Call) and getattr(getattr(n, "func", None), "attr", "") in ("open", "fdopen", "replace", "unlink")
+                        for b in body for n in ast.walk(b)
+                    )
+                    is_stub = (
+                        len(body) <= 2
+                        and all(isinstance(b, (ast.Return, ast.Raise)) for b in body)
+                        and not calls_fs
+                    )
+                    if not is_stub:
+                        offenders.append(f"{path.name}:{stmt.lineno} {stmt.name} ({len(body)} stmts)")
+    assert seen >= 30, f"discovery found only {seen} fallbacks — the scan is broken, not the tree"
+    assert not offenders, "reimplemented _doc_common fallbacks (must be stubs):\n  " + "\n  ".join(offenders)
+
+
+# --- check_raw_file_io: async with binds like with (v3.8.51) --------------------
+
+
+def _gate_on_probe(tmp_path, name: str, src: str):
+    """Run check_raw_file_io against a one-file scripts/ tree. Returns (rc, out)."""
+    root = tmp_path / name
+    (root / "scripts").mkdir(parents=True)
+    (root / "scripts" / "probe.py").write_text(src, encoding="utf-8")
+    p = subprocess.run(
+        [sys.executable, "-I", str(SCRIPTS / "check_raw_file_io.py"), "--root", str(root), "--list-unresolved"],
+        capture_output=True, text=True, timeout=60, cwd=str(root),
+    )
+    return p.returncode, p.stdout + p.stderr
+
+
+def test_raw_io_gate_binds_async_with_targets(tmp_path) -> None:
+    """`async with governed() as p` must bind `p` exactly as `with` does, so a
+    governed write through it is a FINDING — not merely unresolved, and never
+    silent."""
+    rc, out = _gate_on_probe(tmp_path, "aw", (
+        "async def f():\n"
+        "    async with (ROOT / 'docs' / 'd') as p:\n"
+        "        p.write_text('y')\n"
+    ))
+    assert rc == 1, "governed async-with write must be a finding: " + out
+    assert "probe.py" in out
+
+
+def test_raw_io_gate_opaque_bindings_are_never_silent(tmp_path) -> None:
+    """Self-audit test-auditor WARN: the invariant 'a construct the analyzer cannot
+    resolve is printed as UNRESOLVED, never dropped' was pinned for kwargs-unpack,
+    mixed-origin loops and match/case only. Every binding form the gate claims to
+    track gets the same check here, with an OPAQUE value (an unknown call) bound
+    and then written through. The forbidden outcome is NEITHER a finding NOR an
+    unresolved line — the property v3.8.46/47 shipped with for loop targets."""
+    cases = {
+        "default": ("def f(p=get_path()):\n"
+                    "    p.write_text('x')\n"),
+        "class_body": ("class C:\n"
+                       "    p = get_path()\n"
+                       "    p.write_text('x')\n"),
+        "plain_assign": ("def f():\n"
+                         "    p = get_path()\n"
+                         "    p.write_text('x')\n"),
+        "walrus": ("def f():\n"
+                   "    (p := get_path()).write_text('x')\n"),
+        "destructure": ("def f():\n"
+                        "    a, p = get_path()\n"
+                        "    p.write_text('x')\n"),
+        "loop_target": ("def f():\n"
+                        "    for p in get_paths():\n"
+                        "        p.write_text('x')\n"),
+        "match_capture": ("def f(v):\n"
+                          "    match v:\n"
+                          "        case [p]:\n"
+                          "            p.write_text('x')\n"),
+        "with_target": ("def f():\n"
+                        "    with get_path() as p:\n"
+                        "        p.write_text('x')\n"),
+    }
+    silent = []
+    for name, src in cases.items():
+        rc, out = _gate_on_probe(tmp_path, name, src)
+        surfaced = rc != 0 or "unresolved" in out.lower()
+        if not (surfaced and "probe.py" in out):
+            silent.append(f"{name}: rc={rc} out={out.strip()[:120]!r}")
+    assert not silent, "opaque binding vanished (neither finding nor unresolved):\n  " + "\n  ".join(silent)
+
+
+# --- substrate_profile: symlink behaviors with no regression (v3.8.51) ---------
+
+
+def test_profile_precommit_drift_treats_symlinked_config_as_drift(tmp_path) -> None:
+    """substrate_profile.py:141-176: a .pre-commit-config.yaml that is a SYMLINK
+    hashes to None through the guarded reader and must count as drift, even when
+    the bytes behind the link equal the baseline — the link, not the content, is
+    the tamper."""
+    import importlib
+    sp = importlib.import_module("substrate_profile")
+    root = tmp_path / "repo"
+    root.mkdir()
+    cfg = root / ".pre-commit-config.yaml"
+    cfg.write_text("repos: []\n", encoding="utf-8")
+    baseline = {"owned_file_sha256": {".pre-commit-config.yaml": sp._sha256(cfg, root)}}
+    assert sp._precommit_drifted(root, baseline) is False, "control: identical regular file is not drift"
+    outside = tmp_path / "outside.yaml"
+    outside.write_text("repos: []\n", encoding="utf-8")   # same bytes
+    cfg.unlink()
+    cfg.symlink_to(outside)
+    assert sp._precommit_drifted(root, baseline) is True, "a symlinked config must be drift"
+
+
+def test_profile_strict_extras_write_refuses_broken_symlink_dest(tmp_path) -> None:
+    """substrate_profile.py:275-282: `dest.exists()` is False for a BROKEN symlink, so
+    the exists-skip did not protect the strict-extras copy and a raw write would
+    follow the link outside the tree. The site now uses the anchored writer; pin
+    the primitive's behavior at exactly that shape: a broken-symlink destination is
+    refused, and nothing is created at the link's target."""
+    import importlib
+    dc = importlib.import_module("_doc_common")
+    root = tmp_path / "repo"
+    (root / "scripts").mkdir(parents=True)
+    target = tmp_path / "outside" / "planted.py"
+    dest = root / "scripts" / "extra.py"
+    dest.symlink_to(target)          # broken: target's parent does not exist
+    assert not dest.exists() and dest.is_symlink()
+    dc.safe_atomic_write(dest, "print('x')\n", root=root)
+    # The anchored writer renames its temp file OVER the link entry (dir_fd +
+    # basename), so the link is replaced by a regular file and its target is
+    # never resolved — the raw write followed the link and created the outside
+    # file. That replacement, not an exception, is the protective property.
+    assert dest.is_file() and not dest.is_symlink(), "dest must become a regular file in-tree"
+    assert not target.exists() and not target.parent.exists(), "the write followed the broken link outside the tree"
+
+
+# --- manage.sh check: honest precheck when setup was skipped (v3.8.51) ---------
+
+
+def test_manage_check_refuses_with_one_line_when_venv_missing(tmp_path) -> None:
+    """Self-audit P3: on a fresh clone without `setup`, run_py fell back to uv/python3
+    so the validator chain passed, then fourteen pre-commit hooks failed with the one
+    real cause buried per hook. `check` must now stop with a single line naming
+    `./manage.sh setup` before any gate runs."""
+    import shutil
+    root = tmp_path / "repo"
+    root.mkdir()
+    shutil.copy(ROOT / "manage.sh", root / "manage.sh")
+    shutil.copytree(SCRIPTS, root / "scripts")   # manage.sh sources scripts/_substrate_config.sh
+    (root / ".substrate").mkdir()
+    (root / ".substrate" / "config").write_text('SUBSTRATE_PROFILE="standard"\n', encoding="utf-8")
+    assert not (root / ".substrate" / "venv").exists()
+    p = subprocess.run(["bash", "manage.sh", "check"], cwd=str(root),
+                       capture_output=True, text=True, timeout=60)
+    assert p.returncode == 1
+    assert "substrate venv missing" in p.stderr and "./manage.sh setup" in p.stderr
+    assert "check-import-shadowing" not in p.stdout, "a gate ran before the precheck"
+
+
+# --- round-34: the anchor is mutable local state (v3.8.52) -------------------
+# A git note lives in the same writable repo as the log it vouches for, so
+# v3.8.51's detection was one command away from being undone: replace the chain,
+# re-run `anchor`, and verification went green over the replacement. These pin
+# the two layers that close it — monotonic advance, and saying which anchor we
+# actually have instead of one confident line for every tier.
+
+
+def _origin_repo(tmp_path, name="origin.git"):
+    bare = tmp_path / name
+    subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True,
+                   capture_output=True, timeout=20)
+    return bare
+
+
+def test_memory_anchor_refuses_to_launder_a_replaced_chain(tmp_path) -> None:
+    """round-34 P1, the reported repro verbatim: anchor, replace events.jsonl,
+    append a replacement chain, then re-run `anchor`. Before v3.8.52 that
+    returned 0 and `verify --anchor` went green over the replacement, so the
+    detection could be erased by the same process that tripped it."""
+    td, g, m = _anchor_repo(tmp_path)
+    m("append", "--type", "note", "--message", "one")
+    if m("anchor").returncode != 0:
+        pytest.skip("git notes unavailable on this host")
+    m("append", "--type", "note", "--message", "two")
+    _events_path(td).unlink()
+    m("append", "--type", "note", "--message", "replacement-chain")
+    assert m("verify", "--anchor").returncode == 1, "replacement must be detected"
+    r = m("anchor")
+    assert r.returncode == 1, "re-anchoring over a replaced chain must be REFUSED"
+    assert "REFUSING to re-anchor" in r.stderr
+    # and the refusal must not be cosmetic: the finding survives it
+    assert m("verify", "--anchor").returncode == 1
+
+
+def test_memory_anchor_force_records_the_break_in_the_chain(tmp_path) -> None:
+    """The override exists for a legitimate reset, and must not be a quiet one:
+    the abandoned anchor is APPENDED to the new chain, so a laundering attempt
+    leaves evidence in the record rather than removing it."""
+    td, g, m = _anchor_repo(tmp_path)
+    m("append", "--type", "note", "--message", "one")
+    if m("anchor").returncode != 0:
+        pytest.skip("git notes unavailable on this host")
+    _events_path(td).unlink()
+    m("append", "--type", "note", "--message", "fresh")
+    assert m("anchor").returncode == 1
+    assert m("anchor", "--force").returncode == 0
+    body = _events_path(td).read_text(encoding="utf-8")
+    assert "anchor-forced" in body, "the discontinuity must be in the log"
+    assert "abandoned_anchor_head" in body
+    assert m("verify", "--anchor").returncode == 0
+
+
+def test_memory_anchor_local_only_is_a_pass_when_no_remote_exists(tmp_path) -> None:
+    """INTENT.md promises the base tier is offline-complete. With no remote,
+    local IS the strongest anchor obtainable, so it must verify cleanly rather
+    than nag about a remote the design says is optional."""
+    td, g, m = _anchor_repo(tmp_path)
+    m("append", "--type", "note", "--message", "one")
+    if m("anchor").returncode != 0:
+        pytest.skip("git notes unavailable on this host")
+    r = m("verify", "--anchor")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "LOCAL (no remote)" in r.stdout
+
+
+def test_memory_anchor_says_local_only_when_an_origin_exists(tmp_path) -> None:
+    """Where publishing IS achievable, not having published is worth saying —
+    and must not be reported with the same words as a published anchor."""
+    td, g, m = _anchor_repo(tmp_path)
+    g("remote", "add", "origin", str(_origin_repo(tmp_path)))
+    m("append", "--type", "note", "--message", "one")
+    if m("anchor").returncode != 0:
+        pytest.skip("git notes unavailable on this host")
+    r = m("verify", "--anchor")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "LOCAL-ONLY" in r.stdout
+    assert "verified against origin" not in r.stdout
+
+
+def test_memory_anchor_verified_against_origin_when_published(tmp_path) -> None:
+    """The real guarantee: the note is on the remote and agrees."""
+    td, g, m = _anchor_repo(tmp_path)
+    bare = _origin_repo(tmp_path)
+    g("remote", "add", "origin", str(bare))
+    m("append", "--type", "note", "--message", "one")
+    if m("anchor").returncode != 0:
+        pytest.skip("git notes unavailable on this host")
+    g("push", "-q", "origin", "HEAD:refs/heads/main")
+    if g("push", "-q", "origin", "refs/notes/substrate-memory").returncode != 0:
+        pytest.skip("cannot push notes on this host")
+    r = m("verify", "--anchor")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "verified against origin" in r.stdout
+
+
+def _note_on(repo, payload, commit):
+    """Write a substrate-memory note in a fixture repo, identity supplied EXPLICITLY.
+
+    A bare fixture repo has no local identity, and `git notes add` writes a
+    commit. This passed locally only because the developer's GLOBAL git config
+    happened to supply user.email — CI has none, so the setup exited 128 and four
+    tests failed there while passing here. A fixture must not depend on ambient
+    config; that is the same class these tests are about.
+    """
+    return subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.email=t@example.invalid", "-c", "user.name=t",
+         "notes", "--ref=substrate-memory", "add", "-f", "-m", payload, commit],
+        check=True, capture_output=True, text=True, timeout=20,
+    )
+
+
+def _published_anchor_repo(tmp_path):
+    """A repo whose anchor is genuinely published to origin. (td, g, m, bare, commit)."""
+    td, g, m = _anchor_repo(tmp_path)
+    bare = _origin_repo(tmp_path)
+    g("remote", "add", "origin", str(bare))
+    m("append", "--type", "note", "--message", "one")
+    if m("anchor").returncode != 0:
+        pytest.skip("git notes unavailable on this host")
+    g("push", "-q", "origin", "HEAD:refs/heads/main")
+    if g("push", "-q", "origin", "refs/notes/substrate-memory").returncode != 0:
+        pytest.skip("cannot push notes on this host")
+    return td, g, m, bare, g("rev-parse", "HEAD").stdout.strip()
+
+
+def test_memory_anchor_conflict_when_origin_publishes_a_hash_not_in_the_chain(tmp_path) -> None:
+    """The layer that defeats a --force adversary outright: what ORIGIN publishes
+    must describe this chain.
+
+    v3.8.54 narrowed CONFLICT from "the two notes differ" to "the published hash
+    is not in this chain". The old form fired on a release whose note push was
+    refused — a legitimate local advance — and told the operator their note had
+    been rewritten. This pins the case that IS tampering: origin's anchor is for
+    a chain this log does not contain, so the log cannot descend from it.
+    """
+    td, g, m, bare, commit = _published_anchor_repo(tmp_path)
+    _note_on(bare, "substrate-memory-head:" + "a" * 64, commit)
+    r = m("verify", "--anchor")
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "ANCHOR CONFLICT" in r.stderr
+
+
+def test_memory_anchor_local_ahead_of_origin_is_not_called_tampering(tmp_path) -> None:
+    """A refused note push is not a rewrite.
+
+    v3.8.54, found by the round-36 P1b repro rather than reported: after a
+    release whose `git push origin refs/notes/*` is refused, the local note is
+    legitimately AHEAD of the published one and the published hash is still in
+    the chain. That used to print "the local note was rewritten" and fail — a
+    false accusation for a failure the tooling itself had just reported. It
+    passes in the offline-complete base tier and still fails closed in strict,
+    which is what actually requires a fresh published anchor.
+    """
+    td, g, m, bare, commit = _published_anchor_repo(tmp_path)
+    m("append", "--type", "note", "--message", "two")
+    m("anchor")  # advances the LOCAL note only; the push is not repeated
+    r = m("verify", "--anchor")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "LOCAL AHEAD" in r.stdout
+    assert "ANCHOR CONFLICT" not in r.stderr
+
+    (td / ".substrate").mkdir(exist_ok=True)
+    (td / ".substrate" / "config").write_text('SUBSTRATE_PROFILE="strict"\n', encoding="utf-8")
+    strict = m("verify", "--anchor")
+    assert strict.returncode == 1, strict.stdout + strict.stderr
+    assert "ANCHOR NOT PUBLISHED" in strict.stderr
+    assert "advanced past the published one" in strict.stderr
+
+
+def _conflicting_origin(tmp_path, g, bare, commit):
+    """Make origin publish a hash this chain does not contain, and return a fake
+    origin that publishes the REAL local payload. The genuine verdict is CONFLICT;
+    anything that reports "verified against origin" reached the fake."""
+    fake = _origin_repo(tmp_path, "fake.git")
+    subprocess.run(["git", "-C", str(fake), "fetch", "-q", str(bare),
+                    "refs/heads/main:refs/heads/main"], check=True, capture_output=True, timeout=20)
+    payload = g("notes", "--ref=substrate-memory", "show", "HEAD").stdout.splitlines()[0]
+    _note_on(fake, payload, commit)
+    _note_on(bare, "substrate-memory-head:" + "a" * 64, commit)
+    return fake
+
+
+@pytest.mark.parametrize("var", ["XDG_CONFIG_HOME", "HOME"])
+def test_memory_anchor_ignores_hostile_user_git_config(tmp_path, var) -> None:
+    """round-36 P1a: `_clean_env` stripped the vars that redirect which REPOSITORY
+    git reads, but not the ones that select which CONFIG FILE it loads. A
+    `url.<attacker>.insteadOf` entry reached through XDG_CONFIG_HOME — or, the
+    symmetric vector, HOME — rewrote the origin URL, so a genuine ANCHOR CONFLICT
+    was reported as `anchor verified against origin`.
+
+    Both variables are parametrized deliberately: fixing only the reported one
+    leaves the same attack one environment variable away.
+    """
+    td, g, m, bare, commit = _published_anchor_repo(tmp_path)
+    fake = _conflicting_origin(tmp_path, g, bare, commit)
+    assert m("verify", "--anchor").returncode == 1, "baseline conflict must be detected"
+
+    cfgdir = tmp_path / ("cfg-" + var)
+    if var == "XDG_CONFIG_HOME":
+        (cfgdir / "git").mkdir(parents=True)
+        cfg = cfgdir / "git" / "config"
+    else:
+        cfgdir.mkdir()
+        cfg = cfgdir / ".gitconfig"
+    cfg.write_text('[url "%s"]\n\tinsteadOf = %s\n' % (fake, bare), encoding="utf-8")
+
+    hostile = {**os.environ, "SUBSTRATE_PROJECT_DIR": str(td), var: str(cfgdir)}
+    r = subprocess.run(
+        [sys.executable, "-I", str(td / "scripts" / "memory_log.py"), "verify", "--anchor"],
+        cwd=str(td), env=hostile, capture_output=True, text=True, timeout=60,
+    )
+    assert r.returncode == 1, f"{var} must not choose which remote answers: " + r.stdout + r.stderr
+    assert "verified against origin" not in r.stdout
+
+
+def test_every_remote_evidence_git_call_is_isolated_from_user_config() -> None:
+    """round-36 P1a, pinned by SHAPE rather than by one behavioural path.
+
+    Reverting only the `ls-remote` call to the weaker env failed no test, because
+    the fetch that follows it still reached the real remote. A guard no test can
+    tell the absence of is one that comes back. Every subprocess in the functions
+    whose verdict the REMOTE decides must pass env=_evidence_env().
+    """
+    import ast
+
+    src = (SCRIPTS / "memory_log.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    evidence = {"_remote_anchor", "_has_origin"}
+    # The walker matches `subprocess.<entrypoint>` by name, so an aliased import
+    # would make every call invisible to it and the test would pass over
+    # unsanitized code. Pin the import shape instead of hoping (in-release
+    # checklist-auditor WARN).
+    for node in ast.walk(tree):
+        assert not (isinstance(node, ast.ImportFrom) and node.module == "subprocess"), \
+            "`from subprocess import ...` defeats the call matching below"
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                assert not (alias.name == "subprocess" and alias.asname), \
+                    "aliasing subprocess defeats the call matching below"
+
+    ENTRYPOINTS = ("run", "check_output", "check_call", "call", "Popen")
+    unsanitized = []
+    seen, called_in = set(), {}
+    for fn in ast.walk(tree):
+        if not isinstance(fn, ast.FunctionDef | ast.AsyncFunctionDef) or fn.name not in evidence:
+            continue
+        seen.add(fn.name)
+        for node in ast.walk(fn):
+            if not isinstance(node, ast.Call):
+                continue
+            target = ast.unparse(node.func)
+            if not any(target == f"subprocess.{e}" or target.endswith(f".{e}") and "subprocess" in target
+                       for e in ENTRYPOINTS):
+                continue
+            called_in[fn.name] = called_in.get(fn.name, 0) + 1
+            envs = [kw for kw in node.keywords if kw.arg == "env"]
+            if len(envs) != 1 or ast.unparse(envs[0].value) != "_evidence_env()":
+                unsanitized.append(f"{fn.name}:{node.lineno} {target}")
+    assert seen == evidence, f"evidence functions renamed or removed: {evidence - seen}"
+    # A stub named `_has_origin` that satisfies `seen` while the real logic moves
+    # elsewhere would otherwise pass with an empty finding list.
+    assert all(called_in.get(name) for name in evidence), (
+        "an evidence function contains no subprocess call — the guard cannot be "
+        f"vacuously satisfied: {called_in}"
+    )
+    assert not unsanitized, (
+        "remote-evidence git calls must run under _evidence_env(): " + "; ".join(unsanitized)
+    )
+
+
+def test_doctor_never_claims_remote_verification_without_positive_evidence() -> None:
+    """In-release security-auditor BLOCK, and it was mine.
+
+    substrate_doctor mapped the memory row by elimination: the CATCH-ALL for
+    rc==0 produced "anchor verified against the remote". Adding a fifth rc==0
+    tier (LOCAL AHEAD) therefore made the doctor claim remote verification for
+    an anchor that is not published at all — from state a local writer controls.
+    A positive claim must rest on positive evidence.
+    """
+    src = (SCRIPTS / "substrate_doctor.py").read_text(encoding="utf-8")
+    lines = src.splitlines()
+    claim = "hash-chain ok + anchor verified against the remote"
+    idx = [i for i, ln in enumerate(lines) if claim in ln]
+    assert len(idx) == 1, f"expected exactly one remote-verified claim, found {len(idx)}"
+    guard = next(lines[i] for i in range(idx[0], -1, -1)
+                 if lines[i].lstrip().startswith(("if ", "elif ")))
+    assert "verified against origin" in guard, (
+        "the remote-verified row must require the verifier to have SAID so, not "
+        f"merely that no local tier matched: {guard.strip()}"
+    )
+    catch_all = next(i for i, ln in enumerate(lines) if ln.strip() == "elif rc_anc == 0:")
+    body = "\n".join(lines[catch_all + 1:catch_all + 5])
+    assert "'pass'" not in body, (
+        "an UNRECOGNISED rc==0 anchor tier must not be reported as a pass: " + body
+    )
+
+
+def test_release_gate_fails_when_the_fresh_anchor_cannot_be_published(tmp_path) -> None:
+    """round-36 P1b: the gate certified the state it STARTED in.
+
+    The success line printed before the note was written, so an origin that
+    refuses refs/notes/* left a strict release green over a repo whose very next
+    `verify --anchor` failed. The real tail of scripts/release_gate.sh is executed
+    here, split at its own marker comment and otherwise unmodified.
+    """
+    td, g, m, bare, commit = _published_anchor_repo(tmp_path)
+    (td / ".substrate" / "config").write_text('SUBSTRATE_PROFILE="strict"\n', encoding="utf-8")
+    hook = bare / "hooks" / "pre-receive"
+    hook.write_text('#!/bin/sh\nwhile read _o _n ref; do\n'
+                    '  case "$ref" in refs/notes/*) exit 1;; esac\ndone\nexit 0\n', encoding="utf-8")
+    hook.chmod(0o755)
+    m("append", "--type", "note", "--message", "two")  # this "release" advances the chain
+
+    r = subprocess.run(["bash", str(_gate_tail(td, profile_line='SUBSTRATE_PROFILE=strict'))],
+                       cwd=str(td), env={**os.environ, "SUBSTRATE_PROJECT_DIR": str(td)},
+                       capture_output=True, text=True, timeout=120)
+    assert r.returncode != 0, \
+        "a strict release that cannot publish its anchor must fail: " + r.stdout + r.stderr
+    assert "release-gate: passed" not in r.stdout
+    # Assert the REASON, not just the exit code. This test built its own tail until
+    # v3.8.55 added two variables to the top of the gate; under `set -u` the
+    # unbound reference alone exited 1, so it would have kept passing over an
+    # anchor path that no longer ran at all. A nonzero rc is not evidence of the
+    # failure you meant unless something ties it to that failure.
+    assert "ANCHOR NOT PUBLISHED" in r.stderr, \
+        "the failure must be the unpublished anchor, not an unrelated error: " + r.stdout + r.stderr
+
+
+def _gate_tail(td, profile_line="SUBSTRATE_PROFILE=standard", start_fingerprint=None):
+    """The REAL tail of scripts/release_gate.sh, split at its own marker comment and
+    otherwise unmodified, wrapped with the two definitions it inherits from the top
+    of the file. `profile_line` is deliberately settable so a test can supply the
+    STALE value the shell would be carrying."""
+    src = (SCRIPTS / "release_gate.sh").read_text(encoding="utf-8")
+    marker = "# Re-tie the memory chain"
+    assert marker in src, "release_gate.sh lost the marker this test splits on"
+    fp = ('_substrate_config_fingerprint(){ %s -c '
+          "'import hashlib,pathlib,sys;p=pathlib.Path(\".substrate/config\");"
+          'sys.stdout.write(hashlib.sha256(p.read_bytes()).hexdigest() if p.is_file()'
+          ' else "nonregular" if p.exists() else "absent")\'; }\n'
+          % sys.executable)
+    tail = td / "gate_tail.sh"
+    tail.write_text(
+        'set -euo pipefail\n' + profile_line + '\n'
+        + 'run_py(){ "%s" -I "$@"; }\n' % sys.executable
+        + fp
+        + '_SUBSTRATE_CONFIG_AT_START=%s\n' % (
+            start_fingerprint if start_fingerprint is not None else '"$(_substrate_config_fingerprint)"')
+        + src[src.index(marker):],
+        encoding="utf-8",
+    )
+    return tail
+
+
+def test_release_gate_end_state_check_reads_the_live_profile(tmp_path) -> None:
+    """round-37 P1: the end-state re-check branched on the SUBSTRATE_PROFILE loaded
+    at gate START, so a config raised to strict DURING the run was certified by the
+    standard-tier check — the gate re-read the anchor but not the policy, and judged
+    the end state by a rule from a different moment.
+
+    The fix is not a fresher read of the shell variable but not asking the shell:
+    `verify --anchor` decides strictness inside memory_log from the live config at
+    the instant it runs. The stale value is supplied here on purpose.
+    """
+    td, g, m, bare, commit = _published_anchor_repo(tmp_path)
+    hook = bare / "hooks" / "pre-receive"
+    hook.write_text('#!/bin/sh\nwhile read _o _n ref; do\n'
+                    '  case "$ref" in refs/notes/*) exit 1;; esac\ndone\nexit 0\n', encoding="utf-8")
+    hook.chmod(0o755)
+    m("append", "--type", "note", "--message", "two")
+    # LIVE config is strict; the shell still carries what it loaded at start.
+    (td / ".substrate" / "config").write_text('SUBSTRATE_PROFILE="strict"\n', encoding="utf-8")
+
+    r = subprocess.run(["bash", str(_gate_tail(td))], cwd=str(td),
+                       env={**os.environ, "SUBSTRATE_PROJECT_DIR": str(td)},
+                       capture_output=True, text=True, timeout=120)
+    assert r.returncode != 0, \
+        "a strict LIVE config must fail the release even when the shell says standard: " + r.stdout + r.stderr
+    assert "release-gate: passed" not in r.stdout
+
+
+def test_release_gate_refuses_success_when_the_config_changes_mid_run(tmp_path) -> None:
+    """round-37, the general form: the gate certifies ONE configuration.
+
+    Every check reads policy from `.substrate/config`, so if that file changes while
+    the gate runs, the results above were produced under a policy the repository no
+    longer has. Success would be a claim about a configuration that no longer exists,
+    so the gate refuses instead of reporting.
+    """
+    td, g, m = _anchor_repo(tmp_path)
+    (td / ".substrate").mkdir(exist_ok=True)
+    (td / ".substrate" / "config").write_text('SUBSTRATE_PROFILE="standard"\n', encoding="utf-8")
+    m("append", "--type", "note", "--message", "one")
+    if m("anchor").returncode != 0:
+        pytest.skip("git notes unavailable on this host")
+
+    # Baseline: a matching fingerprint reaches the success line.
+    ok = subprocess.run(["bash", str(_gate_tail(td))], cwd=str(td),
+                        env={**os.environ, "SUBSTRATE_PROJECT_DIR": str(td)},
+                        capture_output=True, text=True, timeout=120)
+    assert ok.returncode == 0, ok.stdout + ok.stderr
+    assert "release-gate: passed" in ok.stdout
+
+    # A fingerprint from before an edit: the config moved under the run.
+    drifted = subprocess.run(["bash", str(_gate_tail(td, start_fingerprint='"stale-fingerprint"'))],
+                             cwd=str(td), env={**os.environ, "SUBSTRATE_PROJECT_DIR": str(td)},
+                             capture_output=True, text=True, timeout=120)
+    assert drifted.returncode != 0, drifted.stdout + drifted.stderr
+    assert "release-gate: passed" not in drifted.stdout
+    assert "changed while the gate ran" in drifted.stderr
+
+
+def test_release_gate_distinguishes_a_failed_fingerprint_from_config_drift(tmp_path) -> None:
+    """A fingerprint the tool could not compute is not evidence that the file changed.
+
+    Reporting it as drift would send the operator hunting an edit nobody made — the
+    same "a failure is not the failure you meant" mistake this release fixes in two
+    evals. Both outcomes still refuse; only the stated cause differs.
+    """
+    td, g, m = _anchor_repo(tmp_path)
+    (td / ".substrate").mkdir(exist_ok=True)
+    (td / ".substrate" / "config").write_text('SUBSTRATE_PROFILE="standard"\n', encoding="utf-8")
+    m("append", "--type", "note", "--message", "one")
+    if m("anchor").returncode != 0:
+        pytest.skip("git notes unavailable on this host")
+
+    # A valid start value, then break the tool AFTER it is captured, so only the
+    # end-of-run call fails and the config itself is never touched.
+    tail = _gate_tail(td, start_fingerprint='"deadbeef"')
+    text = tail.read_text(encoding="utf-8").replace(
+        '_SUBSTRATE_CONFIG_AT_START="deadbeef"',
+        '_SUBSTRATE_CONFIG_AT_START="deadbeef"\n_substrate_config_fingerprint(){ return 3; }', 1)
+    assert "return 3" in text, "the fingerprint override was not injected"
+    tail.write_text(text, encoding="utf-8")
+    r = subprocess.run(["bash", str(tail)], cwd=str(td),
+                       env={**os.environ, "SUBSTRATE_PROJECT_DIR": str(td)},
+                       capture_output=True, text=True, timeout=120)
+    assert r.returncode != 0, r.stdout + r.stderr
+    assert "release-gate: passed" not in r.stdout
+    assert "NOT a drift finding" in r.stderr, \
+        "an unverifiable fingerprint must not be reported as a changed config: " + r.stderr
+    assert "changed while the gate ran" not in r.stderr
+
+
+def test_release_gate_config_fingerprint_separates_absent_from_non_regular() -> None:
+    """A config swapped for a FIFO or a directory is drift even where none existed.
+
+    Folding both into one "absent" bucket made that substitution invisible whenever
+    the file was absent at the start of the run.
+    """
+    src = (SCRIPTS / "release_gate.sh").read_text(encoding="utf-8")
+    fn = src[src.index("_substrate_config_fingerprint()"):src.index("_SUBSTRATE_CONFIG_AT_START=")]
+    assert '"nonregular"' in fn and '"absent"' in fn, \
+        "absent and non-regular must be distinct fingerprint values: " + fn
+    assert "p.is_file()" in fn, "the regular-file test is what separates them"
+    assert "|| echo" not in fn, \
+        "a tool failure must not be mapped to a fingerprint VALUE; it must return nonzero"
+
+
+def test_release_gate_fingerprints_the_config_before_any_validator() -> None:
+    """The fingerprint must be taken BEFORE the checks it vouches for. Captured after
+    them, it would agree with itself no matter when the file changed."""
+    src = (SCRIPTS / "release_gate.sh").read_text(encoding="utf-8")
+    assert "_SUBSTRATE_CONFIG_AT_START=" in src, "the start-of-run config fingerprint is gone"
+    assert src.index("_SUBSTRATE_CONFIG_AT_START=") < src.index("check_import_shadowing.py"), \
+        "the config must be fingerprinted before the first validator runs"
+    assert src.index("_SUBSTRATE_CONFIG_AT_START") < src.index('echo "release-gate: passed"')
+    end_block = src[src.index("==> Memory anchor re-check"):src.index('echo "release-gate: passed"')]
+    assert "$SUBSTRATE_PROFILE" not in end_block, \
+        "the end-state check must not branch on the profile loaded at process start"
+
+
+def test_memory_anchor_force_binds_the_head_to_its_evidence_append(tmp_path) -> None:
+    """round-36 P2: --force checked the evidence append's rc, then RE-READ a
+    mutable events.jsonl to choose the note payload.
+
+    append() releases its lock before returning, so a writer in that gap got rc 0,
+    a note over a chain containing no `anchor-forced` event, and `verify --anchor`
+    green: the precondition held while the thing it authorized was bound to a
+    different read. The head is now the hash the successful append produced.
+    """
+    td, g, m = _anchor_repo(tmp_path)
+    m("append", "--type", "note", "--message", "one")
+    if m("anchor").returncode != 0:
+        pytest.skip("git notes unavailable on this host")
+    ev = _events_path(td)
+    ev.unlink()
+    m("append", "--type", "note", "--message", "replacement")
+    replacement = ev.read_text(encoding="utf-8")
+    ev.unlink()
+    m("append", "--type", "note", "--message", "third-chain")
+    third = ev.read_text(encoding="utf-8")
+    ev.write_text(replacement, encoding="utf-8")
+    (td / "third.jsonl").write_text(third, encoding="utf-8")
+
+    # The concurrent writer, timed at the only moment that matters: after the
+    # real evidence append has returned 0 and released its lock, before anchor()
+    # decides what to certify. Whichever name anchor() uses to append is wrapped,
+    # so this cannot silently stop measuring anything when that name changes.
+    racer = td / "race.py"
+    racer.write_text(
+        "import pathlib, sys\n"
+        "sys.path.insert(0, %r)\n" % str(td / "scripts") +
+        "import memory_log\n"
+        "third = pathlib.Path(%r).read_text()\n" % str(td / "third.jsonl") +
+        "name = '_append_returning_head' if hasattr(memory_log, '_append_returning_head') else 'append'\n"
+        "real = getattr(memory_log, name)\n"
+        "def racing(etype, data):\n"
+        "    out = real(etype, data)\n"
+        "    rc = out[0] if isinstance(out, tuple) else out\n"
+        "    if etype == 'anchor-forced' and rc == 0:\n"
+        "        memory_log.EVENTS.write_text(third)\n"
+        "    return out\n"
+        "setattr(memory_log, name, racing)\n"
+        "print('ANCHOR_RC', memory_log.anchor(force=True))\n",
+        encoding="utf-8",
+    )
+    before_note = g("notes", "--ref=substrate-memory", "show", "HEAD").stdout.strip()
+    r = subprocess.run([sys.executable, str(racer)], cwd=str(td),
+                       env={**os.environ, "SUBSTRATE_PROJECT_DIR": str(td)},
+                       capture_output=True, text=True, timeout=60)
+    note = g("notes", "--ref=substrate-memory", "show", "HEAD").stdout.strip()
+    third_head = json.loads(third.splitlines()[-1])["hash"]
+    assert "substrate-memory-head:" + third_head not in note, \
+        "the note must never record a chain the evidence append did not produce"
+    assert note == before_note, \
+        "a chain that changed under the anchor must leave the note UNTOUCHED: " + r.stdout + r.stderr
+    assert "ANCHOR_RC 1" in r.stdout, \
+        "anchor must REFUSE, not merely certify a different hash: " + r.stdout + r.stderr
+    assert m("verify", "--anchor").returncode == 1, \
+        "the swapped chain must not verify: " + r.stdout + r.stderr
+
+
+def test_memory_anchor_strict_requires_a_published_anchor(tmp_path) -> None:
+    """Strict must not accept evidence it can rewrite: an unpublished anchor
+    fails closed, with the remedy naming THIS clone (no other clone can push a
+    ref it never received)."""
+    td, g, m = _anchor_repo(tmp_path)
+    g("remote", "add", "origin", str(_origin_repo(tmp_path)))
+    (td / ".substrate").mkdir(exist_ok=True)
+    (td / ".substrate" / "config").write_text('SUBSTRATE_PROFILE="strict"\n', encoding="utf-8")
+    m("append", "--type", "note", "--message", "one")
+    if m("anchor").returncode != 0:
+        pytest.skip("git notes unavailable on this host")
+    r = m("verify", "--anchor")
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "ANCHOR NOT PUBLISHED" in r.stderr
+    assert "FROM THIS CLONE" in r.stderr
+
+
+def test_memory_anchor_unreadable_profile_config_is_treated_as_strict(tmp_path) -> None:
+    """A trust decision must not be softened by failing to read the file that
+    sets it: a present-but-unreadable config takes the strict path."""
+    td, g, m = _anchor_repo(tmp_path)
+    g("remote", "add", "origin", str(_origin_repo(tmp_path)))
+    (td / ".substrate").mkdir(exist_ok=True)
+    try:
+        os.mkfifo(td / ".substrate" / "config")
+    except (OSError, AttributeError):
+        pytest.skip("cannot create a FIFO on this host")
+    m("append", "--type", "note", "--message", "one")
+    if m("anchor").returncode != 0:
+        pytest.skip("git notes unavailable on this host")
+    r = m("verify", "--anchor")
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "ANCHOR NOT PUBLISHED" in r.stderr
+
+
+def test_release_gate_publishes_the_anchor_itself(tmp_path) -> None:
+    """round-34 P2: v3.8.51 wrote the note and told SOMEONE ELSE to push it.
+    Git does not transport refs/notes/* on a normal push/clone/fetch, so that
+    step was impossible anywhere but the producing clone. The gate must push it
+    here, and when it cannot, print the payload that lets any clone recreate it
+    — never delegate a ref the other side never received."""
+    src = (SCRIPTS / "release_gate.sh").read_text(encoding="utf-8")
+    assert "git push --quiet origin refs/notes/substrate-memory" in src, \
+        "the producer must publish the anchor itself"
+    assert "git notes --ref=substrate-memory add -f -m" in src, \
+        "the fallback must carry the payload, since the ref does not travel"
+    assert "FROM THIS CLONE" in src
+
+
+# --- round-35: the confirmation layer was built on writable inputs (v3.8.53) --
+# v3.8.52 added remote confirmation, monotonic anchoring, and a forced-break
+# event — and got all three wrong the same way: each trusted something the
+# adversary can write. A local tracking ref is not the remote; an ambient env
+# var is not the repo; an unchecked append is not a record.
+
+
+def test_memory_anchor_rejects_a_locally_spoofed_remote_note(tmp_path) -> None:
+    """round-35 P1: `_remote_anchor` ignored the fetch rc and then read
+    refs/notes/origin-substrate-memory — a LOCAL ref. One `git notes
+    --ref=origin-substrate-memory add` forged a full "verified against origin"
+    pass in strict against an origin publishing no note at all."""
+    td, g, m = _anchor_repo(tmp_path)
+    g("remote", "add", "origin", str(_origin_repo(tmp_path)))
+    (td / ".substrate").mkdir(exist_ok=True)
+    (td / ".substrate" / "config").write_text('SUBSTRATE_PROFILE="strict"\n', encoding="utf-8")
+    m("append", "--type", "note", "--message", "one")
+    if m("anchor").returncode != 0:
+        pytest.skip("git notes unavailable on this host")
+    commit = g("rev-parse", "HEAD").stdout.strip()
+    payload = g("notes", "--ref=substrate-memory", "show", commit).stdout.splitlines()[0]
+    # plant the forgery the old code would have believed
+    g("notes", "--ref=origin-substrate-memory", "add", "-f", "-m", payload, commit)
+    r = m("verify", "--anchor")
+    assert r.returncode == 1, "a locally planted ref must never confirm: " + r.stdout + r.stderr
+    assert "ANCHOR NOT PUBLISHED" in r.stderr
+    assert "verified against origin" not in r.stdout
+
+
+def test_memory_anchor_ignores_hostile_git_routing_env(tmp_path) -> None:
+    """round-35 P1: the anchor path's git calls ran under ambient env, so GIT_DIR
+    pointed at a fake repo (matching note, no origin) turned a real ANCHOR
+    CONFLICT into a clean "LOCAL (no remote)" pass. `_clean_env` already existed
+    for exactly this and five other call sites in the module used it."""
+    td, g, m, bare, commit = _published_anchor_repo(tmp_path)
+    # A GENUINE conflict as the baseline: origin publishes a hash this chain does
+    # not contain. (Before v3.8.54 this test used a local note merely ahead of the
+    # published one, which is a refused push, not tampering.)
+    _note_on(bare, "substrate-memory-head:" + "a" * 64, commit)
+    assert m("verify", "--anchor").returncode == 1, "baseline conflict must be detected"
+
+    fake = tmp_path / "fake"
+    fake.mkdir()
+    subprocess.run(["git", "init", "-q", str(fake)], check=True, capture_output=True, timeout=20)
+    for k, v in (("user.email", "t@example.invalid"), ("user.name", "t")):
+        subprocess.run(["git", "-C", str(fake), "config", k, v], check=True,
+                       capture_output=True, timeout=20)
+    (fake / "f").write_text("x\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(fake), "add", "."], check=True, capture_output=True, timeout=20)
+    subprocess.run(["git", "-C", str(fake), "commit", "-qm", "init"], check=True,
+                   capture_output=True, timeout=20)
+    fcommit = subprocess.run(["git", "-C", str(fake), "rev-parse", "HEAD"],
+                             capture_output=True, text=True, check=True, timeout=20).stdout.strip()
+    payload = g("notes", "--ref=substrate-memory", "show", "HEAD").stdout.splitlines()[0]
+    subprocess.run(["git", "-C", str(fake), "notes", "--ref=substrate-memory", "add",
+                    "-f", "-m", payload, fcommit], capture_output=True, timeout=20)
+
+    hostile = dict(os.environ)
+    hostile["SUBSTRATE_PROJECT_DIR"] = str(td)
+    hostile["GIT_DIR"] = str(fake / ".git")
+    r = subprocess.run(
+        [sys.executable, "-I", str(td / "scripts" / "memory_log.py"), "verify", "--anchor"],
+        cwd=str(td), env=hostile, capture_output=True, text=True, timeout=30,
+    )
+    assert r.returncode == 1, "hostile GIT_DIR must not hide the conflict: " + r.stdout + r.stderr
+
+
+def test_memory_anchor_force_aborts_when_evidence_cannot_be_written(tmp_path) -> None:
+    """round-35 P2: --force appended the `anchor-forced` event without checking
+    the result, then rewrote the note regardless. With the lock a FIFO the append
+    refused, no event was written, and the note moved anyway — the recorded
+    discontinuity was the whole justification for the override and it was
+    optional. Evidence is now a precondition."""
+    td, g, m = _anchor_repo(tmp_path)
+    m("append", "--type", "note", "--message", "one")
+    if m("anchor").returncode != 0:
+        pytest.skip("git notes unavailable on this host")
+    before = g("notes", "--ref=substrate-memory", "show", "HEAD").stdout.splitlines()[0]
+    _events_path(td).unlink()
+    m("append", "--type", "note", "--message", "replacement")
+    lock = td / ".substrate" / "memory" / ".lock"
+    if lock.exists():
+        lock.unlink()
+    try:
+        os.mkfifo(lock)
+    except (OSError, AttributeError):
+        pytest.skip("cannot create a FIFO on this host")
+    r = m("anchor", "--force")
+    assert r.returncode != 0, "force must abort when its evidence cannot be recorded"
+    lock.unlink()
+    after = g("notes", "--ref=substrate-memory", "show", "HEAD").stdout.splitlines()[0]
+    assert before == after, "the note must be UNTOUCHED when the override aborts"
+    assert m("verify", "--anchor").returncode == 1, "the mismatch must still stand"
+    # and the override still works once the log is healthy
+    assert m("anchor", "--force").returncode == 0
+    assert "anchor-forced" in _events_path(td).read_text(encoding="utf-8")

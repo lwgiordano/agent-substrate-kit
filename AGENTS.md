@@ -111,11 +111,16 @@ reference layer are for.
 
 ### Project name
 
-TODO
+Agent Substrate Kit v3 — the governance substrate itself (this repo is the kit
+source; consumers install it via `bootstrap.sh`).
 
 ### Stack
 
-TODO
+Python 3.11+ (validators, hooks, evals, memory chain) and Bash (`manage.sh`,
+`bootstrap.sh`, `release_gate.sh`); `uv`-managed `.venv` for the kit's own
+tooling and a separate `.substrate/venv` created by `./manage.sh setup` for the
+validators pre-commit runs. Offline-complete at the base; no language runtime
+is required in consumer repos.
 
 ### Build and test commands
 

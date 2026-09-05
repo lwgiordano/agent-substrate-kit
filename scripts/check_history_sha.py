@@ -22,7 +22,8 @@ What this validator catches (claims it CAN make):
 CORRECTING A BAD SHA (v3.8.49). HISTORY is append-only, so a wrong
 SHA cannot be edited out — the remedy has to be additive. Append an
 entry whose third field is `Correction-of-<bad-sha>`; that supersedes
-the unresolvable-SHA finding for exactly that SHA, and the body should
+the unresolvable-SHA finding for every EARLIER entry naming that SHA (a
+repeated typo needs one correction, not one per occurrence), and the body should
 name the right commit for human readers. This gate PRINTED that advice
 from the start but never implemented the pairing: the marker was
 counted and skipped, so following the printed instruction changed
@@ -156,6 +157,20 @@ def _is_future_dated(commit_iso: str, entry_ts: str) -> bool:
     return ct - et > timedelta(hours=24)
 
 
+def _is_shallow_clone() -> bool:
+    """True when git reports a shallow repository. Errors (no git, no repo) are
+    NOT shallow: those surface as their own failures downstream, and this must
+    never turn a real gate result into a silent skip."""
+    try:
+        r = subprocess.run(
+            ["git", "rev-parse", "--is-shallow-repository"],
+            cwd=_REPO, capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return r.returncode == 0 and r.stdout.strip() == "true"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument(
@@ -163,6 +178,26 @@ def main() -> int:
         help="print every checked entry, not just findings",
     )
     args = parser.parse_args()
+
+    # v3.8.51 (self-audit P2): in a SHALLOW clone every SHA older than the
+    # fetch boundary is simply absent, and this gate reported each one as
+    # "does not resolve" with the standard remedy — append Correction-of-<sha>.
+    # Following that advice in a shallow checkout corrupts HISTORY permanently:
+    # in every full clone those corrections then name SHAs that RESOLVE, which
+    # the v3.8.50 guard rightly treats as drift, on an append-only file that
+    # cannot be edited back. GitHub Actions checks out depth=1 by default; this
+    # kit's CI only avoided the trap via fetch-depth: 0, and the workaround had
+    # been recorded in a knowledge note instead of in the gate. Refuse to judge
+    # what cannot be seen, and name the real remedy.
+    if _is_shallow_clone():
+        print(
+            "check-history-sha: SHALLOW CLONE — commit history is truncated, so "
+            "HISTORY SHAs cannot be verified here. This is not drift. Run "
+            "`git fetch --unshallow` (or check out with fetch-depth: 0) and re-run. "
+            "Do NOT append Correction entries in this state.",
+            file=sys.stderr,
+        )
+        return 2
 
     if not _HISTORY.is_file():
         print(f"check-history-sha: missing {_HISTORY}", file=sys.stderr)

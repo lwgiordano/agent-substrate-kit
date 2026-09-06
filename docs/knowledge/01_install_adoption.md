@@ -4,7 +4,7 @@ asserts:
   - bootstrap.sh::_safe_mkdir_p
   - bootstrap.sh::wappend
   - scripts/run_python_gate.sh::_ruff_args
-last_human_reviewed: 2026-09-03
+last_human_reviewed: 2026-09-06
 covers:
   - bootstrap.sh
   - manage.sh
@@ -101,3 +101,5 @@ A present-but-unusable `.substrate/config` is tampering, not an absent config.
 file used to fall into the "missing config" branch and let every default
 through; the gate now distinguishes absent from unreadable and fails closed on
 the latter, matching how the frozen `required_*` locks already behave.
+
+`manage.sh enable profile <tier>` rewrites EVERY `SUBSTRATE_PROFILE` line in `.substrate/config`. Rewriting only the first left a later duplicate winning, so the command printed success over a config that still resolved to the old tier (v3.8.57); the doctor's reported profile comes from the same canonical parser every other reader uses.

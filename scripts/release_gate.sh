@@ -4,18 +4,17 @@ set -euo pipefail
 # (stdlib + PyYAML). Language-native test/lint run via .substrate/config
 # indirection so this gate works in node/go repos too.
 SUBSTRATE_LANG="python"; LINT_CMD=""; TYPECHECK_CMD=""; TEST_CMD=""
-# Only SOURCE the loader here; the call itself happens after the fingerprint below
-# (round-38 P1). Loading first cached profile/lang/TEST_CMD from bytes nothing had
-# pinned yet, so an edit in the load-to-fingerprint window was certified under the
-# NEW fingerprint while the gate went on executing the OLD commands.
-. scripts/_substrate_config.sh
 SUBVENV=".substrate/venv"
 if command -v uv >/dev/null 2>&1 && [ -f pyproject.toml ]; then RUN=(uv run); elif command -v poetry >/dev/null 2>&1 && [ -f pyproject.toml ]; then RUN=(poetry run); else RUN=(); fi
 # Validators run from the substrate venv if present (works in any
 # language); else fall back to the project runner.
 # `-I` (isolated): repo-local stdlib shadows (scripts/hashlib.py …) can't
 # hijack a validator's imports and defeat the hash pins.
-run_py(){ if [ -x "$SUBVENV/bin/python" ]; then "$SUBVENV/bin/python" -I "$@"; else "${RUN[@]}" python3 -I "$@" 2>/dev/null || "${RUN[@]}" python -I "$@"; fi; }
+# `${RUN[@]+"${RUN[@]}"}`, not `"${RUN[@]}"` (round-39 P2). On Bash 3.2 — still
+# the /bin/bash on macOS — expanding an EMPTY array under `set -u` aborts, so a
+# consumer with no venv and no pyproject could not run the gate at all. The
+# fallback existed and was unreachable on exactly the hosts that needed it.
+run_py(){ if [ -x "$SUBVENV/bin/python" ]; then "$SUBVENV/bin/python" -I "$@"; else ${RUN[@]+"${RUN[@]}"} python3 -I "$@" 2>/dev/null || ${RUN[@]+"${RUN[@]}"} python -I "$@"; fi; }
 # Substrate tools (pre-commit) ALWAYS come from the substrate venv —
 # never ambient PATH (the v3.2 release-gate `pre-commit: command not
 # found` bug in node/go repos).
@@ -23,7 +22,7 @@ run_py(){ if [ -x "$SUBVENV/bin/python" ]; then "$SUBVENV/bin/python" -I "$@"; e
 # enabled (v3.5.3) — but NOT pre-commit itself (it orchestrates hooks that route their
 # own leaves via run_python_gate/lang_gate, and may need fs/net for some hooks).
 run_tool(){ local t="$1"; shift || true; local -a c
-  if [ -x "$SUBVENV/bin/$t" ]; then c=("$SUBVENV/bin/$t"); else c=("${RUN[@]}" "$t"); fi
+  if [ -x "$SUBVENV/bin/$t" ]; then c=("$SUBVENV/bin/$t"); else c=(${RUN[@]+"${RUN[@]}"} "$t"); fi
   if [ "${SUBSTRATE_SANDBOX:-0}" = "1" ] && [ "$t" != "pre-commit" ]; then scripts/sandbox_exec.sh "${c[@]}" "$@"; else "${c[@]}" "$@"; fi; }
 # Configured LINT_CMD/TYPECHECK_CMD/TEST_CMD are executable PROJECT code → contained too.
 run_lang(){ local label="$1" cmd="$2"; [ -z "$cmd" ] && return 0; echo "==> $label: $cmd"
@@ -47,15 +46,33 @@ _SUBSTRATE_CONFIG_AT_START="$(_substrate_config_fingerprint)" || {
   echo "  whose configuration it could not pin. Fix the environment and re-run." >&2
   exit 1
 }
-# NOW load, and prove the bytes that were loaded are the bytes that were pinned.
-# The values below drive every later stage (TEST_CMD, LINT_CMD, the profile), so
-# "the config did not change during the run" has to include the load itself.
-load_substrate_config || { echo "substrate-config: refusing to run with invalid .substrate/config" >&2; exit 2; }
-if [ "$(_substrate_config_fingerprint)" != "$_SUBSTRATE_CONFIG_AT_START" ]; then
-  echo "release-gate: .substrate/config changed while it was being loaded — the values" >&2
-  echo "  this run would execute are not the ones it pinned. Re-run the gate." >&2
-  exit 1
-fi
+# SNAPSHOT, then load FROM THE SNAPSHOT (round-39 P1). Comparing the file before
+# and after the load left an A-B-A race: pin strict, swap to standard for exactly
+# as long as the loader reads, restore strict, and both fingerprints matched while
+# the gate ran on the standard values it had cached. Comparing bytes at two
+# moments can never exclude that. Taking a private copy and loading from it makes
+# the values provably the ones that were pinned — there is no window to lose.
+#
+# The CONFIG LOADER ITSELF is copied and sourced the same way, and only AFTER the
+# validators have run over the live tree. It used to be sourced at line 11, before
+# anything attested it, so a helper that wrote during the trusted release and
+# restored itself was clean by the time any integrity check looked.
+_SUBSTRATE_SNAP="$(mktemp -d "${TMPDIR:-/tmp}/substrate-gate.XXXXXX")" || {
+  echo "release-gate: cannot create a private snapshot directory — refusing" >&2; exit 1; }
+trap 'rm -rf "$_SUBSTRATE_SNAP"' EXIT
+for _f in .substrate/config scripts/_substrate_config.sh; do
+  [ -e "$_f" ] || continue
+  if [ -L "$_f" ] || [ ! -f "$_f" ]; then
+    echo "release-gate: REFUSING — $_f is a symlink or not a regular file. The gate" >&2
+    echo "  reads it as trusted input; a link or FIFO there is tampering, not config." >&2
+    exit 1
+  fi
+done
+[ -f .substrate/config ] && cp .substrate/config "$_SUBSTRATE_SNAP/config"
+cp scripts/_substrate_config.sh "$_SUBSTRATE_SNAP/_substrate_config.sh"
+_SUBSTRATE_HELPER_AT_START="$(run_py -c 'import hashlib,pathlib,sys
+sys.stdout.write(hashlib.sha256(pathlib.Path("scripts/_substrate_config.sh").read_bytes()).hexdigest())' 2>/dev/null)" || {
+  echo "release-gate: cannot fingerprint scripts/_substrate_config.sh — refusing" >&2; exit 1; }
 echo "==> Import shadowing"; run_py scripts/check_import_shadowing.py  # no repo-local stdlib shadow can subvert hash validators
 echo "==> Doctor"; run_py scripts/substrate_doctor.py
 echo "==> Manifest"; run_py scripts/update_manifest.py --check
@@ -82,13 +99,39 @@ echo "==> History"; run_py scripts/check_history_sha.py
 # and its absence is a gate failure with the remedy named; the anchor itself
 # is written below once the whole gate has passed, so every release re-ties
 # the chain to a known-good commit.
+# The validators above have now run over the live tree. Prove the helper they saw
+# is the helper about to run, then source the COPY: hashing the live file and then
+# sourcing the live file is check-then-use, which is the whole subject of the last
+# five rounds.
+_helper_now="$(run_py -c 'import hashlib,pathlib,sys
+sys.stdout.write(hashlib.sha256(pathlib.Path("scripts/_substrate_config.sh").read_bytes()).hexdigest())' 2>/dev/null)" || {
+  echo "release-gate: cannot re-fingerprint scripts/_substrate_config.sh — refusing" >&2; exit 1; }
+if [ "$_helper_now" != "$_SUBSTRATE_HELPER_AT_START" ]; then
+  echo "release-gate: REFUSING — scripts/_substrate_config.sh changed while the" >&2
+  echo "  validators ran. The config loader is trusted code; it cannot be swapped" >&2
+  echo "  underneath the run that vouches for it. Re-run the gate." >&2
+  exit 1
+fi
+. "$_SUBSTRATE_SNAP/_substrate_config.sh"
+load_substrate_config "$_SUBSTRATE_SNAP/config" || { echo "substrate-config: refusing to run with invalid .substrate/config" >&2; exit 2; }
+
 # Whether memory is PART OF THIS RELEASE is decided once, here, and reused at the
 # anchor block (round-38 P1). Re-testing `-f` there let a log that existed for this
 # check disappear before the anchor block, and the release then SKIPPED its final
 # verification rather than refusing — the same fail-open-on-absence shape v3.8.51
 # removed from the anchor itself.
+# `-e`, not `-f` (round-39 P1): `-f` is FALSE for a FIFO, so a non-regular
+# events.jsonl planted after the earlier validators read as ABSENT at both the
+# start and the end check, and every memory verification was skipped while the
+# gate passed. Present-but-not-regular is tampering, and it is a refusal.
+if [ -e .substrate/memory/events.jsonl ] && { [ -L .substrate/memory/events.jsonl ] || [ ! -f .substrate/memory/events.jsonl ]; }; then
+  echo "release-gate: REFUSING — .substrate/memory/events.jsonl exists but is a" >&2
+  echo "  symlink or not a regular file. A tamper-evident log cannot be a link or" >&2
+  echo "  a FIFO; treating it as absent is how the memory checks got skipped." >&2
+  exit 1
+fi
 _MEMORY_IN_RELEASE=0
-if [ -f .substrate/memory/events.jsonl ]; then
+if [ -e .substrate/memory/events.jsonl ]; then
   _MEMORY_IN_RELEASE=1
   echo "==> Memory chain"
   if [ "$SUBSTRATE_PROFILE" = "strict" ]; then
@@ -123,13 +166,13 @@ echo "==> Audit report"; run_py scripts/substrate_audit.py --mode quick --write-
 # Presence at the end must match presence at the start, in BOTH directions: a log
 # that vanished cannot be re-verified, and one that appeared was never verified at
 # all, so announcing success would certify a chain nothing checked.
-if [ "$_MEMORY_IN_RELEASE" = "1" ] && [ ! -f .substrate/memory/events.jsonl ]; then
+if [ "$_MEMORY_IN_RELEASE" = "1" ] && [ ! -e .substrate/memory/events.jsonl ]; then
   echo "release-gate: REFUSING — .substrate/memory/events.jsonl was part of this" >&2
   echo "  release and disappeared before the anchor could be re-verified. A memory" >&2
   echo "  log that goes missing mid-run is a refusal, not a skip. Re-run the gate." >&2
   exit 1
 fi
-if [ "$_MEMORY_IN_RELEASE" = "0" ] && [ -f .substrate/memory/events.jsonl ]; then
+if [ "$_MEMORY_IN_RELEASE" = "0" ] && [ -e .substrate/memory/events.jsonl ]; then
   echo "release-gate: REFUSING — .substrate/memory/events.jsonl appeared during this" >&2
   echo "  run, so its chain was never verified by the check above. Re-run the gate." >&2
   exit 1

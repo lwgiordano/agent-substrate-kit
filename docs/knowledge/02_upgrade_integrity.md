@@ -3,7 +3,7 @@ purpose: Upgrade provenance, authority floors, transactions, and postconditions.
 asserts:
   - scripts/substrate_upgrade.py::_exec_module_from_source
   - scripts/substrate_upgrade.py::_apply_capability_floor
-last_human_reviewed: 2026-09-02
+last_human_reviewed: 2026-09-06
 covers:
   - bootstrap.sh
   - manage.sh
@@ -95,6 +95,8 @@ The engine snapshots live config and every required capability before deriving
 answers. Render values come from that snapshot, not from agent-writable install
 provenance. Profile, sandbox, and remote-governance floors never move downward;
 language and runner come from validated live config.
+
+A profile RAISE rewrites every `SUBSTRATE_PROFILE` assignment in the config, not the first one. The loader takes the LAST assignment, so a first-match rewrite left a later duplicate winning and the raise silently not in force (v3.8.57). See [policy and governance](04_policy_governance.md) for the one canonical reader every consumer of that key uses.
 
 Authority is re-read before mutation and after restore. A concurrent raise is
 preserved and makes the upgrade fail so the operator can rerun with a consistent

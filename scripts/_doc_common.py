@@ -1117,3 +1117,49 @@ def utc_now_iso() -> str:
         .isoformat()
         .replace("+00:00", "Z")
     )
+
+
+def substrate_profile(raw: str) -> str:
+    """SUBSTRATE_PROFILE exactly as `_substrate_config.sh` reads it, or "".
+
+    THE CANONICAL PYTHON READER. Every Python consumer of the profile routes
+    here; a second implementation is a second answer to the same policy
+    question, which is how round-38 and round-39 both went:
+
+      * `memory_log` stopped at the FIRST line starting with the key and asked
+        whether "strict" appeared anywhere in the rest, so a config assigning
+        standard then strict was strict to the release gate and base-tier to
+        anchor publication (round-38);
+      * fixing that with `str.splitlines()` still disagreed, because Python
+        breaks lines on VT/FF/NEL/LS/PS and `while IFS= read -r` does not — a
+        strict assignment followed by a VT and a second assignment inside what
+        the shell sees as a COMMENT read as standard (round-39);
+      * `command_policy` — the runtime hook boundary — was a THIRD parser with
+        the original first-match bug, missed by the round-38 sweep that claimed
+        to inventory every reader (round-39).
+
+    Mirrors the shell loader line for line: split on "\\n" only, skip blank and
+    comment lines, drop a trailing inline comment introduced by " #", require
+    the exact key, strip one layer of matching quotes, LAST assignment wins.
+    Returns "" when the key never appears; validation of the value against the
+    allowed domain belongs to the caller, which is where the two
+    callers differ in what an invalid value means.
+    """
+    profile = ""
+    for line in raw.split("\n"):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "  #" in line:
+            line = line.split("  #", 1)[0]
+        if " #" in line:
+            line = line.split(" #", 1)[0]
+        line = line.rstrip()
+        key, sep, val = line.partition("=")
+        if not sep or key.strip() != "SUBSTRATE_PROFILE":
+            continue
+        val = val.strip()
+        if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
+            val = val[1:-1]
+        profile = val
+    return profile

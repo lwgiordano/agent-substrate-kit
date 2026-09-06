@@ -74,6 +74,24 @@ the memory log is part of the release is likewise decided once, at the chain
 check, and any change to that afterwards is a refusal rather than a skipped
 verification. See [the memory trust anchor](08_memory_anchor.md).
 
+The gate's own trusted inputs are SNAPSHOTTED, not re-read. Comparing
+`.substrate/config` before and after the load still admitted A-B-A — swap the
+file for exactly as long as the loader reads, restore it, and both fingerprints
+match while the run carries the swapped values — so the gate copies the config to
+a private directory and loads FROM the copy. There is no window rather than a
+checked one. The config LOADER is treated the same way: it used to be sourced
+before any validator attested it, so a helper that acted during the trusted
+release and restored itself was clean by the time integrity checks looked. It is
+now copied, the validators run over the live tree, the live file is re-hashed to
+prove it is the one they saw, and the COPY is sourced. Memory presence is tested
+with `-e`, not `-f`: `-f` is false for a FIFO, so a non-regular `events.jsonl`
+read as absent at both ends and every memory check was skipped while the gate
+passed. Present-but-not-regular is a refusal, as is a symlinked config.
+
+The runner array is expanded as `${RUN[@]+"${RUN[@]}"}`. On Bash 3.2 — still
+`/bin/bash` on macOS — expanding an empty array under `set -u` aborts, so the
+no-venv fallback was unreachable on exactly the hosts that needed it.
+
 The gate PUBLISHES that anchor itself rather than delegating it. Git does not
 transport `refs/notes/*` on a normal push, clone, or fetch, so a different clone
 never receives the ref and cannot push it — v3.8.51 asked an operator to do

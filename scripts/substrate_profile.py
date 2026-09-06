@@ -251,12 +251,15 @@ def _write(root: Path, target: str, cfg: dict[str, str], force: bool) -> int:
 
     cfg_path = root / ".substrate" / "config"
     lines = (_safe_read_text(cfg_path, root, max_bytes=1 << 20) or "").splitlines()
+    # Rewrite EVERY assignment, not the first (v3.8.57, round-39 sweep). The
+    # loader takes the LAST one, so rewriting the first and breaking left a later
+    # duplicate winning: `manage.sh enable profile strict` would print success
+    # over a config that still resolved to standard.
     replaced = False
     for i, line in enumerate(lines):
-        if line.startswith("SUBSTRATE_PROFILE="):
+        if line.strip().startswith("SUBSTRATE_PROFILE="):
             lines[i] = f'SUBSTRATE_PROFILE="{target}"'
             replaced = True
-            break
     if not replaced:
         lines.append(f'SUBSTRATE_PROFILE="{target}"')
     _safe_atomic_write(cfg_path, "\n".join(lines) + "\n", root=root)

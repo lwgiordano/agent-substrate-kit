@@ -64,12 +64,13 @@ def _hook_findings(cfg):
     if not any('.env' in d for d in deny): w.append('settings.json permissions.deny does not cover .env')
     return (b,w)
 def _profile():
+    # v3.8.57 (round-39): one canonical reader. This was a first-match,
+    # splitlines() parser like the two Codex found, disagreeing with the shell
+    # loader on duplicate assignments and control-character line breaks — and
+    # the doctor's profile row is what an operator reads to believe a tier.
     cfg=ROOT/'.substrate/config'
-    if True:
-        for line in (_safe_read_text(cfg, ROOT, max_bytes=1 << 20) or '').splitlines():
-            if line.strip().startswith('SUBSTRATE_PROFILE='):
-                return line.split('=',1)[1].strip().strip('"\'')
-    return 'standard'
+    from _doc_common import substrate_profile as _substrate_profile
+    return _substrate_profile(_safe_read_text(cfg, ROOT, max_bytes=1 << 20) or '') or 'standard'
 def _remote_governance():
     """SUBSTRATE_REMOTE_GOVERNANCE from .substrate/config ('0'/'1'). v3.6.0:
     remote governance (CODEOWNERS coverage, trusted-base authority) is an

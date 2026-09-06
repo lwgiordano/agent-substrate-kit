@@ -939,6 +939,79 @@ def _release_gate_tail(repo, profile_line="SUBSTRATE_PROFILE=standard"):
     return tail
 
 
+def _gate_head_script(repo, extra=""):
+    """The REAL gate head through the config load, validator COMMANDS dropped."""
+    gate = (SCRIPTS / "release_gate.sh").read_text(encoding="utf-8")
+    marker = "# Whether memory is PART OF THIS RELEASE is decided once"
+    if marker not in gate:
+        return None, gate
+    body = "\n".join(ln for ln in gate[:gate.index(marker)].splitlines()
+                     if not ln.startswith('echo "==> ')) + "\n"
+    path = repo / "head.sh"
+    path.write_text(body + extra + 'echo "GATE_HEAD_OK profile=$SUBSTRATE_PROFILE"\n')
+    return path, gate
+
+
+def t_release_gate_unattested_helper_blocked():
+    """round-39 P1: scripts/_substrate_config.sh was sourced before any validator
+    attested it, so a helper that acted during the trusted release and restored
+    itself was clean by the time the integrity checks looked."""
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        _stage(td, "_substrate_config.sh")
+        (td / ".substrate").mkdir()
+        (td / ".substrate" / "config").write_text('SUBSTRATE_PROFILE="standard"\n')
+        gate = (SCRIPTS / "release_gate.sh").read_text(encoding="utf-8")
+        if ". scripts/_substrate_config.sh" in gate:
+            return False, "the live config helper is still sourced directly"
+        head, _ = _gate_head_script(td)
+        if head is None:
+            return False, "release_gate.sh lost the memory-anchor marker"
+        ok = subprocess.run(["bash", str(head)], cwd=str(td), capture_output=True,
+                            text=True, timeout=60)
+        if ok.returncode != 0 or "GATE_HEAD_OK" not in ok.stdout:
+            return False, "the gate head does not run standalone: " + (ok.stderr or ok.stdout)[:160]
+        swapped = td / "swapped.sh"
+        swapped.write_text(head.read_text().replace(
+            '_helper_now="$(run_py',
+            "printf '\\n# swapped after the validators\\n' >> scripts/_substrate_config.sh\n"
+            '_helper_now="$(run_py', 1))
+        r = subprocess.run(["bash", str(swapped)], cwd=str(td), capture_output=True,
+                           text=True, timeout=60)
+        if r.returncode == 0 or "GATE_HEAD_OK" in r.stdout:
+            return False, "a helper swapped after attestation was sourced anyway"
+        if "changed while the" not in r.stderr:
+            return False, "failed for an unrelated reason: " + (r.stderr or r.stdout)[:160]
+        return True, f"rc={r.returncode}, swapped loader refused"
+
+
+def t_release_gate_nonregular_memory_blocked():
+    """round-39 P1: presence was tested with `-f`, false for a FIFO, so a
+    non-regular events.jsonl read as ABSENT at both ends and every memory check was
+    skipped while the gate passed."""
+    gate = (SCRIPTS / "release_gate.sh").read_text(encoding="utf-8")
+    needle = "# `-e`, not `-f` (round-39 P1)"
+    if needle not in gate:
+        return False, "the non-regular memory guard is gone"
+    guard = gate[gate.index(needle):gate.index("_MEMORY_IN_RELEASE=0")]
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        (td / ".substrate" / "memory").mkdir(parents=True)
+        try:
+            os.mkfifo(str(td / ".substrate" / "memory" / "events.jsonl"))
+        except (OSError, AttributeError):
+            return True, "skipped: cannot create a FIFO on this host"
+        probe = td / "probe.sh"
+        probe.write_text("set -euo pipefail\n" + guard + "echo REACHED\n")
+        r = subprocess.run(["bash", str(probe)], cwd=str(td), capture_output=True,
+                           text=True, timeout=60)
+        if r.returncode == 0 or "REACHED" in r.stdout:
+            return False, "a FIFO memory log was treated as absent"
+        if "not a regular file" not in r.stderr:
+            return False, "failed for an unrelated reason: " + (r.stderr or r.stdout)[:160]
+        return True, f"rc={r.returncode}, non-regular memory log refused"
+
+
 def t_release_gate_stale_profile_blocked():
     """round-37 P1: the end-state re-check branched on the SUBSTRATE_PROFILE loaded at
     gate START, so a config raised to strict during the run was certified by the
@@ -1096,37 +1169,57 @@ def t_memory_anchor_forced_head_race_blocked():
 
 
 def t_release_gate_config_load_gap_blocked():
-    """round-38 P1: .substrate/config was LOADED before it was fingerprinted, so an
-    edit in that window was certified under the new fingerprint while the gate went
-    on executing the values cached from the old one."""
+    """round-38 P1 and round-39 P1: the config must be LOADED FROM the bytes that
+    were pinned, not merely compared before and after.
+
+    Round 38: the load ran before the fingerprint, so an edit in that window was
+    certified under the new pin while cached values from the old one drove the run.
+    Round 39: comparing bytes at two moments still admitted A-B-A — swap to
+    standard for exactly as long as the loader reads, restore strict, and both
+    fingerprints match. The gate now snapshots and loads from the snapshot, so
+    there is no window to lose.
+
+    NOTE ON SKIPS (round-39 P3): this task used to return a SKIP when the gate head
+    would not run standalone, which is how it silently left the denominator on a
+    host where the head was broken — while `evals` still reported ok. A task that
+    cannot build its own baseline FAILS. Skips are for absent backends only.
+    """
     gate = (SCRIPTS / "release_gate.sh").read_text(encoding="utf-8")
-    if "_SUBSTRATE_CONFIG_AT_START=" not in gate or "load_substrate_config ||" not in gate:
-        return False, "the release gate lost its config pin or its loader call"
-    if gate.index("_SUBSTRATE_CONFIG_AT_START=") > gate.index("load_substrate_config ||"):
-        return False, "the config is loaded before it is fingerprinted"
-    stop = gate.index('echo "==> Import shadowing"')
+    for needle in ('_SUBSTRATE_CONFIG_AT_START=', '_SUBSTRATE_SNAP=',
+                   'load_substrate_config "$_SUBSTRATE_SNAP/config"'):
+        if needle not in gate:
+            return False, f"the release gate lost {needle!r}"
+    if gate.index("_SUBSTRATE_SNAP=") > gate.index('load_substrate_config "$_SUBSTRATE_SNAP/config"'):
+        return False, "the config is loaded before it is snapshotted"
+    if ". scripts/_substrate_config.sh" in gate:
+        return False, "the config helper is sourced live, before anything attests it"
+    cut = gate.index("# Whether memory is PART OF THIS RELEASE is decided once")
+    head = "\n".join(ln for ln in gate[:cut].splitlines()
+                      if not ln.startswith('echo "==> ')) + "\n"
     with tempfile.TemporaryDirectory() as td:
         td = Path(td)
         _stage(td, "_substrate_config.sh")
         (td / ".substrate").mkdir()
-        (td / ".substrate" / "config").write_text('SUBSTRATE_PROFILE="standard"\n')
-        head = gate[:stop] + 'echo GATE_HEAD_OK\n'
-        (td / "head.sh").write_text(head)
+        (td / ".substrate" / "config").write_text('SUBSTRATE_PROFILE="strict"\n')
+        (td / "head.sh").write_text(head + 'echo "GATE_HEAD_OK profile=$SUBSTRATE_PROFILE"\n')
         ok = subprocess.run(["bash", "head.sh"], cwd=str(td), capture_output=True,
                             text=True, timeout=60)
-        if ok.returncode != 0 or "GATE_HEAD_OK" not in ok.stdout:
-            return True, "skipped: gate head does not run standalone on this host"
+        if ok.returncode != 0 or "GATE_HEAD_OK profile=strict" not in ok.stdout:
+            return False, ("the gate head does not run standalone, so this task cannot "
+                           "measure: " + (ok.stderr or ok.stdout)[:160])
+        # A-B-A: the live file is standard for exactly the duration of the load.
         raced = head.replace(
-            "load_substrate_config ||",
-            'printf \'SUBSTRATE_PROFILE="strict"\\n\' > .substrate/config\nload_substrate_config ||', 1)
-        (td / "raced.sh").write_text(raced)
+            'load_substrate_config "$_SUBSTRATE_SNAP/config"',
+            'printf \'SUBSTRATE_PROFILE="standard"\\n\' > .substrate/config\n'
+            'load_substrate_config "$_SUBSTRATE_SNAP/config"', 1)
+        (td / "raced.sh").write_text(raced + 'echo "GATE_HEAD_OK profile=$SUBSTRATE_PROFILE"\n')
         r = subprocess.run(["bash", "raced.sh"], cwd=str(td), capture_output=True,
                            text=True, timeout=60)
-        if r.returncode == 0 or "GATE_HEAD_OK" in r.stdout:
-            return False, "a config edited during the load was certified"
-        if "while it was being loaded" not in r.stderr:
+        if "GATE_HEAD_OK profile=standard" in r.stdout:
+            return False, "an A-B-A swap around the load changed the values the gate ran on"
+        if "GATE_HEAD_OK profile=strict" not in r.stdout:
             return False, "failed for an unrelated reason: " + (r.stderr or r.stdout)[:160]
-        return True, f"rc={r.returncode}, load-window edit refused"
+        return True, "load reads the pinned snapshot, not the live file"
 
 
 def t_release_gate_memory_vanish_blocked():
@@ -1741,6 +1834,8 @@ TASKS = [
     ("release_gate_unpublished_anchor_blocked", "malicious", "block", t_release_gate_unpublished_anchor_blocked, True),
     ("release_gate_stale_profile_blocked", "malicious", "block", t_release_gate_stale_profile_blocked, True),
     ("release_gate_config_load_gap_blocked", "malicious", "block", t_release_gate_config_load_gap_blocked, True),
+    ("release_gate_unattested_helper_blocked", "malicious", "block", t_release_gate_unattested_helper_blocked, True),
+    ("release_gate_nonregular_memory_blocked", "malicious", "block", t_release_gate_nonregular_memory_blocked, True),
     ("release_gate_memory_vanish_blocked", "malicious", "block", t_release_gate_memory_vanish_blocked, True),
     ("memory_anchor_duplicate_profile_enforced", "malicious", "block", t_memory_anchor_duplicate_profile_enforced, True),
     ("memory_anchor_forced_head_race_blocked", "malicious", "block", t_memory_anchor_forced_head_race_blocked, True),

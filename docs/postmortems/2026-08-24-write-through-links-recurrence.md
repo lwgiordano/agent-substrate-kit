@@ -1253,6 +1253,70 @@ variable, and a test asserting on a helper the caller need not use. The revert m
 fail because the DECIDING path changed, and the hostile input must be the real one —
 a space-free path cannot test quoting.
 
+## Round 19 — v3.8.57 (round-39): four readers of one file, and a claim I had not earned
+
+Seven findings, five P1. The largest round, and the one where the interesting
+failure is not any single bug.
+
+**The trusted inputs were re-read instead of held.** `.substrate/config` was
+compared before and after the load, which still admits A-B-A: swap the file for
+exactly as long as `load_substrate_config` reads, restore it, and both
+fingerprints match while the run carries the swapped values. Comparing bytes at
+two moments can never exclude that. The gate now copies the config to a private
+directory and loads FROM the copy — there is no window rather than a checked one.
+The config LOADER got the same treatment for the same reason: it was sourced at
+line 11, before any validator attested it, so a helper that acted during the
+trusted release and restored itself was clean by the time integrity checks looked.
+
+**Presence was tested with `-f`, which is false for a FIFO.** A non-regular
+`events.jsonl` read as ABSENT at both the start and the end check, so every memory
+verification was skipped and the gate passed. That is fail-open on absence — the
+defect this entire arc opened with in v3.8.51 — reached this time not by removing
+a check but by choosing a test that answers "no" to the tampered case.
+
+### The part that matters: I claimed a sweep I had not done
+
+Round 38 fixed `memory_log`'s private profile parser and the commit message said
+the cluster search covered "the shell loader, `check_substrate_config.py`, and
+`memory_log`". Codex found `command_policy` — a THIRD parser with the original
+first-match bug, at the RUNTIME hook boundary, deciding strict-only behaviour
+before any gate runs. Sweeping properly then found `completion_gate` and
+`substrate_doctor` with the same shape, and two WRITERS (`substrate_profile`,
+`substrate_upgrade`) that rewrote only the FIRST assignment — so with a duplicate
+present, `manage.sh enable profile strict` printed success over a config that
+still resolved to standard. Four readers and two writers of one policy file.
+
+The round-38 replacement was also wrong in a way the round-38 test could not see:
+it used `str.splitlines()`, which breaks on VT/FF/NEL/GS where `while IFS= read
+-r` does not, so an assignment hidden after a control character inside what the
+shell treats as a COMMENT won. Mirroring a parser means mirroring how it splits.
+
+And the first fix to `command_policy` was incomplete in the same direction: I
+routed it to the canonical parser but left `.splitlines()` upstream, so the parser
+received lines the shell never sees and inherited the disagreement the delegation
+was meant to remove. **Whoever splits the text decides the semantics.**
+
+### Two probes proved nothing, for the fourth round running
+
+The array check judged whole LINES, and `run_py` expands `RUN` twice on one line —
+so reverting one expansion left the guarded sibling on the same line satisfying
+the test. The reader check searched for the string `substrate_profile`, so
+reverting the CALL while leaving the IMPORT kept everything green. Both now assert
+through the deciding path: per-occurrence for the shell expansion, and
+`command_policy.profile()` compared against the real shell loader for the parser.
+Strengthening them immediately exposed two incomplete fixes of my own.
+
+**Carry-forward rule, part 30 — a cluster search is a claim, and claims get
+mechanized.** "I checked every reader" is unverifiable prose in a commit message
+and was false twice. The inventory is now a discovery test that fails on any new
+reader that does not route through the canonical parser, with an allowlist whose
+entries each carry the reason they are not readers.
+
+**Carry-forward rule, part 31 — mirroring a parser includes mirroring how it
+splits its input.** Two implementations agreeing on every token can still
+disagree on where a line ends. Pass RAW text to the canonical parser; the moment
+a caller pre-splits, the caller owns the semantics again.
+
 ## (Optional) Reproduction
 
 In a disposable repo: `ln victim.txt AGENT_BUS.md` then

@@ -13016,12 +13016,21 @@ def test_release_gate_fingerprints_the_config_before_any_validator() -> None:
 
 
 def _gate_head(td, extra_prelude=""):
-    """The REAL head of scripts/release_gate.sh up to the first validator, so the
-    load/fingerprint ordering can be executed rather than asserted about."""
+    """The REAL head of scripts/release_gate.sh THROUGH the config load.
+
+    v3.8.57: the load moved after the validators (the helper must not be sourced
+    before anything attests it), so slicing to the first validator would stop
+    before the code under test and report an unbound-variable failure as a pass.
+    The validator COMMANDS are dropped; every line that decides snapshotting,
+    attestation and loading is kept verbatim.
+    """
     src = (SCRIPTS / "release_gate.sh").read_text(encoding="utf-8")
-    stop = src.index('echo "==> Import shadowing"')
+    stop = src.index("# Whether memory is PART OF THIS RELEASE is decided once")
+    body = "\n".join(ln for ln in src[:stop].splitlines()
+                      if not ln.startswith('echo "==> ')) + "\n"
     head = td / "gate_head.sh"
-    head.write_text(src[:stop] + extra_prelude + 'echo GATE_HEAD_OK\n', encoding="utf-8")
+    head.write_text(body + extra_prelude
+                    + 'echo "GATE_HEAD_OK profile=$SUBSTRATE_PROFILE"\n', encoding="utf-8")
     return head
 
 
@@ -13036,34 +13045,79 @@ def _config_repo(tmp_path, profile='SUBSTRATE_PROFILE="standard"\n'):
     return td
 
 
-def test_release_gate_pins_the_config_before_loading_it(tmp_path) -> None:
-    """round-38 P1: the config was LOADED before it was fingerprinted, so an edit in
-    that window was certified under the new fingerprint while the gate went on
-    executing the values cached from the old one.
+def test_release_gate_loads_the_config_it_pinned(tmp_path) -> None:
+    """round-38 P1 then round-39 P1: comparing bytes at two moments is not enough.
 
-    The head of the real gate is executed here with a prelude that rewrites the
-    config between the load and the verification, which is the window itself.
+    v3.8.56 fingerprinted before the load and compared after it. That still admits
+    A-B-A: swap the file to `standard` for exactly as long as `load_substrate_config`
+    reads, restore `strict`, and both fingerprints match while the gate runs on the
+    standard values it cached. The gate now takes a private snapshot and LOADS FROM
+    IT, so the values are provably the pinned ones and there is no window to lose.
     """
-    td = _config_repo(tmp_path)
     src = (SCRIPTS / "release_gate.sh").read_text(encoding="utf-8")
-    assert src.index("_SUBSTRATE_CONFIG_AT_START=") < src.index("load_substrate_config ||"), \
-        "the config must be fingerprinted BEFORE it is loaded"
+    assert src.index("_SUBSTRATE_SNAP=") < src.index('load_substrate_config "$_SUBSTRATE_SNAP/config"')
+    assert ". scripts/_substrate_config.sh" not in src, \
+        "the live config helper must never be sourced — it is sourced from the snapshot"
 
-    # Simulate the racing writer by editing the file between fingerprint and check.
-    head = _gate_head(td, extra_prelude="")
+    td = _config_repo(tmp_path, profile='SUBSTRATE_PROFILE="strict"\n')
+    head = _gate_head(td)
     ok = subprocess.run(["bash", str(head)], cwd=str(td), capture_output=True, text=True, timeout=60)
     assert ok.returncode == 0, ok.stdout + ok.stderr
-    assert "GATE_HEAD_OK" in ok.stdout
+    assert "GATE_HEAD_OK profile=strict" in ok.stdout
 
     raced = td / "raced.sh"
-    body = head.read_text(encoding="utf-8").replace(
-        "load_substrate_config ||",
-        'printf \'SUBSTRATE_PROFILE="strict"\\n\' > .substrate/config\nload_substrate_config ||', 1)
-    raced.write_text(body, encoding="utf-8")
+    raced.write_text(head.read_text(encoding="utf-8").replace(
+        'load_substrate_config "$_SUBSTRATE_SNAP/config"',
+        'printf \'SUBSTRATE_PROFILE="standard"\\n\' > .substrate/config\n'
+        'load_substrate_config "$_SUBSTRATE_SNAP/config"', 1), encoding="utf-8")
     r = subprocess.run(["bash", str(raced)], cwd=str(td), capture_output=True, text=True, timeout=60)
-    assert r.returncode != 0, "a config edited during the load must not be certified: " + r.stdout
+    assert "GATE_HEAD_OK profile=standard" not in r.stdout, \
+        "an A-B-A swap around the load changed the values the gate ran on: " + r.stdout
+    assert "GATE_HEAD_OK profile=strict" in r.stdout, r.stdout + r.stderr
+
+
+def test_release_gate_attests_the_config_helper_before_sourcing_it(tmp_path) -> None:
+    """round-39 P1: `scripts/_substrate_config.sh` was sourced at line 11, before any
+    validator attested it, so a helper that acted during the trusted release and
+    restored itself was clean by the time integrity checks looked.
+
+    It is now copied, and the copy is sourced only after the validators, with the
+    live file re-hashed to prove it is the one they saw.
+    """
+    src = (SCRIPTS / "release_gate.sh").read_text(encoding="utf-8")
+    assert src.index("check_import_shadowing.py") < src.index('. "$_SUBSTRATE_SNAP/_substrate_config.sh"'), \
+        "the helper must be sourced AFTER the validators have run over the tree"
+
+    td = _config_repo(tmp_path)
+    swapped = td / "swapped.sh"
+    swapped.write_text(_gate_head(td).read_text(encoding="utf-8").replace(
+        '_helper_now="$(run_py',
+        'printf \'\\n# swapped after the validators\\n\' >> scripts/_substrate_config.sh\n'
+        '_helper_now="$(run_py', 1), encoding="utf-8")
+    r = subprocess.run(["bash", str(swapped)], cwd=str(td), capture_output=True, text=True, timeout=60)
+    assert r.returncode != 0, "a helper swapped after attestation must not be sourced: " + r.stdout
     assert "GATE_HEAD_OK" not in r.stdout
-    assert "while it was being loaded" in r.stderr
+    assert "changed while the" in r.stderr
+
+
+def test_release_gate_refuses_a_non_regular_memory_log(tmp_path) -> None:
+    """round-39 P1: presence was tested with `-f`, which is FALSE for a FIFO, so a
+    non-regular events.jsonl planted after the earlier validators read as ABSENT at
+    both the start and the end check and every memory verification was skipped."""
+    td = _config_repo(tmp_path)
+    (td / ".substrate" / "memory").mkdir(parents=True, exist_ok=True)
+    try:
+        os.mkfifo(str(td / ".substrate" / "memory" / "events.jsonl"))
+    except (OSError, AttributeError):
+        pytest.skip("cannot create a FIFO on this host")
+    src = (SCRIPTS / "release_gate.sh").read_text(encoding="utf-8")
+    guard = src[src.index("# `-e`, not `-f` (round-39 P1)"):src.index("_MEMORY_IN_RELEASE=0")]
+    probe = td / "probe.sh"
+    probe.write_text("set -euo pipefail\n" + guard + 'echo REACHED\n', encoding="utf-8")
+    r = subprocess.run(["bash", str(probe)], cwd=str(td), capture_output=True, text=True, timeout=60)
+    assert r.returncode != 0, "a FIFO memory log must be refused, not read as absent: " + r.stdout
+    assert "REACHED" not in r.stdout
+    assert "not a regular file" in r.stderr
 
 
 def test_release_gate_refuses_when_the_memory_log_vanishes_mid_run(tmp_path) -> None:
@@ -13296,6 +13350,170 @@ def test_memory_anchor_unreadable_profile_config_is_treated_as_strict(tmp_path) 
     r = m("verify", "--anchor")
     assert r.returncode == 1, r.stdout + r.stderr
     assert "ANCHOR NOT PUBLISHED" in r.stderr
+
+
+# --- one policy file, one parser (round-38 P1, round-39 P1) ------------------
+
+_PROFILE_CONFIGS = [
+    'SUBSTRATE_PROFILE="strict"\n',
+    'SUBSTRATE_PROFILE="standard"\n',
+    'SUBSTRATE_PROFILE=strict\n',
+    "SUBSTRATE_PROFILE='strict'\n",
+    # LAST assignment wins, as the shell loader does.
+    'SUBSTRATE_PROFILE="standard"\nSUBSTRATE_PROFILE="strict"\n',
+    'SUBSTRATE_PROFILE="strict"\nSUBSTRATE_PROFILE="standard"\n',
+    # A differently-named key must not answer for this one.
+    'SUBSTRATE_PROFILE_OLD="strict"\nSUBSTRATE_PROFILE="standard"\n',
+    # Comments, whole-line and trailing.
+    '# SUBSTRATE_PROFILE="strict"\nSUBSTRATE_PROFILE="standard"\n',
+    'SUBSTRATE_PROFILE="standard" # not strict yet\n',
+    'SUBSTRATE_PROFILE="strict"  # yes\n',
+    # CONTROL CHARACTERS: Python's str.splitlines() breaks on VT/FF/NEL and
+    # `while IFS= read -r` does not, so a second assignment hidden after a VT
+    # inside what the shell sees as a COMMENT read as standard (round-39).
+    'SUBSTRATE_PROFILE="strict" #\x0bSUBSTRATE_PROFILE="standard"\n',
+    'SUBSTRATE_PROFILE="strict" #\x0cSUBSTRATE_PROFILE="standard"\n',
+    'SUBSTRATE_PROFILE="strict" #\x1dSUBSTRATE_PROFILE="standard"\n',
+    '  SUBSTRATE_PROFILE="strict"\n',
+]
+
+
+@pytest.mark.parametrize("config", _PROFILE_CONFIGS)
+def test_canonical_profile_parser_agrees_with_the_shell_loader(tmp_path, config) -> None:
+    """The Python parser is compared against the REAL shell loader, not against my
+    expectations of it. Both rounds' bugs were disagreements a hand-written
+    expectation table would have encoded rather than caught."""
+    td = tmp_path / "cfg"
+    (td / ".substrate").mkdir(parents=True)
+    (td / "scripts").mkdir()
+    (td / "scripts" / "_substrate_config.sh").write_text(
+        (SCRIPTS / "_substrate_config.sh").read_text(encoding="utf-8"), encoding="utf-8")
+    (td / ".substrate" / "config").write_text(config, encoding="utf-8")
+
+    shell = subprocess.run(
+        ["bash", "-c",
+         '. scripts/_substrate_config.sh && load_substrate_config && printf "%s" "$SUBSTRATE_PROFILE"'],
+        cwd=str(td), capture_output=True, text=True, timeout=60)
+    if shell.returncode != 0:
+        pytest.skip("the shell loader rejects this config; parity is only defined for valid ones")
+
+    import importlib.util as _iu
+    spec = _iu.spec_from_file_location("_dc_parity", SCRIPTS / "_doc_common.py")
+    mod = _iu.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert mod.substrate_profile(config) == shell.stdout, (
+        f"python={mod.substrate_profile(config)!r} shell={shell.stdout!r} for {config!r}")
+
+
+# Modules that legitimately mention SUBSTRATE_PROFILE without READING a profile
+# value out of config text. Every entry carries the reason it is not a reader.
+_PROFILE_NON_READERS = {
+    "_doc_common.py": "defines the canonical parser",
+    "check_substrate_config.py": "the canonical GENERIC key=value validator; profile is one key of many",
+    "check_exfil_guard.py": "docstring mention of the tier only",
+    "check_harness_smoke.py": "writes fixture configs",
+    "run_substrate_evals.py": "writes fixture configs",
+    "substrate_upgrade.py": "generic _parse_config plus the profile WRITER",
+    "substrate_profile.py": "the profile WRITER / CLI",
+}
+
+
+def test_every_python_profile_reader_uses_the_canonical_parser() -> None:
+    """round-39 P1, and the sweep it prompted.
+
+    Codex reported `command_policy` as a second reader with the first-match bug
+    round 38 had removed from `memory_log`. Sweeping for the shape found two more
+    — `completion_gate` and `substrate_doctor` — plus two WRITERS that rewrote only
+    the first assignment, so a profile raise did not take effect when a duplicate
+    followed it. The v3.8.56 commit message claimed this inventory had been done;
+    it had not. This test is that claim, mechanized.
+    """
+    offenders = []
+    for path in sorted(SCRIPTS.glob("*.py")):
+        text = path.read_text(encoding="utf-8", errors="replace")
+        if "SUBSTRATE_PROFILE" not in text:
+            continue
+        if path.name in _PROFILE_NON_READERS:
+            continue
+        if "substrate_profile" not in text:
+            offenders.append(f"{path.name}: reads SUBSTRATE_PROFILE without the canonical parser")
+    assert not offenders, (
+        "one policy file needs one parser:\n  " + "\n  ".join(offenders)
+        + "\n(add a reason to _PROFILE_NON_READERS only if the module does not extract a profile)")
+
+
+def test_profile_writers_rewrite_every_assignment() -> None:
+    """The writers' half of the same rule: the loader takes the LAST assignment, so
+    rewriting the first and stopping leaves a later duplicate winning and the
+    written profile silently not in force."""
+    for name in ("substrate_profile.py", "substrate_upgrade.py"):
+        text = (SCRIPTS / name).read_text(encoding="utf-8")
+        idx = text.index('startswith("SUBSTRATE_PROFILE=")')
+        window = text[idx:idx + 400]
+        assert "break" not in window.split("if not")[0], (
+            f"{name}: the profile rewrite loop stops at the first assignment; the "
+            "loader takes the last, so the write may not take effect")
+
+
+@pytest.mark.parametrize("config", _PROFILE_CONFIGS[:13])
+def test_command_policy_reads_the_profile_like_the_shell_loader(tmp_path, config) -> None:
+    """round-39 P1, pinned through the DECIDING function.
+
+    `command_policy.profile()` is the runtime hook boundary — it decides strict-only
+    behaviour before any gate runs. Asserting that the module merely mentions the
+    canonical parser proved nothing: reverting the call while leaving the import
+    kept every test green. This runs the real function against the real shell
+    loader instead.
+    """
+    td = tmp_path / "cp"
+    (td / ".substrate").mkdir(parents=True)
+    (td / "scripts").mkdir()
+    (td / "scripts" / "_substrate_config.sh").write_text(
+        (SCRIPTS / "_substrate_config.sh").read_text(encoding="utf-8"), encoding="utf-8")
+    (td / ".substrate" / "config").write_text(config, encoding="utf-8")
+
+    shell = subprocess.run(
+        ["bash", "-c",
+         '. scripts/_substrate_config.sh && load_substrate_config && printf "%s" "$SUBSTRATE_PROFILE"'],
+        cwd=str(td), capture_output=True, text=True, timeout=60)
+    if shell.returncode != 0:
+        pytest.skip("the shell loader rejects this config; parity is only defined for valid ones")
+
+    got = subprocess.run(
+        [sys.executable, "-c",
+         "import sys; sys.path.insert(0, %r)\n"
+         "import command_policy; print(command_policy.profile())" % str(SCRIPTS)],
+        cwd=str(td), env={**os.environ, "SUBSTRATE_PROJECT_DIR": str(td)},
+        capture_output=True, text=True, timeout=60)
+    assert got.returncode == 0, got.stdout + got.stderr
+    assert got.stdout.strip() == shell.stdout, (
+        f"command_policy={got.stdout.strip()!r} shell={shell.stdout!r} for {config!r}")
+
+
+def test_release_gate_expands_the_runner_array_portably() -> None:
+    """round-39 P2: on Bash 3.2 — still /bin/bash on macOS — expanding an EMPTY
+    array under `set -u` aborts, so `"${RUN[@]}"` made the no-venv fallback
+    unreachable on exactly the hosts that needed it, and the gate could not run at
+    all there.
+
+    This is pinned by SHAPE rather than by execution: this container has Bash 5.2,
+    where the unsafe form works, so a behavioural test here would pass over the
+    bug. The failure was reproduced by the external auditor on Bash 3.2.57, not by
+    me, and I am not going to dress a shape assertion up as having run it.
+    """
+    src = (SCRIPTS / "release_gate.sh").read_text(encoding="utf-8")
+    # Per-OCCURRENCE, not per-line: run_py expands RUN twice on one line, so a
+    # line-level test passed while one of the two was reverted to the unsafe form.
+    # A probe that the guarded sibling on the same line satisfies proves nothing.
+    # Comment lines are prose, and this file's own comment quotes the unsafe form
+    # to explain it — flagging that is a false positive, which is how a gate gets
+    # switched off. Judge CODE lines, per occurrence.
+    code = "\n".join(ln for ln in src.splitlines() if not ln.lstrip().startswith("#"))
+    unguarded = len(re.findall(r'(?<!\$\{RUN\[@\]\+)"\$\{RUN\[@\]\}"', code))
+    assert unguarded == 0, (
+        f"{unguarded} unguarded expansion(s) of RUN; use "
+        '${RUN[@]+"${RUN[@]}"} so an empty array is safe under set -u on Bash 3.2')
+    assert '${RUN[@]+"${RUN[@]}"}' in src, "the portable expansion is gone"
 
 
 def test_release_gate_publishes_the_anchor_itself(tmp_path) -> None:

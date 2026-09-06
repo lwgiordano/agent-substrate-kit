@@ -221,7 +221,7 @@ ALLOWLIST: dict[str, str] = {
         "which both gate tasks now use so neither can hand-build a tail that exits "
         "on an unbound variable and scores as a block. The fourth (v3.8.56) reads "
         "the same gate source to execute its HEAD, so the round-38 load-window task "
-        "exercises the real load/fingerprint ordering instead of a paraphrase", 4),
+        "exercises the real load/fingerprint ordering instead of a paraphrase. The fifth and sixth (v3.8.57) read it in the shared head builder and in the non-regular-memory task, so both execute the shipped guard text rather than a copy that can drift from it; the seventh checks, in the helper-attestation task, that the live loader is no longer sourced directly", 7),
     "run_substrate_evals.py:src.read_text":
         "stages a copy of the kit's OWN script source into a fresh temp fixture; "
         "the source is code under review (and CODEOWNED + hash-pinned), not "

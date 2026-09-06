@@ -1,6 +1,6 @@
 ---
 purpose: Agent context inventory, harness scanning, budgets, and doc drift.
-last_human_reviewed: 2026-08-27
+last_human_reviewed: 2026-09-06
 covers:
   - agentsync.sh
   - manage.sh
@@ -150,3 +150,5 @@ hard-linked `AGENT_BUS.md` (an external-write primitive), fails fast rather than
 hanging on a FIFO, collapses newlines so a multiline message cannot forge extra
 lease lines, and propagates commit/push failure so a message is never reported
 "synced" when it did not land on the remote.
+
+`_doc_common` also carries the canonical `SUBSTRATE_PROFILE` parser. It lives there because the module is never stripped from any profile, so every Python reader can route through one implementation instead of keeping a private copy that drifts — which four of them had (v3.8.57).

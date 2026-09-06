@@ -2,7 +2,7 @@
 purpose: Command policy, hooks, sandboxing, and local or remote governance.
 asserts:
   - scripts/command_policy.py::looks_dangerous_command
-last_human_reviewed: 2026-08-27
+last_human_reviewed: 2026-09-06
 covers:
   - manage.sh
   - scripts/_substrate_config.sh
@@ -35,6 +35,24 @@ dangerous configured commands, and attempts to lower frozen capability floors
 stop the gate before project commands run.
 
 ## Command and hook policy
+
+ONE POLICY FILE, ONE PARSER. `SUBSTRATE_PROFILE` decides strict-only behaviour at
+the runtime hook boundary, in the release gate, in the doctor's reported tier and
+in anchor-publication enforcement, and every Python reader takes it from
+`_doc_common.substrate_profile`, which mirrors `_substrate_config.sh` exactly:
+split on `\n` ONLY, skip blank and comment lines, drop a trailing ` #` comment,
+require the exact key, strip one layer of quotes, LAST assignment wins. Each rule
+is there because a private copy got it wrong: first-match made
+standard-then-strict read as base-tier, prefix matching let
+`SUBSTRATE_PROFILE_OLD=` answer, substring matching read "not strict yet" as
+strict, and `str.splitlines()` broke on VT/FF/GS where `while IFS= read -r` does
+not, so an assignment hidden after a control character inside a shell COMMENT won.
+Four separate readers carried some version of this. Whoever splits the text
+decides the semantics, so the canonical parser takes RAW config text, never
+pre-split lines. The WRITERS mirror the same rule from the other side: they
+rewrite every assignment, because rewriting only the first leaves a later
+duplicate winning and a profile raise silently not in force. A discovery test
+fails on any new reader that does not route here.
 
 `command_policy.looks_dangerous_command` is the shared policy seam for configured
 and interactive shell checks. The policy blocks destructive filesystem forms,

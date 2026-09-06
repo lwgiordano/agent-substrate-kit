@@ -211,21 +211,31 @@ def profile() -> str:
         finally:
             os.close(_fd)
         try:
-            lines = b"".join(_chunks).decode("utf-8").splitlines()
+            # RAW text, not pre-split lines (v3.8.57, round-39). Splitting here
+            # with str.splitlines() breaks on VT/FF/GS, so the canonical parser
+            # received lines the shell loader never sees and the delegation
+            # inherited the very disagreement it was meant to remove. Whoever
+            # splits decides the semantics.
+            raw_cfg = b"".join(_chunks).decode("utf-8")
         except UnicodeDecodeError as e:
             raise CommandPolicyUnavailable(
                 f"could not read .substrate/config: {e}") from None
-        for line in lines:
-            s = line.strip()
-            if not s or s.startswith("#"):
-                continue
-            if s.startswith("SUBSTRATE_PROFILE="):
-                val = s.split("=", 1)[1].strip().strip("\"'")
-                if val not in _VALID_PROFILES:
-                    raise CommandPolicyUnavailable(
-                        f"invalid SUBSTRATE_PROFILE in .substrate/config: {val!r}")
-                configured = val
-                break
+        # v3.8.57 (round-39): this was a THIRD parser of one policy file, with
+        # the first-match bug round 38 removed from memory_log — and the sweep
+        # that claimed to inventory every reader missed it, so a config
+        # assigning standard then strict downgraded strict-only hook behaviour
+        # at the RUNTIME boundary, before any gate runs. One canonical reader.
+        try:
+            from _doc_common import substrate_profile as _substrate_profile
+        except Exception as e:  # pragma: no cover - _doc_common is never stripped
+            raise CommandPolicyUnavailable(
+                f"canonical profile parser unavailable: {e}") from None
+        val = _substrate_profile(raw_cfg)
+        if val:
+            if val not in _VALID_PROFILES:
+                raise CommandPolicyUnavailable(
+                    f"invalid SUBSTRATE_PROFILE in .substrate/config: {val!r}")
+            configured = val
     # PROFILE LOCK: never run BELOW the pinned minimum, even at the runtime hook
     # boundary (before the gate runs). A downgraded config can't disable strict.
     # v3.8.36 FAIL CLOSED (Codex round-19): the old read ignored the lock on ANY

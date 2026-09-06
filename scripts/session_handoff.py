@@ -80,46 +80,17 @@ except Exception:
 try:
     from _doc_common import safe_atomic_write as _safe_atomic_write
 except Exception:  # pragma: no cover - stripped install
-    def _safe_atomic_write(target, text, root=None, tmp_prefix=".saw-", make_parents=False):
-        target = Path(target)
-        parent = target.parent
-        if make_parents:
-            parent.mkdir(parents=True, exist_ok=True)
-        dir_fd = os.open(str(parent), os.O_RDONLY
-                         | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
-        try:
-            path_st = os.lstat(str(parent))
-            fd_st = os.fstat(dir_fd)
-            if (path_st.st_dev, path_st.st_ino) != (fd_st.st_dev, fd_st.st_ino):
-                raise OSError(f"write parent was swapped after the guard — refusing: {parent}")
-            tmp_name = None
-            tfd = None
-            for _ in range(16):
-                cand = f"{tmp_prefix}{os.getpid()}-{os.urandom(6).hex()}.tmp"
-                try:
-                    tfd = os.open(cand, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=dir_fd)
-                    tmp_name = cand
-                    break
-                except FileExistsError:
-                    continue
-            if tfd is None:
-                raise OSError(f"could not create a temporary file for the write in {parent}")
-            try:
-                with os.fdopen(tfd, "w", encoding="utf-8") as fh:
-                    tfd = None
-                    fh.write(text)
-                os.replace(tmp_name, target.name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
-                tmp_name = None
-            finally:
-                if tfd is not None:
-                    os.close(tfd)
-                if tmp_name is not None:
-                    try:
-                        os.unlink(tmp_name, dir_fd=dir_fd)
-                    except OSError:
-                        pass
-        finally:
-            os.close(dir_fd)
+    # v3.8.51 (self-audit, architecture P3): this was a ~40-line "same
+    # algorithm" mirror of _doc_common.safe_atomic_write — and it still opened
+    # the parent by MULTI-COMPONENT path, the exact window v3.8.44 closed in
+    # the canonical primitive (component-walk descent), with no post-op
+    # liveness check (v3.8.45). A copy of a security primitive that silently
+    # stayed two fixes behind, in a fallback that _doc_common is never actually
+    # stripped from. Refuse instead: capture() already fails open by design (a
+    # blocking PreCompact hook wedges the session), so the outcome of a
+    # stripped install is "no handoff written", never a weakly guarded one.
+    def _safe_atomic_write(*a, **k):
+        raise OSError("safe_atomic_write unavailable — refusing an unguarded write")
 try:
     import _text_safety  # confusable/leet-fold + kit-token neutralize for danger scans
 except Exception:  # pragma: no cover - fail open to the un-folded raw text

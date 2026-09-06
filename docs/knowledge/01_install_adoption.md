@@ -4,7 +4,7 @@ asserts:
   - bootstrap.sh::_safe_mkdir_p
   - bootstrap.sh::wappend
   - scripts/run_python_gate.sh::_ruff_args
-last_human_reviewed: 2026-08-28
+last_human_reviewed: 2026-09-06
 covers:
   - bootstrap.sh
   - manage.sh
@@ -87,9 +87,19 @@ fallback is parity-checked against the canonical surface inventory so a missing
 helper import cannot silently remove newly governed files from the readiness
 scan.
 
+The same refusal to overclaim applies to its memory row, which delegates to
+`memory_log verify --anchor` and reports what that actually proved: `pass` for an
+anchor confirmed against the remote, `pass` for a local anchor in a repo with no
+remote (offline-complete is the documented base, so local is then the strongest
+anchor obtainable), `warn` when an origin exists but does not publish it, and
+`fail` for a strict repo with an unpublished anchor or a local note that
+disagrees with the remote.
+
 
 A present-but-unusable `.substrate/config` is tampering, not an absent config.
 `is_file()` is false for a FIFO, a socket, and a dangling symlink, so such a
 file used to fall into the "missing config" branch and let every default
 through; the gate now distinguishes absent from unreadable and fails closed on
 the latter, matching how the frozen `required_*` locks already behave.
+
+`manage.sh enable profile <tier>` rewrites EVERY `SUBSTRATE_PROFILE` line in `.substrate/config`. Rewriting only the first left a later duplicate winning, so the command printed success over a config that still resolved to the old tier (v3.8.57); the doctor's reported profile comes from the same canonical parser every other reader uses.

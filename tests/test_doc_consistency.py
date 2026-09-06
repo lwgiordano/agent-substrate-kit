@@ -33,9 +33,11 @@ KNOWLEDGE_DOCS = {
     "02_upgrade_integrity.md": "Upgrade provenance, authority floors, transactions, and postconditions.",
     "03_memory_sessions.md": "Tamper-evident memory, session restore, completion, and append-only logs.",
     "04_policy_governance.md": "Command policy, hooks, sandboxing, and local or remote governance.",
-    "05_evals_assurance.md": "Behavioral evals, deterministic validators, audits, and assurance limits.",
+    "05_evals_assurance.md": "Behavioral evals, the malicious and benign corpus, and assurance limits.",
     "06_release_distribution.md": "Release packaging, signing, manifests, and artifact verification.",
     "07_agent_context_governance.md": "Agent context inventory, harness scanning, budgets, and doc drift.",
+    "08_memory_anchor.md": "The memory trust anchor — monotonic advance, remote confirmation, and limits.",
+    "09_deterministic_validators.md": "Deterministic validator layers, pinned copies, and append-only gates.",
 }
 
 KNOWLEDGE_ASSERTS = {

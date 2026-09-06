@@ -12867,15 +12867,27 @@ def _gate_tail(td, profile_line="SUBSTRATE_PROFILE=standard", start_fingerprint=
     src = (SCRIPTS / "release_gate.sh").read_text(encoding="utf-8")
     marker = "# Re-tie the memory chain"
     assert marker in src, "release_gate.sh lost the marker this test splits on"
-    fp = ('_substrate_config_fingerprint(){ %s -c '
+    # shlex.quote, not a bare %s (round-38 P2). An interpreter path containing
+    # a space split into two words, so the generated function ran
+    # `/path/first-component` and the harness measured rc 127 instead of the
+    # gate. Codex's own checkout lives under a directory with a space, which is
+    # how this surfaced: it made their whole `check` and `evals` run red.
+    q = shlex.quote(sys.executable)
+    fp = ('_substrate_config_fingerprint(){ ' + q + ' -c '
           "'import hashlib,pathlib,sys;p=pathlib.Path(\".substrate/config\");"
           'sys.stdout.write(hashlib.sha256(p.read_bytes()).hexdigest() if p.is_file()'
-          ' else "nonregular" if p.exists() else "absent")\'; }\n'
-          % sys.executable)
+          ' else "nonregular" if p.exists() else "absent")\'; }\n')
+    # Every variable the tail INHERITS from above the split point must be supplied
+    # here, and derived rather than hardcoded: a missing one exits nonzero under
+    # `set -u`, which is indistinguishable from the block under test refusing.
+    # That has now happened twice (v3.8.55, v3.8.56), so the value is computed
+    # from the fixture's real state.
+    memory_flag = "1" if (td / ".substrate" / "memory" / "events.jsonl").is_file() else "0"
     tail = td / "gate_tail.sh"
     tail.write_text(
         'set -euo pipefail\n' + profile_line + '\n'
-        + 'run_py(){ "%s" -I "$@"; }\n' % sys.executable
+        + '_MEMORY_IN_RELEASE=%s\n' % memory_flag
+        + 'run_py(){ ' + q + ' -I "$@"; }\n'
         + fp
         + '_SUBSTRATE_CONFIG_AT_START=%s\n' % (
             start_fingerprint if start_fingerprint is not None else '"$(_substrate_config_fingerprint)"')
@@ -13001,6 +13013,193 @@ def test_release_gate_fingerprints_the_config_before_any_validator() -> None:
     end_block = src[src.index("==> Memory anchor re-check"):src.index('echo "release-gate: passed"')]
     assert "$SUBSTRATE_PROFILE" not in end_block, \
         "the end-state check must not branch on the profile loaded at process start"
+
+
+def _gate_head(td, extra_prelude=""):
+    """The REAL head of scripts/release_gate.sh up to the first validator, so the
+    load/fingerprint ordering can be executed rather than asserted about."""
+    src = (SCRIPTS / "release_gate.sh").read_text(encoding="utf-8")
+    stop = src.index('echo "==> Import shadowing"')
+    head = td / "gate_head.sh"
+    head.write_text(src[:stop] + extra_prelude + 'echo GATE_HEAD_OK\n', encoding="utf-8")
+    return head
+
+
+def _config_repo(tmp_path, profile='SUBSTRATE_PROFILE="standard"\n'):
+    td = tmp_path / "cfgrepo"
+    (td / ".substrate").mkdir(parents=True)
+    (td / "scripts").mkdir()
+    for name in ("_substrate_config.sh",):
+        (td / "scripts" / name).write_text((SCRIPTS / name).read_text(encoding="utf-8"),
+                                           encoding="utf-8")
+    (td / ".substrate" / "config").write_text(profile, encoding="utf-8")
+    return td
+
+
+def test_release_gate_pins_the_config_before_loading_it(tmp_path) -> None:
+    """round-38 P1: the config was LOADED before it was fingerprinted, so an edit in
+    that window was certified under the new fingerprint while the gate went on
+    executing the values cached from the old one.
+
+    The head of the real gate is executed here with a prelude that rewrites the
+    config between the load and the verification, which is the window itself.
+    """
+    td = _config_repo(tmp_path)
+    src = (SCRIPTS / "release_gate.sh").read_text(encoding="utf-8")
+    assert src.index("_SUBSTRATE_CONFIG_AT_START=") < src.index("load_substrate_config ||"), \
+        "the config must be fingerprinted BEFORE it is loaded"
+
+    # Simulate the racing writer by editing the file between fingerprint and check.
+    head = _gate_head(td, extra_prelude="")
+    ok = subprocess.run(["bash", str(head)], cwd=str(td), capture_output=True, text=True, timeout=60)
+    assert ok.returncode == 0, ok.stdout + ok.stderr
+    assert "GATE_HEAD_OK" in ok.stdout
+
+    raced = td / "raced.sh"
+    body = head.read_text(encoding="utf-8").replace(
+        "load_substrate_config ||",
+        'printf \'SUBSTRATE_PROFILE="strict"\\n\' > .substrate/config\nload_substrate_config ||', 1)
+    raced.write_text(body, encoding="utf-8")
+    r = subprocess.run(["bash", str(raced)], cwd=str(td), capture_output=True, text=True, timeout=60)
+    assert r.returncode != 0, "a config edited during the load must not be certified: " + r.stdout
+    assert "GATE_HEAD_OK" not in r.stdout
+    assert "while it was being loaded" in r.stderr
+
+
+def test_release_gate_refuses_when_the_memory_log_vanishes_mid_run(tmp_path) -> None:
+    """round-38 P1: the anchor block re-tested `-f events.jsonl`, so a log that was
+    part of the release could disappear and the final verification was SKIPPED
+    rather than refused — fail-open on absence, the shape v3.8.51 removed from the
+    anchor itself, reintroduced one level up."""
+    td, g, m = _anchor_repo(tmp_path)
+    (td / ".substrate").mkdir(exist_ok=True)
+    (td / ".substrate" / "config").write_text('SUBSTRATE_PROFILE="standard"\n', encoding="utf-8")
+    m("append", "--type", "note", "--message", "one")
+    if m("anchor").returncode != 0:
+        pytest.skip("git notes unavailable on this host")
+    tail = _gate_tail(td)  # built while the log exists => _MEMORY_IN_RELEASE=1
+    _events_path(td).unlink()
+    r = subprocess.run(["bash", str(tail)], cwd=str(td),
+                       env={**os.environ, "SUBSTRATE_PROJECT_DIR": str(td)},
+                       capture_output=True, text=True, timeout=120)
+    assert r.returncode != 0, "a vanished memory log must be a refusal, not a skip: " + r.stdout
+    assert "release-gate: passed" not in r.stdout
+    assert "disappeared before the anchor" in r.stderr
+
+
+def test_release_gate_refuses_when_a_memory_log_appears_mid_run(tmp_path) -> None:
+    """The other direction: a log that appears after the chain check was never
+    verified, so announcing success would certify a chain nothing looked at."""
+    td, g, m = _anchor_repo(tmp_path)
+    (td / ".substrate").mkdir(exist_ok=True)
+    (td / ".substrate" / "config").write_text('SUBSTRATE_PROFILE="standard"\n', encoding="utf-8")
+    tail = _gate_tail(td)  # built with no log => _MEMORY_IN_RELEASE=0
+    m("append", "--type", "note", "--message", "one")
+    r = subprocess.run(["bash", str(tail)], cwd=str(td),
+                       env={**os.environ, "SUBSTRATE_PROJECT_DIR": str(td)},
+                       capture_output=True, text=True, timeout=120)
+    assert r.returncode != 0, "an unverified memory log must not be certified: " + r.stdout
+    assert "appeared during this" in r.stderr
+
+
+@pytest.mark.parametrize("config,expected", [
+    ('SUBSTRATE_PROFILE="strict"\n', True),
+    ('SUBSTRATE_PROFILE="standard"\n', False),
+    # LAST assignment wins, as both canonical parsers do.
+    ('SUBSTRATE_PROFILE="standard"\nSUBSTRATE_PROFILE="strict"\n', True),
+    ('SUBSTRATE_PROFILE="strict"\nSUBSTRATE_PROFILE="standard"\n', False),
+    # EXACT key: a differently-named key must not answer for this one.
+    ('SUBSTRATE_PROFILE_OLD="strict"\nSUBSTRATE_PROFILE="standard"\n', False),
+    # EXACT value, not a substring of the line.
+    ('SUBSTRATE_PROFILE="standard"  # not strict yet\n', False),
+    ('# SUBSTRATE_PROFILE="strict"\nSUBSTRATE_PROFILE="standard"\n', False),
+    ('SUBSTRATE_PROFILE=strict\n', True),
+])
+def test_memory_log_reads_the_profile_like_the_canonical_parser(tmp_path, config, expected) -> None:
+    """round-38 P1: two parsers for one policy file disagreed.
+
+    `_require_published_anchor` returned on the FIRST line merely STARTING WITH the
+    key and asked whether "strict" appeared anywhere in the rest, while
+    `_substrate_config.sh` and `check_substrate_config.py` both assign into a map so
+    the LAST assignment wins. A config reading standard-then-strict was strict for
+    the release gate and base-tier for anchor publication — the file said one thing
+    and its two readers disagreed about what.
+    """
+    td = _config_repo(tmp_path, profile=config)
+
+    # Assert through _require_published_anchor, the function whose ANSWER is the
+    # policy decision. Testing _config_profile alone left the caller free to keep
+    # its own parser — reverting it failed nothing, which is a probe that proves
+    # nothing (carry-forward 22/27).
+    import importlib.util as _iu
+    spec = _iu.spec_from_file_location("_ml_profile", SCRIPTS / "memory_log.py")
+    ml = _iu.module_from_spec(spec)
+    spec.loader.exec_module(ml)
+    ml.ROOT = td
+    ml._ROOT_REAL = str(td)
+    assert ml._require_published_anchor() is expected, \
+        f"_require_published_anchor disagrees with the canonical profile for {config!r}"
+
+    # And the canonical shell loader must agree with that answer.
+    probe = td / "probe.sh"
+    probe.write_text(
+        'set -eu\nSUBSTRATE_PROFILE="standard"\n. scripts/_substrate_config.sh\n'
+        'load_substrate_config || exit 3\nprintf %s "$SUBSTRATE_PROFILE"\n', encoding="utf-8")
+    r = subprocess.run(["bash", str(probe)], cwd=str(td), capture_output=True, text=True, timeout=60)
+    if r.returncode == 3:
+        pytest.skip("canonical loader rejects this config outright")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (r.stdout.strip() == "strict") is expected, \
+        f"shell says {r.stdout.strip()!r}, memory_log says {ml._config_profile(config)!r}"
+
+
+def test_generated_gate_tail_survives_an_interpreter_path_with_spaces(tmp_path) -> None:
+    """round-38 P2: the tail builders interpolated the interpreter path into shell
+    UNQUOTED, so a path containing a space split into two words and the generated
+    function ran its first component. Every invocation returned 127 and the harness
+    measured that instead of the gate — which is exactly how a checkout under
+    `.../Agent Substrate Kit 2` turned an external auditor's whole `check` and
+    `evals` run red.
+
+    Checked by SHELL-PARSING the generated line rather than matching text: the
+    interpreter must come back as a single token.
+    """
+    spacey = "/opt/py thon dir/bin/python"
+    td, g, m = _anchor_repo(tmp_path)
+    (td / ".substrate").mkdir(exist_ok=True)
+    (td / ".substrate" / "config").write_text('SUBSTRATE_PROFILE="standard"\n', encoding="utf-8")
+
+    # The builder must be exercised with a path that ACTUALLY contains a space.
+    # Post-processing a normal path proved nothing: on a checkout without spaces
+    # shlex.quote is the identity, so an unquoted builder passed too.
+    builders = []
+    monkey = pytest.MonkeyPatch()
+    try:
+        monkey.setattr(sys, "executable", spacey)
+        builders.append(("tests:_gate_tail", _gate_tail(td).read_text(encoding="utf-8")))
+    finally:
+        monkey.undo()
+
+    import importlib.util as _iu
+    spec = _iu.spec_from_file_location("_ev_tail", SCRIPTS / "run_substrate_evals.py")
+    ev = _iu.module_from_spec(spec)
+    spec.loader.exec_module(ev)
+    ev.PY = spacey
+    built = ev._release_gate_tail(td)
+    assert built is not None, "the evals tail builder lost its marker"
+    builders.append(("evals:_release_gate_tail", built.read_text(encoding="utf-8")))
+
+    for name, text in builders:
+        seen = 0
+        for line in text.splitlines():
+            if "_substrate_config_fingerprint(){" in line or line.startswith("run_py(){"):
+                body = line.split("{", 1)[1].rsplit("}", 1)[0].strip().rstrip(";")
+                head = body.split(" -c ")[0].split(" -I ")[0]
+                tokens = shlex.split(head)
+                assert tokens and tokens[0] == spacey, (
+                    f"{name}: interpreter must survive shell splitting as one token: {line}")
+                seen += 1
+        assert seen == 2, f"{name}: expected both generated helpers, saw {seen}"
 
 
 def test_memory_anchor_force_binds_the_head_to_its_evidence_append(tmp_path) -> None:

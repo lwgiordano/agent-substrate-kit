@@ -1,6 +1,6 @@
 ---
 purpose: Behavioral evals, deterministic validators, audits, and assurance limits.
-last_human_reviewed: 2026-09-05
+last_human_reviewed: 2026-09-06
 covers:
   - manage.sh
   - extras/calibrate_diy_ultrareview.py
@@ -115,15 +115,18 @@ covers the gate that reads forged evidence, not only the gate that writes it.
 
 A NONZERO exit is not evidence of the failure a task means: by exit code alone, a
 missing file, a typo, or an unbound variable scores as a block. Two release-gate
-tasks did exactly that — one hand-built a copy of a shell tail referencing a
-variable the real file defines above the split, the other ran a script never
-staged into its fixture. Assert the REASON the refusal prints.
+tasks did exactly that — one referencing a variable defined above its split, one
+running a script never staged. Assert the REASON the refusal prints.
 
-A task that SKIPS has left the denominator. Skips exist for absent backends, so
-a task whose setup silently stops reproducing its own baseline reports the same
-way a missing sandbox does and stops measuring anything without failing. That
-happened here: narrowing what counts as an anchor conflict turned one task's
-setup into a non-conflict, and it skipped rather than failed. Read the skip
+Generated shell must quote what it interpolates: a gate fragment built around a
+bare interpreter path split on the first space, so under a directory with a space
+every invocation returned 127 and the task measured that. A space-free path cannot
+test this.
+
+A task that SKIPS has left the denominator. Skips exist for absent backends, so a
+task whose setup stops reproducing its own baseline reports exactly as a missing
+sandbox does and measures nothing without failing — which happened when narrowing
+the anchor-conflict semantics turned one setup into a non-conflict. Read the skip
 lines on any release that changes a semantic the corpus depends on.
 
 A detection task needs a companion asking whether the detection can be ERASED.

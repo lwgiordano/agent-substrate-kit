@@ -38,6 +38,7 @@ import json
 import os
 import platform
 import signal
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -913,13 +914,25 @@ def _release_gate_tail(repo, profile_line="SUBSTRATE_PROFILE=standard"):
     marker = "# Re-tie the memory chain"
     if marker not in gate:
         return None
-    fp = ('_substrate_config_fingerprint(){ %s -c '
+    # shlex.quote, not a bare %s (round-38 P2). An interpreter path containing
+    # a space split into two words, so the generated function ran
+    # `/path/first-component` and the harness measured rc 127 instead of the
+    # gate. Codex's own checkout lives under a directory with a space, which is
+    # how this surfaced: it made their whole `check` and `evals` run red.
+    q = shlex.quote(PY)
+    fp = ('_substrate_config_fingerprint(){ ' + q + ' -c '
           "'import hashlib,pathlib,sys;p=pathlib.Path(\".substrate/config\");"
-          'sys.stdout.write(hashlib.sha256(p.read_bytes()).hexdigest() if p.is_file() else "absent")\'; }\n'
-          % PY)
+          'sys.stdout.write(hashlib.sha256(p.read_bytes()).hexdigest() if p.is_file() else "absent")\'; }\n')
+    # Every variable the tail INHERITS from above the split point must be supplied
+    # here, and derived rather than hardcoded: a missing one exits nonzero under
+    # `set -u`, which is indistinguishable from the block under test refusing.
+    # That has now happened twice (v3.8.55, v3.8.56), so the value is computed
+    # from the fixture's real state.
+    memory_flag = "1" if (repo / ".substrate" / "memory" / "events.jsonl").is_file() else "0"
     tail = repo / "gate_tail.sh"
     tail.write_text('set -euo pipefail\n' + profile_line + '\n'
-                    + 'run_py(){ "%s" -I "$@"; }\n' % PY
+                    + '_MEMORY_IN_RELEASE=%s\n' % memory_flag
+                    + 'run_py(){ ' + q + ' -I "$@"; }\n'
                     + fp
                     + '_SUBSTRATE_CONFIG_AT_START="$(_substrate_config_fingerprint)"\n'
                     + gate[gate.index(marker):])
@@ -1080,6 +1093,115 @@ def t_memory_anchor_forced_head_race_blocked():
         if after and after[0] != before:
             return False, "force aborted but rewrote the note anyway"
         return True, f"rc={r.returncode}, note untouched"
+
+
+def t_release_gate_config_load_gap_blocked():
+    """round-38 P1: .substrate/config was LOADED before it was fingerprinted, so an
+    edit in that window was certified under the new fingerprint while the gate went
+    on executing the values cached from the old one."""
+    gate = (SCRIPTS / "release_gate.sh").read_text(encoding="utf-8")
+    if "_SUBSTRATE_CONFIG_AT_START=" not in gate or "load_substrate_config ||" not in gate:
+        return False, "the release gate lost its config pin or its loader call"
+    if gate.index("_SUBSTRATE_CONFIG_AT_START=") > gate.index("load_substrate_config ||"):
+        return False, "the config is loaded before it is fingerprinted"
+    stop = gate.index('echo "==> Import shadowing"')
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        _stage(td, "_substrate_config.sh")
+        (td / ".substrate").mkdir()
+        (td / ".substrate" / "config").write_text('SUBSTRATE_PROFILE="standard"\n')
+        head = gate[:stop] + 'echo GATE_HEAD_OK\n'
+        (td / "head.sh").write_text(head)
+        ok = subprocess.run(["bash", "head.sh"], cwd=str(td), capture_output=True,
+                            text=True, timeout=60)
+        if ok.returncode != 0 or "GATE_HEAD_OK" not in ok.stdout:
+            return True, "skipped: gate head does not run standalone on this host"
+        raced = head.replace(
+            "load_substrate_config ||",
+            'printf \'SUBSTRATE_PROFILE="strict"\\n\' > .substrate/config\nload_substrate_config ||', 1)
+        (td / "raced.sh").write_text(raced)
+        r = subprocess.run(["bash", "raced.sh"], cwd=str(td), capture_output=True,
+                           text=True, timeout=60)
+        if r.returncode == 0 or "GATE_HEAD_OK" in r.stdout:
+            return False, "a config edited during the load was certified"
+        if "while it was being loaded" not in r.stderr:
+            return False, "failed for an unrelated reason: " + (r.stderr or r.stdout)[:160]
+        return True, f"rc={r.returncode}, load-window edit refused"
+
+
+def t_release_gate_memory_vanish_blocked():
+    """round-38 P1: the anchor block re-tested `-f events.jsonl`, so a log that was
+    part of the release could disappear and the final verification was SKIPPED."""
+    ml = str(SCRIPTS / "memory_log.py")
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td); env = _ml_env(td)
+        repo = td / "repo"; repo.mkdir()
+
+        def g(*a):
+            return subprocess.run(["git", *a], cwd=str(repo), capture_output=True, text=True, timeout=20)
+
+        def m(*a):
+            return subprocess.run([PY, "-I", ml, *a], env=env, cwd=str(repo),
+                                  capture_output=True, text=True, timeout=60)
+        env["SUBSTRATE_PROJECT_DIR"] = str(repo)
+        _stage(repo, "memory_log.py")
+        g("init", "-q"); g("config", "user.email", "x@x"); g("config", "user.name", "x")
+        (repo / "f").write_text("x"); g("add", "."); g("commit", "-qm", "init")
+        (repo / ".substrate").mkdir(exist_ok=True)
+        (repo / ".substrate" / "config").write_text('SUBSTRATE_PROFILE="standard"\n')
+        m("append", "--type", "note", "--message", "one")
+        if m("anchor").returncode != 0:
+            return True, "skipped: anchor unavailable on this host"
+        tail = _release_gate_tail(repo)   # built while the log exists
+        if tail is None:
+            return False, "release_gate.sh lost the memory-anchor block"
+        (repo / ".substrate" / "memory" / "events.jsonl").unlink()
+        r = subprocess.run(["bash", str(tail)], cwd=str(repo), env=env,
+                           capture_output=True, text=True, timeout=120)
+        if r.returncode == 0 or "release-gate: passed" in r.stdout:
+            return False, "a vanished memory log was skipped rather than refused"
+        if "disappeared before the anchor" not in r.stderr:
+            return False, "failed for an unrelated reason: " + (r.stderr or r.stdout)[:160]
+        return True, f"rc={r.returncode}, vanished log refused"
+
+
+def t_memory_anchor_duplicate_profile_enforced():
+    """round-38 P1: memory_log read SUBSTRATE_PROFILE with first-match/substring
+    semantics while both canonical parsers take the LAST assignment, so a config
+    reading standard-then-strict was strict for the gate and base-tier for anchor
+    publication enforcement."""
+    ml = str(SCRIPTS / "memory_log.py")
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td); env = _ml_env(td)
+        repo = td / "repo"; repo.mkdir()
+
+        def g(*a):
+            return subprocess.run(["git", *a], cwd=str(repo), capture_output=True, text=True, timeout=20)
+
+        def m(*a):
+            return subprocess.run([PY, "-I", ml, *a], env=env, cwd=str(repo),
+                                  capture_output=True, text=True, timeout=60)
+        env["SUBSTRATE_PROJECT_DIR"] = str(repo)
+        g("init", "-q"); g("config", "user.email", "x@x"); g("config", "user.name", "x")
+        (repo / "f").write_text("x"); g("add", "."); g("commit", "-qm", "init")
+        (repo / ".substrate").mkdir(exist_ok=True)
+        cfg = repo / ".substrate" / "config"
+        cfg.write_text('SUBSTRATE_PROFILE="strict"\n')
+        bare, commit = _anchored_with_origin(td, g, m)
+        if bare is None:
+            return True, commit
+        m("append", "--type", "note", "--message", "two")
+        m("anchor")  # local note now ahead; strict must refuse to call this verified
+        strict_only = m("verify", "--anchor")
+        if strict_only.returncode != 1:
+            return True, "skipped: strict baseline not reproducible on this host"
+        cfg.write_text('SUBSTRATE_PROFILE="standard"\nSUBSTRATE_PROFILE="strict"\n')
+        dup = m("verify", "--anchor")
+        if dup.returncode == 0:
+            return False, "duplicate standard+strict config dropped to base-tier enforcement"
+        if "ANCHOR NOT PUBLISHED" not in dup.stderr:
+            return False, "failed for an unrelated reason: " + (dup.stderr or dup.stdout)[:160]
+        return True, f"rc={dup.returncode}, last assignment wins"
 
 
 def t_memory_anchor_growth_allowed():
@@ -1618,6 +1740,9 @@ TASKS = [
     ("memory_anchor_hostile_user_config_blocked", "malicious", "block", t_memory_anchor_hostile_user_config_blocked, True),
     ("release_gate_unpublished_anchor_blocked", "malicious", "block", t_release_gate_unpublished_anchor_blocked, True),
     ("release_gate_stale_profile_blocked", "malicious", "block", t_release_gate_stale_profile_blocked, True),
+    ("release_gate_config_load_gap_blocked", "malicious", "block", t_release_gate_config_load_gap_blocked, True),
+    ("release_gate_memory_vanish_blocked", "malicious", "block", t_release_gate_memory_vanish_blocked, True),
+    ("memory_anchor_duplicate_profile_enforced", "malicious", "block", t_memory_anchor_duplicate_profile_enforced, True),
     ("memory_anchor_forced_head_race_blocked", "malicious", "block", t_memory_anchor_forced_head_race_blocked, True),
     ("history_injection_stripped", "malicious", "block", t_history_injection_stripped, False),
     ("rejected_injection_stripped", "malicious", "block", t_rejected_injection_stripped, False),

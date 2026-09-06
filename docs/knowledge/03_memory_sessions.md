@@ -6,7 +6,7 @@ asserts:
   - scripts/_doc_common.py::locked_atomic_append
   - scripts/session_handoff.py::_safe_history_line
   - scripts/session_handoff.py::_rejected_block
-last_human_reviewed: 2026-09-03
+last_human_reviewed: 2026-09-06
 covers:
   - manage.sh
   - scripts/_doc_common.py

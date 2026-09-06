@@ -1198,6 +1198,61 @@ meant.** Any test or eval that asserts refusal by exit code alone scores a missi
 file, a typo, or an unbound variable as a pass. Assert the message the refusal
 prints. Two of these were live here at once, and one had never tested anything.
 
+## Round 18 — v3.8.56 (round-38): the windows around the window
+
+Four findings, three P1, all in the v3.8.55 controls. The pattern is that I closed
+the window I was shown and left the ones on either side of it.
+
+**The config was loaded before it was pinned.** v3.8.55 fingerprinted
+`.substrate/config` before the first validator — but `load_substrate_config` had
+already run at line 7 and cached profile, lang and `TEST_CMD`. An edit in that
+window was certified under the NEW fingerprint while the gate executed the OLD
+commands. The gate now pins first, loads second, and proves after loading that the
+bytes it loaded are the bytes it pinned.
+
+**Memory disappearing mid-run was a skip, not a refusal.** The anchor block
+re-tested `-f events.jsonl`, so a log that was part of the release could vanish and
+the final verification was simply not run. That is fail-open on absence — the exact
+shape v3.8.51 removed from the anchor — reintroduced one level up, by me, three
+releases later. Presence at the end must now match presence at the start in both
+directions.
+
+**One policy file, two parsers.** `_require_published_anchor` took the FIRST line
+starting with `SUBSTRATE_PROFILE` and asked whether `"strict"` appeared anywhere in
+the rest; the shell loader and `check_substrate_config.py` both assign into a map,
+so the LAST assignment wins. A config reading standard-then-strict was strict for
+the release gate and base-tier for anchor publication. The same three lines also
+matched `SUBSTRATE_PROFILE_OLD=` by prefix and read a trailing `# not strict yet`
+comment as strict.
+
+**And a defect that broke somebody else's whole run.** My tail builders
+interpolated the interpreter path into generated shell unquoted. The external
+auditor's checkout lives under a directory with a space, so every generated
+invocation ran `/path/first-component`, returned 127, and made their entire
+`check` and `evals` red — not because anything in the kit was wrong, but because
+of my quoting. Both builders now use `shlex.quote`.
+
+### Two probes proved nothing, for the third round running
+
+Reverting the profile parser failed no test, because the parity test asserted on
+the HELPER rather than through `_require_published_anchor` — the caller was free to
+keep its own parser. Reverting the quoting failed no test either, because the test
+post-processed a normal path and `shlex.quote` is the identity on a path without
+spaces. Both tests now exercise the deciding function with the hostile input:
+policy through the policy function, quoting through a path that really contains a
+space.
+
+**Carry-forward rule, part 28 — closing a window means asking what is on either
+side of it.** A check pinned to a moment has a before and an after. When a finding
+names one edge, walk the other: what was already cached when the pin was taken, and
+what can change between the pin and the last thing that trusts it.
+
+**Carry-forward rule, part 29 — a probe that reaches around the defect proves
+nothing.** Three rounds, three shapes: a redundant sibling guard, an unbound
+variable, and a test asserting on a helper the caller need not use. The revert must
+fail because the DECIDING path changed, and the hostile input must be the real one —
+a space-free path cannot test quoting.
+
 ## (Optional) Reproduction
 
 In a disposable repo: `ln victim.txt AGENT_BUS.md` then

@@ -4,7 +4,11 @@ set -euo pipefail
 # (stdlib + PyYAML). Language-native test/lint run via .substrate/config
 # indirection so this gate works in node/go repos too.
 SUBSTRATE_LANG="python"; LINT_CMD=""; TYPECHECK_CMD=""; TEST_CMD=""
-. scripts/_substrate_config.sh; load_substrate_config || { echo "substrate-config: refusing to run with invalid .substrate/config" >&2; exit 2; }
+# Only SOURCE the loader here; the call itself happens after the fingerprint below
+# (round-38 P1). Loading first cached profile/lang/TEST_CMD from bytes nothing had
+# pinned yet, so an edit in the load-to-fingerprint window was certified under the
+# NEW fingerprint while the gate went on executing the OLD commands.
+. scripts/_substrate_config.sh
 SUBVENV=".substrate/venv"
 if command -v uv >/dev/null 2>&1 && [ -f pyproject.toml ]; then RUN=(uv run); elif command -v poetry >/dev/null 2>&1 && [ -f pyproject.toml ]; then RUN=(poetry run); else RUN=(); fi
 # Validators run from the substrate venv if present (works in any
@@ -43,6 +47,15 @@ _SUBSTRATE_CONFIG_AT_START="$(_substrate_config_fingerprint)" || {
   echo "  whose configuration it could not pin. Fix the environment and re-run." >&2
   exit 1
 }
+# NOW load, and prove the bytes that were loaded are the bytes that were pinned.
+# The values below drive every later stage (TEST_CMD, LINT_CMD, the profile), so
+# "the config did not change during the run" has to include the load itself.
+load_substrate_config || { echo "substrate-config: refusing to run with invalid .substrate/config" >&2; exit 2; }
+if [ "$(_substrate_config_fingerprint)" != "$_SUBSTRATE_CONFIG_AT_START" ]; then
+  echo "release-gate: .substrate/config changed while it was being loaded — the values" >&2
+  echo "  this run would execute are not the ones it pinned. Re-run the gate." >&2
+  exit 1
+fi
 echo "==> Import shadowing"; run_py scripts/check_import_shadowing.py  # no repo-local stdlib shadow can subvert hash validators
 echo "==> Doctor"; run_py scripts/substrate_doctor.py
 echo "==> Manifest"; run_py scripts/update_manifest.py --check
@@ -69,7 +82,14 @@ echo "==> History"; run_py scripts/check_history_sha.py
 # and its absence is a gate failure with the remedy named; the anchor itself
 # is written below once the whole gate has passed, so every release re-ties
 # the chain to a known-good commit.
+# Whether memory is PART OF THIS RELEASE is decided once, here, and reused at the
+# anchor block (round-38 P1). Re-testing `-f` there let a log that existed for this
+# check disappear before the anchor block, and the release then SKIPPED its final
+# verification rather than refusing — the same fail-open-on-absence shape v3.8.51
+# removed from the anchor itself.
+_MEMORY_IN_RELEASE=0
 if [ -f .substrate/memory/events.jsonl ]; then
+  _MEMORY_IN_RELEASE=1
   echo "==> Memory chain"
   if [ "$SUBSTRATE_PROFILE" = "strict" ]; then
     run_py scripts/memory_log.py verify --anchor
@@ -100,7 +120,21 @@ echo "==> Audit report"; run_py scripts/substrate_audit.py --mode quick --write-
 # that is refused (no remote, no permission, an egress policy) print the exact
 # payload and the one command that recreates the note anywhere, because the
 # payload travels in text where the ref does not.
-if [ -f .substrate/memory/events.jsonl ]; then
+# Presence at the end must match presence at the start, in BOTH directions: a log
+# that vanished cannot be re-verified, and one that appeared was never verified at
+# all, so announcing success would certify a chain nothing checked.
+if [ "$_MEMORY_IN_RELEASE" = "1" ] && [ ! -f .substrate/memory/events.jsonl ]; then
+  echo "release-gate: REFUSING — .substrate/memory/events.jsonl was part of this" >&2
+  echo "  release and disappeared before the anchor could be re-verified. A memory" >&2
+  echo "  log that goes missing mid-run is a refusal, not a skip. Re-run the gate." >&2
+  exit 1
+fi
+if [ "$_MEMORY_IN_RELEASE" = "0" ] && [ -f .substrate/memory/events.jsonl ]; then
+  echo "release-gate: REFUSING — .substrate/memory/events.jsonl appeared during this" >&2
+  echo "  run, so its chain was never verified by the check above. Re-run the gate." >&2
+  exit 1
+fi
+if [ "$_MEMORY_IN_RELEASE" = "1" ]; then
   echo "==> Memory anchor"; run_py scripts/memory_log.py anchor
   if git remote | grep -qx origin; then
     if git push --quiet origin refs/notes/substrate-memory 2>/dev/null; then

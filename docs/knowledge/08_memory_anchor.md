@@ -1,6 +1,6 @@
 ---
 purpose: The memory trust anchor — monotonic advance, remote confirmation, and limits.
-last_human_reviewed: 2026-09-05
+last_human_reviewed: 2026-09-06
 covers:
   - scripts/memory_log.py
   - scripts/release_gate.sh
@@ -96,6 +96,15 @@ a refused push left a strict release green over a repo whose next
 re-verified before the success line prints, and in strict a failed publication
 fails the release.
 
+The gate pins `.substrate/config` BEFORE it loads it, and proves after loading
+that the bytes it loaded are the bytes it pinned. Fingerprinting after the load
+left a window where an edit was certified under the new fingerprint while the run
+went on executing values cached from the old one. Whether memory is part of the
+release is likewise decided once, at the chain check, and reused: re-testing for
+the file at the anchor block let a log that vanished mid-run SKIP its final
+verification, which is fail-open on absence one level up from where v3.8.51
+removed it.
+
 That re-check asks no shell variable. Branching on the `SUBSTRATE_PROFILE` loaded
 at gate start meant a config raised to strict DURING the run was certified by the
 standard-tier check — the anchor was re-read but the policy was not, so the end
@@ -110,6 +119,14 @@ repository no longer has. Absent and non-regular are distinct fingerprints — a
 config swapped for a FIFO is drift even where none existed — and a fingerprint
 the tool could not COMPUTE is not a value at all: it refuses under its own
 message rather than claiming the file changed.
+
+One policy file needs one parser. `_require_published_anchor` read
+`SUBSTRATE_PROFILE` by first-match-and-substring while the shell loader and
+`check_substrate_config.py` both take the LAST assignment, so a config saying
+standard then strict was strict for the release gate and base-tier for
+publication enforcement — the file said one thing and its readers disagreed. The
+Python side now mirrors the canonical rule exactly (last assignment, exact key,
+exact value), pinned by a parity test that runs both against generated configs.
 
 Readers of those tiers must key on the tier they mean. `substrate_doctor`
 selected its strongest row — "anchor verified against the remote" — by

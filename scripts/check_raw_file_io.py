@@ -219,7 +219,9 @@ ALLOWLIST: dict[str, str] = {
         "source, and the bytes are executed in a fresh temp fixture. The third "
         "(v3.8.55) is that read moved into the shared _release_gate_tail builder, "
         "which both gate tasks now use so neither can hand-build a tail that exits "
-        "on an unbound variable and scores as a block", 3),
+        "on an unbound variable and scores as a block. The fourth (v3.8.56) reads "
+        "the same gate source to execute its HEAD, so the round-38 load-window task "
+        "exercises the real load/fingerprint ordering instead of a paraphrase", 4),
     "run_substrate_evals.py:src.read_text":
         "stages a copy of the kit's OWN script source into a fresh temp fixture; "
         "the source is code under review (and CODEOWNED + hash-pinned), not "

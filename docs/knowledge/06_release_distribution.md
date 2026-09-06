@@ -1,6 +1,6 @@
 ---
 purpose: Release packaging, signing, manifests, and artifact verification.
-last_human_reviewed: 2026-09-05
+last_human_reviewed: 2026-09-06
 covers:
   - manage.sh
   - package_release.sh
@@ -67,7 +67,12 @@ certified by the standard-tier check, so `verify --anchor` runs unconditionally
 and reads the live profile itself. The gate also pins `.substrate/config` with a
 fingerprint taken before its first validator and refuses to announce success if
 that file changed while it ran: a run cannot certify a configuration the
-repository no longer has. See [the memory trust anchor](08_memory_anchor.md).
+repository no longer has. That pin is taken BEFORE the config is loaded, and the
+load is proved not to have changed it — fingerprinting afterwards left the
+already-cached profile, lang and test command outside what was pinned. Whether
+the memory log is part of the release is likewise decided once, at the chain
+check, and any change to that afterwards is a refusal rather than a skipped
+verification. See [the memory trust anchor](08_memory_anchor.md).
 
 The gate PUBLISHES that anchor itself rather than delegating it. Git does not
 transport `refs/notes/*` on a normal push, clone, or fetch, so a different clone

@@ -886,11 +886,46 @@ def _require_published_anchor() -> bool:
     raw = _safe_read_text(cfg, ROOT, max_bytes=1 << 20)
     if raw is None:
         return cfg.exists()  # present-but-unreadable => strict; absent => not strict
+    return _config_profile(raw) == "strict"
+
+
+def _config_profile(raw: str) -> str:
+    """SUBSTRATE_PROFILE as the CANONICAL parsers read it, or "" if unset.
+
+    v3.8.56 (round-38 P1): this used to return on the FIRST line merely
+    STARTING WITH the key and test `"strict" in <rest of line>`. Three
+    disagreements with `_substrate_config.sh` and `check_substrate_config.py`,
+    which both assign into a dict and let the LAST assignment win:
+
+      * a config with standard then strict was strict for the release gate and
+        base-tier here, so publication was not enforced on a strict repo;
+      * `SUBSTRATE_PROFILE_OLD=...` matched the prefix and could answer for the
+        real key;
+      * substring matching read `"not-strict"`, or a trailing comment
+        mentioning strict, as strict.
+
+    Two parsers for one policy file is the same defect as two definitions of
+    "anchor valid": the file says one thing and the readers disagree about
+    what. Last assignment, exact key, exact value — pinned by a parity test
+    against `check_substrate_config.py` over generated configs.
+    """
+    profile = ""
     for line in raw.splitlines():
         line = line.strip()
-        if line.startswith("SUBSTRATE_PROFILE"):
-            return "strict" in line.split("=", 1)[-1]
-    return False
+        if not line or line.startswith("#"):
+            continue
+        # Match the shell loader: strip a trailing inline comment introduced by
+        # " #" before splitting, so `SUBSTRATE_PROFILE=strict # note` is strict.
+        if " #" in line:
+            line = line.split(" #", 1)[0].rstrip()
+        key, sep, val = line.partition("=")
+        if not sep or key.strip() != "SUBSTRATE_PROFILE":
+            continue
+        val = val.strip()
+        if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
+            val = val[1:-1]
+        profile = val
+    return profile
 
 
 def _has_origin() -> bool:

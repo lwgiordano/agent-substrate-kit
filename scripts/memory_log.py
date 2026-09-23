@@ -389,10 +389,11 @@ def verified_release_passes(root: Path) -> tuple[list[dict] | None, str]:
     """release-pass events from `root`'s chain, ONLY if the chain verifies.
     (None, reason) when it is absent, unsafe, or broken — a caller deciding
     `shipped-green` must not read evidence out of a log that fails its own walk."""
-    path = Path(root) / ".substrate" / "memory" / "events.jsonl"
+    root = Path(root)
+    path = root / ".substrate" / "memory" / "events.jsonl"
     if not os.path.lexists(str(path)):
         return None, "no memory chain (.substrate/memory/events.jsonl absent)"
-    text = _safe_read_text(path, Path(root), max_bytes=None)
+    text = _safe_read_text(path, root, max_bytes=None)
     if text is None:
         return None, "memory chain is linked, special, or outside the repo"
     events = _parse_events(text)
@@ -405,10 +406,11 @@ def verified_release_passes(root: Path) -> tuple[list[dict] | None, str]:
 def recorded_hashes(root: Path, relpath: str) -> set[str] | None:
     """The unit hashes `root`'s chain has recorded for `relpath`, ONLY if the
     chain verifies; None when it is absent, unsafe, or broken."""
-    path = Path(root) / ".substrate" / "memory" / "events.jsonl"
+    root = Path(root)
+    path = root / ".substrate" / "memory" / "events.jsonl"
     if not os.path.lexists(str(path)):
         return None
-    text = _safe_read_text(path, Path(root), max_bytes=None)
+    text = _safe_read_text(path, root, max_bytes=None)
     if text is None:
         return None
     events = _parse_events(text)

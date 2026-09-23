@@ -248,13 +248,6 @@ case "$cmd" in
       *) echo "usage: ./manage.sh security scan" >&2; exit 2 ;;
     esac ;;
   check)
-    # v3.8.51 (self-audit P3), shipped to consumers in v3.9.0: the pre-commit
-    # hooks below hardcode $SUBPY, so without `setup` fourteen hooks failed with
-    # the one real cause buried per hook. One honest line, before any gate runs.
-    if [ ! -x "$SUBPY" ]; then
-      echo "check: substrate venv missing ($SUBPY) — run ./manage.sh setup first" >&2
-      exit 1
-    fi
     # Remote governance (CODEOWNERS coverage + trusted-base authority) is enforced as
     # part of check only when the remote tier is ON (v3.6.0 — decoupled from the strict
     # profile, so a strict-LOCAL repo is not told it is "broken" for lacking a

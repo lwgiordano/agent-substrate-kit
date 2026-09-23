@@ -1,6 +1,6 @@
 # Plan: memory retrieval and lesson delivery (proposed v3.9 scope)
 
-Status: PROPOSAL — for Codex review before anything is built. Not claimed.
+Status: IMPLEMENTED in v3.9.0 (operator directed implementation ahead of the round-40 review). Differences from this proposal: injected lessons bind to HEAD's committed file, not to chain records (the chain is gitignored, so a fresh clone has none); the recall index is in-memory per call, never persisted; item 7 (repo map) is not built.
 Operator asked for this critique and for Codex to run it before implementation.
 Companion operator doc (annotatable): Claude Docs "Substrate Memory & Retrieval Plan".
 

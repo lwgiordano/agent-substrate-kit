@@ -49,7 +49,10 @@ chain is not the binding here: `.substrate/memory/` is gitignored, so a fresh
 clone has no chain and would otherwise never see a lesson. A lesson is shown
 only if its status is `test` or `gate`, it is not superseded, and its evidence
 exists; the text then passes the same sanitizer as every injected line, and an
-instruction-shaped rule is dropped.
+instruction-shaped rule is dropped. The binding proves EXISTENCE, not
+relevance: nothing deterministic can tell that a named test actually exercises
+the rule it is attached to, so a misleading committed lesson pointing at an
+unrelated real test is caught by review of the commit, not by this check.
 
 ## The chain attests the record
 

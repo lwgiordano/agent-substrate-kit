@@ -14368,10 +14368,140 @@ def test_narrative_lint_warns_only_and_skips_front_matter_and_fences(tmp_path) -
     td, run = _recall_repo(tmp_path)
     (td / "docs" / "knowledge" / "01_x.md").write_text(
         "---\npurpose: it used to be here (v3.8.1\n---\n\n# T\n\n```\nused to\n```\n\n"
-        "The gate used to demand equality (v3.8.51 fixed it).\n", encoding="utf-8")
+        "The gate used to demand equality.\nA fix landed (v3.8.51 changed it).\n",
+        encoding="utf-8")
+    # One line per pattern family, so neutralizing either one changes the count
+    # (a shared line let each pattern mask the other's removal — found by prove).
     r = run("check_knowledge_narrative.py")
-    assert r.returncode == 0 and "01_x.md: 1 narrative line" in r.stdout, r.stdout
+    assert r.returncode == 0 and "01_x.md: 2 narrative line" in r.stdout, r.stdout
     assert run("check_knowledge_narrative.py", "--strict").returncode == 1
     (td / "docs" / "knowledge" / "01_x.md").write_text(
         "# T\n\nThe verifier requires the previously anchored hash.\n", encoding="utf-8")
     assert "ok" in run("check_knowledge_narrative.py").stdout
+
+
+def test_doctor_warns_when_the_pre_push_hook_is_missing(tmp_path) -> None:
+    """v3.9.0 friction budget: the test suite runs at the pre-push STAGE, so a
+    clone set up before v3.9.0 (pre-commit hook only) silently stopped running
+    tests locally. The doctor says so — and does not when the hook is there."""
+    import importlib.util as _iu
+    spec = _iu.spec_from_file_location("_doctor_pp", SCRIPTS / "substrate_doctor.py")
+    mod = _iu.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    # A self-contained fixture root — the host may have no .substrate/venv (a
+    # fresh clone, CI before setup, prove's private copy), and the operational
+    # check returns early without one.
+    root = tmp_path / "repo"
+    venv_bin = root / ".substrate" / "venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    for tool in ("python", "pre-commit"):
+        (venv_bin / tool).write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        (venv_bin / tool).chmod(0o755)
+    (root / ".pre-commit-config.yaml").write_text(
+        "repos:\n  - repo: local\n    hooks:\n      - id: smoke-tests\n"
+        "        stages: [pre-push]\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    mod.ROOT = root
+
+    def warns():
+        return " ".join(mod._operational_findings()[1])
+    assert "pre-push hook not installed" in warns()
+    hook = root / ".git" / "hooks" / "pre-push"
+    hook.parent.mkdir(parents=True, exist_ok=True)
+    hook.write_text("#!/bin/sh\n", encoding="utf-8")
+    assert "pre-push hook not installed" not in warns()
+
+
+@pytest.mark.parametrize("config", _PROFILE_CONFIGS[:13])
+@pytest.mark.parametrize("reader", ["completion_gate", "substrate_doctor"])
+def test_every_profile_reader_decides_like_the_shell_loader(tmp_path, config, reader) -> None:
+    """v3.9.0 (found by `prove`): the discovery test above only checks that a
+    module MENTIONS the canonical parser, so reverting completion_gate's
+    `_strict_profile` or the doctor's `_profile` to a first-match parser — while
+    the import stayed — passed every test. The round-39 class, one reader later.
+    Each reader is now run through its DECIDING function against the real shell
+    loader, like command_policy."""
+    td = tmp_path / "rd"
+    (td / ".substrate").mkdir(parents=True)
+    (td / "scripts").mkdir()
+    (td / "scripts" / "_substrate_config.sh").write_text(
+        (SCRIPTS / "_substrate_config.sh").read_text(encoding="utf-8"), encoding="utf-8")
+    (td / ".substrate" / "config").write_text(config, encoding="utf-8")
+    shell = subprocess.run(
+        ["bash", "-c",
+         '. scripts/_substrate_config.sh && load_substrate_config && printf "%s" "$SUBSTRATE_PROFILE"'],
+        cwd=str(td), capture_output=True, text=True, timeout=60)
+    if shell.returncode != 0:
+        pytest.skip("the shell loader rejects this config; parity is only defined for valid ones")
+    probe = {
+        "completion_gate": "print('strict' if completion_gate._strict_profile() else 'not')",
+        "substrate_doctor": "print(substrate_doctor._profile())",
+    }[reader]
+    got = subprocess.run(
+        [sys.executable, "-c",
+         f"import sys; sys.path.insert(0, {str(SCRIPTS)!r})\nimport {reader}\n{probe}"],
+        cwd=str(td), env={**os.environ, "SUBSTRATE_PROJECT_DIR": str(td)},
+        capture_output=True, text=True, timeout=60)
+    assert got.returncode == 0, got.stdout + got.stderr
+    want = {"completion_gate": "strict" if shell.stdout == "strict" else "not",
+            "substrate_doctor": shell.stdout or "standard"}[reader]
+    assert got.stdout.strip() == want, f"{reader}={got.stdout.strip()!r} shell={shell.stdout!r} for {config!r}"
+
+
+@pytest.mark.parametrize("wf", [".github/workflows/ci.yml", "workflows/ci.yml.template"])
+def test_ci_admin_token_is_step_scoped_and_never_on_pull_requests(wf) -> None:
+    """v3.9.0 (security audit): the admin token was job-level env on a
+    pull_request job, so any test or hook in a same-repo PR could print it. It
+    may appear only in step env, only on a step that cannot run for a
+    pull_request — except the presence probe, which exports nothing but yes/no."""
+    import yaml as _yaml
+    doc = _yaml.safe_load((SCRIPTS.parent / wf).read_text(encoding="utf-8"))
+    for name, job in doc["jobs"].items():
+        assert "secrets." not in json.dumps(job.get("env") or {}), \
+            f"{wf}: job {name} exposes a secret in job-level env"
+        for step in job.get("steps", []):
+            env = json.dumps(step.get("env") or {})
+            if "SUBSTRATE_ADMIN_TOKEN" not in env:
+                continue
+            if step.get("id") == "admin":
+                assert set(step["env"]) == {"T"} and "$T" in step["run"] \
+                    and "GITHUB_OUTPUT" in step["run"], f"{wf}: the probe step does more than probe"
+                continue
+            assert "github.event_name != 'pull_request'" in str(step.get("if", "")), \
+                f"{wf}: step {step.get('name')!r} receives the admin token on pull_request runs"
+
+
+@pytest.mark.parametrize("manage,precommit", [
+    ("manage.sh", ".pre-commit-config.yaml"),
+    ("templates/manage.sh.template", "templates/pre-commit-config.yaml.template"),
+])
+def test_check_runs_every_hook_stage_the_pre_commit_config_uses(manage, precommit) -> None:
+    """v3.9.0 friction budget, derived rather than restated: a hook moved off the
+    commit stage (pytest -> pre-push) runs in `check` only if `check` runs that
+    stage. The consumer template shipped the stage move without it once — its
+    `check` silently stopped running pytest."""
+    root = SCRIPTS.parent
+    stages = set(re.findall(r"^\s*stages:\s*\[([a-z-]+)\]",
+                            (root / precommit).read_text(encoding="utf-8"), re.M))
+    stages -= {"pre-commit", "manual", "commit-msg"}
+    assert stages, f"{precommit}: expected the test suite on a non-commit stage"
+    text = (root / manage).read_text(encoding="utf-8")
+    block = re.search(r"\n\s*check\)(.*?)\n\s*[a-z-]+\)", text, re.S).group(1)
+    for st in sorted(stages):
+        assert re.search(rf"^\s*subtool pre-commit run --all-files --hook-stage {st}\b",
+                         block, re.M), f"{manage}: `check` never runs the {st} stage"
+
+
+def test_check_lessons_staleness_counts_releases_not_minor_jumps() -> None:
+    """A lesson confirmed at 3.8.57 is ONE release behind 3.9.0, not stale; the
+    first draft treated every minor bump as three releases, which would warn on
+    every lesson at every minor release and teach people to ignore the warning."""
+    import importlib.util as _iu
+    spec = _iu.spec_from_file_location("_cl_stale", SCRIPTS / "check_lessons.py")
+    mod = _iu.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    cases = [("3.9.0", "3.8.57", 1), ("3.9.2", "3.8.57", 3), ("3.8.57", "3.8.54", 3),
+             ("3.8.57", "3.8.56", 1), ("4.0.0", "3.9.9", 3), ("3.9.0", "3.9.0", 0),
+             ("3.9.0", "3.9.1", 0)]
+    for cur, confirmed, want in cases:
+        assert mod._releases_behind(cur, confirmed) == want, (cur, confirmed)

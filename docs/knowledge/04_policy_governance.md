@@ -87,7 +87,10 @@ GitHub-only CODEOWNERS file. Remote governance is an orthogonal capability locke
 by `.substrate/required_remote_governance`. Enabling it requires CODEOWNERS
 coverage and the trusted-base workflow. Offline detection reads Git config only
 and never claims live branch protection is active; `enable remote --check` is the
-operator path for live verification.
+operator path for live verification. CI runs it when an admin-readable token is
+stored as the `SUBSTRATE_ADMIN_TOKEN` secret — in step-scoped env on the one step
+that needs it, never on a `pull_request` run, whose unreviewed code could print
+it — and otherwise prints a notice that live protection was not verified.
 
 The canonical surface inventory feeds harness scanning, strict ownership, and CI
 audit triggers. It distinguishes substrate-owned install surfaces from governed

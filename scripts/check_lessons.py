@@ -71,14 +71,16 @@ def _vtuple(v: str) -> tuple[int, int, int]:
 
 
 def _releases_behind(current: str, confirmed: str) -> int:
-    """Patch releases between two versions within a minor line; a newer minor
-    or major counts as 3 (stale by definition) unless it is 3.9.0-style x.y.0
-    confirmed in the same minor."""
+    """Releases between two versions. Within a minor line, the patch distance;
+    across ONE minor step (3.8.57 -> 3.9.x), the x.y.0 release plus its patches
+    (3.9.0 is one release after 3.8.57, not three); anything further is stale."""
     c, k = _vtuple(current), _vtuple(confirmed)
     if k >= c:
         return 0
     if c[:2] == k[:2]:
         return c[2] - k[2]
+    if c[0] == k[0] and c[1] == k[1] + 1:
+        return c[2] + 1
     return 3
 
 

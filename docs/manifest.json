@@ -4,6 +4,11 @@
       "path": "docs/decisions/0001-substrate-knowledge-boundaries.md",
       "status": "Accepted",
       "title": "0001: Functional boundaries for substrate knowledge"
+    },
+    {
+      "path": "docs/decisions/0002-anchor-threat-model-boundary.md",
+      "status": "Accepted",
+      "title": "0002: Freeze local anchor hardening at a declared threat-model boundary"
     }
   ],
   "knowledge_docs": [
@@ -13,7 +18,7 @@
         "manage.sh",
         "package_release.sh"
       ],
-      "last_human_reviewed": "2026-09-02",
+      "last_human_reviewed": "2026-09-23",
       "path": "docs/knowledge/00_substrate.md",
       "purpose": "Entry point for current substrate contracts and functional knowledge."
     },
@@ -32,7 +37,7 @@
         "scripts/update_manifest.py",
         "scripts/write_install_json.py"
       ],
-      "last_human_reviewed": "2026-09-06",
+      "last_human_reviewed": "2026-09-23",
       "path": "docs/knowledge/01_install_adoption.md",
       "purpose": "Installation and adoption across new and existing repositories."
     },
@@ -50,7 +55,7 @@
         "scripts/verify_release.py",
         "scripts/write_install_json.py"
       ],
-      "last_human_reviewed": "2026-09-06",
+      "last_human_reviewed": "2026-09-23",
       "path": "docs/knowledge/02_upgrade_integrity.md",
       "purpose": "Upgrade provenance, authority floors, transactions, and postconditions."
     },
@@ -66,7 +71,7 @@
         "scripts/session_handoff.py",
         "scripts/todo_state_hook.py"
       ],
-      "last_human_reviewed": "2026-09-06",
+      "last_human_reviewed": "2026-09-23",
       "path": "docs/knowledge/03_memory_sessions.md",
       "purpose": "Tamper-evident memory, session restore, completion, and append-only logs."
     },
@@ -92,7 +97,7 @@
         "scripts/setup_branch_protection.sh",
         "scripts/substrate_profile.py"
       ],
-      "last_human_reviewed": "2026-09-06",
+      "last_human_reviewed": "2026-09-23",
       "path": "docs/knowledge/04_policy_governance.md",
       "purpose": "Command policy, hooks, sandboxing, and local or remote governance."
     },
@@ -112,7 +117,7 @@
         "scripts/run_substrate_evals.py",
         "scripts/substrate_audit.py"
       ],
-      "last_human_reviewed": "2026-09-06",
+      "last_human_reviewed": "2026-09-23",
       "path": "docs/knowledge/05_evals_assurance.md",
       "purpose": "Behavioral evals, the malicious and benign corpus, and assurance limits."
     },
@@ -129,7 +134,7 @@
         "scripts/verify_release.py",
         "scripts/write_install_json.py"
       ],
-      "last_human_reviewed": "2026-09-06",
+      "last_human_reviewed": "2026-09-23",
       "path": "docs/knowledge/06_release_distribution.md",
       "purpose": "Release packaging, signing, manifests, and artifact verification."
     },
@@ -151,7 +156,7 @@
         "scripts/session_handoff.py",
         "scripts/todo_state_hook.py"
       ],
-      "last_human_reviewed": "2026-09-06",
+      "last_human_reviewed": "2026-09-23",
       "path": "docs/knowledge/07_agent_context_governance.md",
       "purpose": "Agent context inventory, harness scanning, budgets, and doc drift."
     },
@@ -160,7 +165,7 @@
         "scripts/memory_log.py",
         "scripts/release_gate.sh"
       ],
-      "last_human_reviewed": "2026-09-06",
+      "last_human_reviewed": "2026-09-23",
       "path": "docs/knowledge/08_memory_anchor.md",
       "purpose": "The memory trust anchor \u2014 monotonic advance, remote confirmation, and limits."
     },

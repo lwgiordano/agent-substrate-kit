@@ -1,6 +1,6 @@
 ---
 purpose: Agent context inventory, harness scanning, budgets, and doc drift.
-last_human_reviewed: 2026-09-06
+last_human_reviewed: 2026-09-23
 covers:
   - agentsync.sh
   - manage.sh
@@ -24,8 +24,9 @@ covers:
 [Back to the substrate map](00_substrate.md).
 
 The substrate classifies agent-facing text by when and how a host loads it. Root
-instructions and the skill index are always-loaded. Structured session state and
-sanitized HISTORY or rejection summaries load at session start. Knowledge docs,
+instructions and the skill index are always-loaded. Structured session state, the
+INTENT.md objectives, sanitized HISTORY summaries with each entry's Knowledge lead
+sentence, and rejection summaries load at session start. Knowledge docs,
 ADRs, postmortems, auditor references, skill bodies, and execution plans are
 on-demand. Hook configuration is runtime data, not prompt text.
 

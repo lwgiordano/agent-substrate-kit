@@ -338,13 +338,21 @@ def t_sandbox_exfil_contained():
         return True, "skipped: no sandbox_exec.sh"
     if _run(["bash", str(sx), "--available"]).returncode != 0:
         return True, "skipped: no sandbox backend on this host"
+    # v3.9.0: POSITIVE CONTROL first, and only rc 7 counts. Any nonzero rc used to
+    # score as "contained", so a backend that is installed but cannot run code
+    # (bwrap under Ubuntu 24.04's userns restriction, a missing interpreter)
+    # reported a block for a sandbox that never executed the probe. A nonzero exit
+    # is not evidence of the failure you meant (carry-forward 27).
+    ctl = _run(["bash", str(sx), PY, "-c", "import sys; sys.exit(0)"])
+    if ctl.returncode != 0:
+        return True, f"skipped: sandbox backend present but cannot execute code (rc={ctl.returncode})"
     snip = ("import socket,sys\n"
             "s=socket.socket(); s.settimeout(3)\n"
             "try:\n"
             "    s.connect(('1.1.1.1',80)); sys.exit(0)\n"     # connected => NOT contained
             "except (PermissionError, OSError): sys.exit(7)\n")  # denied/unreachable => contained
     p = _run(["bash", str(sx), PY, "-c", snip])
-    return p.returncode != 0, f"contained rc={p.returncode}"
+    return p.returncode == 7, f"contained rc={p.returncode}"
 
 
 def t_lock_symlink_lowers_no_floor():

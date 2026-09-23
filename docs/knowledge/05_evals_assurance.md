@@ -1,6 +1,6 @@
 ---
 purpose: Behavioral evals, the malicious and benign corpus, and assurance limits.
-last_human_reviewed: 2026-09-06
+last_human_reviewed: 2026-09-23
 covers:
   - manage.sh
   - extras/calibrate_diy_ultrareview.py
@@ -22,7 +22,8 @@ covers:
 
 [Back to the substrate map](00_substrate.md).
 
-`manage.sh check` proves structure and deterministic test outcomes.
+`manage.sh check` proves structure and deterministic test outcomes: the fast
+commit-stage hooks, then the pre-push stage that holds the full test suite.
 `manage.sh evals` proves policy behavior against malicious and benign tasks. A
 release is green only when malicious tasks block, benign tasks remain allowed,
 and any required containment task actually runs.
@@ -104,7 +105,9 @@ covers the gate that reads forged evidence, not only the gate that writes it.
 A NONZERO exit is not evidence of the failure a task means: by exit code alone, a
 missing file, a typo, or an unbound variable scores as a block. Two release-gate
 tasks did exactly that — one referencing a variable defined above its split, one
-running a script never staged. Assert the REASON the refusal prints.
+running a script never staged. Assert the REASON the refusal prints. The sandbox
+containment task runs a positive control first and accepts only its probe's own
+exit code: a backend installed but unable to execute code scored as containment.
 
 Generated shell must quote what it interpolates: a gate fragment built around a
 bare interpreter path split on the first space, so under a directory with a space

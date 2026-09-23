@@ -1,6 +1,6 @@
 ---
 purpose: Release packaging, signing, manifests, and artifact verification.
-last_human_reviewed: 2026-09-06
+last_human_reviewed: 2026-09-23
 covers:
   - manage.sh
   - package_release.sh

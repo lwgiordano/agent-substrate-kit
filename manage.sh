@@ -284,7 +284,10 @@ case "$cmd" in
     run_lang "lint" "$LINT_CMD"
     run_lang "typecheck" "$TYPECHECK_CMD"
     run_lang "test" "$TEST_CMD"
-    subtool pre-commit run --all-files --show-diff-on-failure ;;
+    subtool pre-commit run --all-files --show-diff-on-failure
+    # v3.9.0 friction budget: the full test suite moved to the pre-push STAGE, so a
+    # commit stays fast — `check` still runs it, explicitly, and fails on it.
+    subtool pre-commit run --all-files --hook-stage pre-push --show-diff-on-failure ;;
   evals) run_py scripts/run_substrate_evals.py "$@" ;;
   audit) run_py scripts/substrate_audit.py --mode quick --write-report ;;
   full-audit) run_py scripts/substrate_audit.py --mode full --write-report ;;

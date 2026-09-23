@@ -281,6 +281,17 @@ def _operational_findings():
     if rc: b.append('substrate venv cannot import PyYAML (validators will fail): '+out[:120])
     if not (ROOT/'.substrate/venv/bin/pre-commit').exists():
         b.append('pre-commit not installed in substrate venv — run `./manage.sh setup`')
+    # v3.9.0 friction budget: the test suite runs at the pre-push STAGE. A clone
+    # set up before v3.9.0 has only the pre-commit hook, so its tests would
+    # silently stop running locally — say so instead.
+    pc=_safe_read_text(ROOT/'.pre-commit-config.yaml', ROOT, max_bytes=1 << 20) or ''
+    if 'stages: [pre-push]' in pc:
+        rc,hp=run(['git','rev-parse','--git-path','hooks/pre-push'])
+        hook=Path(hp) if rc==0 and hp else None
+        if hook is not None and not hook.is_absolute(): hook=ROOT/hook
+        if hook is None or not hook.is_file():
+            w.append('pre-push hook not installed — the test suite runs at push; run '
+                     '`./manage.sh setup` (or `.substrate/venv/bin/pre-commit install`)')
     # Configured language commands must resolve (empty is fine = gate skipped).
     cfg=ROOT/'.substrate/config'; vals={}
     if cfg.exists():

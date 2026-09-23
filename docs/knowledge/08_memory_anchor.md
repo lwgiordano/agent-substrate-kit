@@ -1,6 +1,6 @@
 ---
 purpose: The memory trust anchor — monotonic advance, remote confirmation, and limits.
-last_human_reviewed: 2026-09-06
+last_human_reviewed: 2026-09-23
 covers:
   - scripts/memory_log.py
   - scripts/release_gate.sh
@@ -151,3 +151,9 @@ the published anchor was advanced. `anchor` also re-checks membership immediatel
 before writing the note and refuses if the chain moved under it; a replacement in
 the remaining instants before the write is caught by the next `verify`, not by
 that check.
+
+Where local hardening stops is a decision, not an oversight:
+[ADR 0002](../decisions/0002-anchor-threat-model-boundary.md). A same-user
+process rewriting the repository WHILE a gate runs is out of scope for local
+controls; publication, branch protection, and CODEOWNERS bound it. Sequential
+tampering and false claims of remote verification stay in scope.

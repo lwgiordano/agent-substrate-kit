@@ -6,7 +6,7 @@ asserts:
   - scripts/_doc_common.py::locked_atomic_append
   - scripts/session_handoff.py::_safe_history_line
   - scripts/session_handoff.py::_rejected_block
-last_human_reviewed: 2026-09-06
+last_human_reviewed: 2026-09-23
 covers:
   - manage.sh
   - scripts/_doc_common.py
@@ -62,11 +62,15 @@ Session start also records a Git baseline for completion checks. The state file
 is read with `O_NOFOLLOW`: a symlinked `current.json` is treated as no state, so
 restore can never be redirected to pull an outside file into context.
 
-Restore sanitizes untrusted text and enforces separate budgets for structured
-handoff content, the last five HISTORY summaries, and the newest rejected
-approaches. `_safe_history_line` strips control, markup, and role-like prefixes.
-`_rejected_block` reuses that sanitizer and keeps newest entries when the budget
-truncates older context.
+Restore sanitizes untrusted text and enforces separate budgets, summing to the
+unchanged 6000-char ceiling, for: structured handoff content; the INTENT.md
+Objectives (numbered items, lead sentence each — the operator's goals survive
+compaction); the last five HISTORY summaries; the lead sentence of each recent
+entry's **Knowledge:** field, tagged with its sha (the lesson, not the
+narrative); and the newest rejected approaches. `_safe_history_line` strips
+control, markup, and role-like prefixes and cuts at a word boundary; the new
+blocks drop a stripped line rather than spend budget on a marker. Every block
+fits newest-first — a blind slice cut the newest entry, the one most needed.
 
 ## Append-only coordination logs
 

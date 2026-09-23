@@ -1,0 +1,664 @@
+{
+  "_comment": "Guard registry for scripts/prove_guards.py (`./manage.sh prove`). Each guard is neutralized in a private copy of the tree and its tests must then FAIL. Add an entry with every security guard and regression you ship; a guard whose snippet moves makes prove fail until the entry is updated.",
+  "guards": [
+    {
+      "id": "anchor-membership",
+      "file": "scripts/memory_log.py",
+      "find": "        if anchored not in seen:\n            print(f\"memory-log: ANCHOR MISMATCH",
+      "replace": "        if False:\n            print(f\"memory-log: ANCHOR MISMATCH",
+      "tests": [
+        "tests/test_hook_scripts.py::test_memory_anchor_detects_wholesale_replacement",
+        "tests/test_hook_scripts.py::test_memory_anchor_detects_truncation_past_anchor"
+      ],
+      "why": "a chain replaced wholesale or truncated past the anchor verifies --anchor green"
+    },
+    {
+      "id": "anchor-membership-not-equality",
+      "file": "scripts/memory_log.py",
+      "find": "        if anchored not in seen:\n            print(f\"memory-log: ANCHOR MISMATCH",
+      "replace": "        if anchored != (events[-1].get(\"hash\") if events else ZERO):\n            print(f\"memory-log: ANCHOR MISMATCH",
+      "tests": [
+        "tests/test_hook_scripts.py::test_memory_anchor_growth_after_anchor_passes"
+      ],
+      "why": "head==anchored equality reports every legitimate append as tampering, so the anchor gets switched off"
+    },
+    {
+      "id": "anchor-absence-fails-closed",
+      "file": "scripts/memory_log.py",
+      "find": "(a release does this after its gate passes).\",\n                  file=sys.stderr)\n            return 1",
+      "replace": "(a release does this after its gate passes).\",\n                  file=sys.stderr)\n            return 0",
+      "tests": [
+        "tests/test_hook_scripts.py::test_memory_anchor_absence_fails_closed"
+      ],
+      "why": "no anchor anywhere in the ancestry downgrades silently to the unanchored check (fail-open on absence)"
+    },
+    {
+      "id": "anchor-monotonic-advance",
+      "file": "scripts/memory_log.py",
+      "find": "    if prior is not None and not force:",
+      "replace": "    if False:",
+      "tests": [
+        "tests/test_hook_scripts.py::test_memory_anchor_refuses_to_launder_a_replaced_chain",
+        "tests/test_hook_scripts.py::test_memory_anchor_force_records_the_break_in_the_chain"
+      ],
+      "why": "replace events.jsonl, re-run `anchor`, and verify --anchor goes green over the replacement"
+    },
+    {
+      "id": "anchor-force-evidence-precondition",
+      "edits": [
+        {
+          "file": "scripts/memory_log.py",
+          "find": "        if rc != 0 or not appended:",
+          "replace": "        if False:"
+        },
+        {
+          "file": "scripts/memory_log.py",
+          "find": "    if head != ZERO and head not in {ev.get(\"hash\") for ev in _read_events()}:",
+          "replace": "    if False:"
+        }
+      ],
+      "tests": [
+        "tests/test_hook_scripts.py::test_memory_anchor_force_aborts_when_evidence_cannot_be_written"
+      ],
+      "why": "REDUNDANT pair (append-rc precondition + head-in-chain postcondition): --force rewrites the note with the anchor-forced evidence event unwritten"
+    },
+    {
+      "id": "anchor-force-binds-head",
+      "file": "scripts/memory_log.py",
+      "find": "        head = appended\n",
+      "replace": "        head = _head_hash()\n",
+      "tests": [
+        "tests/test_hook_scripts.py::test_memory_anchor_force_binds_the_head_to_its_evidence_append"
+      ],
+      "why": "a writer racing --force gets a note over a chain with no anchor-forced event in it"
+    },
+    {
+      "id": "anchor-remote-fetch-not-local-ref",
+      "edits": [
+        {
+          "file": "scripts/memory_log.py",
+          "find": "        if not lsr.stdout.strip():\n            return None\n",
+          "replace": ""
+        },
+        {
+          "file": "scripts/memory_log.py",
+          "find": "        if fetched.returncode != 0:\n            return None\n",
+          "replace": ""
+        }
+      ],
+      "tests": [
+        "tests/test_hook_scripts.py::test_memory_anchor_rejects_a_locally_spoofed_remote_note"
+      ],
+      "why": "REDUNDANT pair (ls-remote existence + checked fetch rc): one local `git notes --ref=origin-substrate-memory add` forges 'verified against origin'"
+    },
+    {
+      "id": "anchor-evidence-env-isolates-config",
+      "file": "scripts/memory_log.py",
+      "find": "    e = _clean_env()\n    e.pop(\"XDG_CONFIG_HOME\", None)\n    e[\"GIT_CONFIG_GLOBAL\"] = os.devnull\n    e[\"GIT_CONFIG_SYSTEM\"] = os.devnull\n",
+      "replace": "    e = _clean_env()\n",
+      "tests": [
+        "tests/test_hook_scripts.py::test_memory_anchor_ignores_hostile_user_git_config"
+      ],
+      "why": "a url.insteadOf in XDG_CONFIG_HOME/HOME git config reroutes origin and a real CONFLICT prints 'verified against origin'"
+    },
+    {
+      "id": "anchor-git-routing-stripped",
+      "file": "scripts/memory_log.py",
+      "find": "    \"GIT_DIR\", \"GIT_WORK_TREE\",",
+      "replace": "    \"GIT_WORK_TREE\",",
+      "tests": [
+        "tests/test_hook_scripts.py::test_memory_anchor_ignores_hostile_git_routing_env"
+      ],
+      "why": "GIT_DIR pointed at a fake repo turns a real ANCHOR CONFLICT into a clean LOCAL pass"
+    },
+    {
+      "id": "anchor-conflict-membership",
+      "file": "scripts/memory_log.py",
+      "find": "        if published is not None and published not in seen:",
+      "replace": "        if False:",
+      "tests": [
+        "tests/test_hook_scripts.py::test_memory_anchor_conflict_when_origin_publishes_a_hash_not_in_the_chain"
+      ],
+      "why": "origin publishing an anchor for a different chain is reported LOCAL AHEAD instead of CONFLICT"
+    },
+    {
+      "id": "anchor-local-ahead-not-conflict",
+      "file": "scripts/memory_log.py",
+      "find": "        if published is not None and published not in seen:",
+      "replace": "        if published is not None and published != anchored:",
+      "tests": [
+        "tests/test_hook_scripts.py::test_memory_anchor_local_ahead_of_origin_is_not_called_tampering"
+      ],
+      "why": "a refused note push is reported as tampering (ANCHOR CONFLICT) and the check gets disabled"
+    },
+    {
+      "id": "anchor-strict-requires-published",
+      "file": "scripts/memory_log.py",
+      "find": "        if _require_published_anchor():",
+      "replace": "        if False:",
+      "tests": [
+        "tests/test_hook_scripts.py::test_memory_anchor_strict_requires_a_published_anchor",
+        "tests/test_hook_scripts.py::test_memory_anchor_rejects_a_locally_spoofed_remote_note"
+      ],
+      "why": "strict accepts a local-only anchor that whatever rewrites the log can rewrite too"
+    },
+    {
+      "id": "anchor-config-profile-canonical",
+      "file": "scripts/memory_log.py",
+      "find": "    return _config_profile(raw) == \"strict\"",
+      "replace": "    return \"strict\" in next((ln for ln in raw.splitlines() if ln.startswith(\"SUBSTRATE_PROFILE\")), \"\")",
+      "tests": [
+        "tests/test_hook_scripts.py::test_memory_log_reads_the_profile_like_the_canonical_parser"
+      ],
+      "why": "a first-match parser reads standard-then-strict as base tier: gate says strict, anchor publication says not"
+    },
+    {
+      "id": "gate-memory-presence-e",
+      "file": "scripts/release_gate.sh",
+      "find": "if [ -e .substrate/memory/events.jsonl ] && { [ -L .substrate/memory/events.jsonl ] || [ ! -f .substrate/memory/events.jsonl ]; }; then",
+      "replace": "if false; then",
+      "tests": [
+        "tests/test_hook_scripts.py::test_release_gate_refuses_a_non_regular_memory_log"
+      ],
+      "why": "a FIFO events.jsonl reads as absent and every memory verification is skipped while the gate passes"
+    },
+    {
+      "id": "gate-memory-vanished",
+      "file": "scripts/release_gate.sh",
+      "find": "if [ \"$_MEMORY_IN_RELEASE\" = \"1\" ] && [ ! -e .substrate/memory/events.jsonl ]; then",
+      "replace": "if false; then",
+      "tests": [
+        "tests/test_hook_scripts.py::test_release_gate_refuses_when_the_memory_log_vanishes_mid_run"
+      ],
+      "why": "a memory log deleted mid-run skips its final verification instead of refusing"
+    },
+    {
+      "id": "gate-memory-appeared",
+      "file": "scripts/release_gate.sh",
+      "find": "if [ \"$_MEMORY_IN_RELEASE\" = \"0\" ] && [ -e .substrate/memory/events.jsonl ]; then",
+      "replace": "if false; then",
+      "tests": [
+        "tests/test_hook_scripts.py::test_release_gate_refuses_when_a_memory_log_appears_mid_run"
+      ],
+      "why": "a memory log planted mid-run is certified by a release that never verified it"
+    },
+    {
+      "id": "gate-end-state-anchor-unconditional",
+      "file": "scripts/release_gate.sh",
+      "find": "  echo \"==> Memory anchor re-check (end state)\"\n  run_py scripts/memory_log.py verify --anchor\n",
+      "replace": "  echo \"==> Memory anchor re-check (end state)\"\n  if [ \"$SUBSTRATE_PROFILE\" = \"strict\" ]; then run_py scripts/memory_log.py verify --anchor; fi\n",
+      "tests": [
+        "tests/test_hook_scripts.py::test_release_gate_end_state_check_reads_the_live_profile"
+      ],
+      "why": "a config raised to strict mid-run is certified by the start-of-run standard check (round-37 regression)"
+    },
+    {
+      "id": "gate-config-drift-refusal",
+      "file": "scripts/release_gate.sh",
+      "find": "if [ \"$_end_config_fp\" != \"$_SUBSTRATE_CONFIG_AT_START\" ]; then",
+      "replace": "if false; then",
+      "tests": [
+        "tests/test_hook_scripts.py::test_release_gate_refuses_success_when_the_config_changes_mid_run"
+      ],
+      "why": "success is announced for a .substrate/config the checks never ran under"
+    },
+    {
+      "id": "gate-snapshot-load",
+      "file": "scripts/release_gate.sh",
+      "find": "load_substrate_config \"$_SUBSTRATE_SNAP/config\" ||",
+      "replace": "load_substrate_config .substrate/config ||",
+      "tests": [
+        "tests/test_hook_scripts.py::test_release_gate_loads_the_config_it_pinned"
+      ],
+      "why": "an A-B-A swap of .substrate/config around the load runs the gate on values it never pinned"
+    },
+    {
+      "id": "gate-helper-rehash",
+      "file": "scripts/release_gate.sh",
+      "find": "if [ \"$_helper_now\" != \"$_SUBSTRATE_HELPER_AT_START\" ]; then",
+      "replace": "if false; then",
+      "tests": [
+        "tests/test_hook_scripts.py::test_release_gate_attests_the_config_helper_before_sourcing_it"
+      ],
+      "why": "a config loader swapped after the validators attested it is sourced during the trusted release"
+    },
+    {
+      "id": "profile-last-wins",
+      "file": "scripts/_doc_common.py",
+      "find": "            val = val[1:-1]\n        profile = val\n    return profile",
+      "replace": "            val = val[1:-1]\n        profile = profile or val\n    return profile",
+      "tests": [
+        "tests/test_hook_scripts.py::test_canonical_profile_parser_agrees_with_the_shell_loader",
+        "tests/test_hook_scripts.py::test_command_policy_reads_the_profile_like_the_shell_loader"
+      ],
+      "why": "standard-then-strict reads as standard in Python and strict in the shell loader"
+    },
+    {
+      "id": "profile-split-newline-only",
+      "file": "scripts/_doc_common.py",
+      "find": "    for line in raw.split(\"\\n\"):",
+      "replace": "    for line in raw.splitlines():",
+      "tests": [
+        "tests/test_hook_scripts.py::test_canonical_profile_parser_agrees_with_the_shell_loader"
+      ],
+      "why": "a VT/FF-hidden second assignment in what the shell sees as a comment downgrades strict in Python"
+    },
+    {
+      "id": "command-policy-canonical-parser",
+      "file": "scripts/command_policy.py",
+      "find": "        val = _substrate_profile(raw_cfg)",
+      "replace": "        val = next((ln.partition(\"=\")[2].strip().strip(\"\\\"'\") for ln in raw_cfg.splitlines() if ln.startswith(\"SUBSTRATE_PROFILE=\")), \"\")",
+      "tests": [
+        "tests/test_hook_scripts.py::test_command_policy_reads_the_profile_like_the_shell_loader"
+      ],
+      "why": "the runtime hook boundary reads a different profile than the gate (first-match), downgrading strict-only behaviour"
+    },
+    {
+      "id": "doctor-remote-claim-positive",
+      "file": "scripts/substrate_doctor.py",
+      "find": "            if rc_anc == 0 and 'verified against origin' in out_anc:",
+      "replace": "            if rc_anc == 0 and not any(t in out_anc for t in ('LOCAL (no remote)', 'LOCAL-ONLY')):",
+      "tests": [
+        "tests/test_hook_scripts.py::test_doctor_never_claims_remote_verification_without_positive_evidence"
+      ],
+      "why": "doctor claims 'verified against the remote' by elimination for an unpublished LOCAL AHEAD anchor"
+    },
+    {
+      "id": "history-shallow-refusal",
+      "file": "scripts/check_history_sha.py",
+      "find": "    if _is_shallow_clone():",
+      "replace": "    if False:",
+      "tests": [
+        "tests/test_hook_scripts.py::test_history_sha_shallow_clone_refuses_and_names_unshallow"
+      ],
+      "why": "a depth-1 CI clone prescribes Correction-of entries that permanently corrupt append-only HISTORY"
+    },
+    {
+      "id": "record-verify",
+      "file": "scripts/memory_log.py",
+      "find": "for finding in _record_findings(events):",
+      "replace": "for finding in []:",
+      "tests": [
+        "tests/test_hook_scripts.py::test_history_append_is_recorded_and_an_edit_breaks_verify",
+        "tests/test_hook_scripts.py::test_rejected_append_is_recorded"
+      ],
+      "why": "an edited or deleted HISTORY/REJECTED entry verifies as OK"
+    },
+    {
+      "id": "record-normalize",
+      "file": "scripts/memory_log.py",
+      "find": "cur.append(ln.rstrip())",
+      "replace": "cur.append(ln)",
+      "tests": [
+        "tests/test_hook_scripts.py::test_record_whitespace_and_union_merge_tolerant"
+      ],
+      "why": "a merge=union merge or trailing whitespace reads as tampering, so the check gets switched off"
+    },
+    {
+      "id": "record-linked-file",
+      "file": "scripts/memory_log.py",
+      "find": "raise MemoryLogUnsafe(f\"{relpath} is linked, special, or outside the repo\")",
+      "replace": "return None",
+      "tests": [
+        "tests/test_hook_scripts.py::test_record_refuses_linked_record_file"
+      ],
+      "why": "a symlinked record file is reported as missing entries instead of as tampering"
+    },
+    {
+      "id": "reserved-event-types",
+      "file": "scripts/memory_log.py",
+      "find": "if a.type in RESERVED_TYPES:",
+      "replace": "if False:",
+      "tests": [
+        "tests/test_hook_scripts.py::test_reserved_event_types_refused_on_the_cli"
+      ],
+      "why": "`memory_log append --type release-pass` mints the evidence shipped-green trusts"
+    },
+    {
+      "id": "release-pass-head",
+      "file": "scripts/memory_log.py",
+      "find": "if not head or head != expect_commit:",
+      "replace": "if not head:",
+      "tests": [
+        "tests/test_hook_scripts.py::test_release_pass_refuses_when_head_moved"
+      ],
+      "why": "a gate that ran while HEAD moved certifies a commit its checks never saw"
+    },
+    {
+      "id": "evidence-chain-verified",
+      "file": "scripts/memory_log.py",
+      "find": "    brk = _chain_break(events)\n    if brk is not None:\n        return None, f\"memory chain does not verify",
+      "replace": "    brk = None\n    if brk is not None:\n        return None, f\"memory chain does not verify",
+      "tests": [
+        "tests/test_hook_scripts.py::test_shipped_green_refused_from_a_broken_chain"
+      ],
+      "why": "a hand-written release-pass line with a bad hash satisfies shipped-green"
+    },
+    {
+      "id": "shipped-green-clean-start",
+      "file": "scripts/_doc_common.py",
+      "find": "if not any(d.get(\"clean_start\") is True for d in hits):",
+      "replace": "if False:",
+      "tests": [
+        "tests/test_hook_scripts.py::test_shipped_green_requires_clean_release_pass"
+      ],
+      "why": "tests that ran on uncommitted edits certify the commit as shipped-green"
+    },
+    {
+      "id": "outcome-earlier-ref",
+      "file": "scripts/_doc_common.py",
+      "find": "        if not any(s.startswith(target) or target.startswith(s)",
+      "replace": "        if False and not any(s.startswith(target) or target.startswith(s)",
+      "tests": [
+        "tests/test_hook_scripts.py::test_outcome_refs_and_labels_validated"
+      ],
+      "why": "reverts:/supersedes: may name a commit no HISTORY entry documents"
+    },
+    {
+      "id": "outcome-single-line",
+      "file": "scripts/append_history.py",
+      "find": "if len(HISTORY_OUTCOME_LINE_RE.findall(entry)) != 1:",
+      "replace": "if False:",
+      "tests": [
+        "tests/test_hook_scripts.py::test_outcome_refs_and_labels_validated"
+      ],
+      "why": "a field smuggles a second **Outcome:** shipped-green line past the evidence check"
+    },
+    {
+      "id": "history-gate-outcome-monotonic",
+      "file": "scripts/check_history_sha.py",
+      "find": "if len(vals) != 1:",
+      "replace": "if len(vals) > 1:",
+      "tests": [
+        "tests/test_hook_scripts.py::test_history_gate_outcome_is_monotonic_and_evidence_bound"
+      ],
+      "why": "entries after the first labelled one can silently drop the outcome"
+    },
+    {
+      "id": "history-gate-outcome-evidence",
+      "file": "scripts/check_history_sha.py",
+      "find": "problem = _outcome_problem(vals[0], entry_shas[i], entry_shas[:i], _REPO)",
+      "replace": "problem = None",
+      "tests": [
+        "tests/test_hook_scripts.py::test_history_gate_outcome_is_monotonic_and_evidence_bound"
+      ],
+      "why": "a hand-edited shipped-green with no release-pass behind it passes the gate"
+    },
+    {
+      "id": "history-gate-absent-chain-only",
+      "file": "scripts/check_history_sha.py",
+      "find": "            if vals[0] == \"shipped-green\" and not os.path.lexists(",
+      "replace": "            if vals[0] == \"shipped-green\" or not os.path.lexists(",
+      "tests": [
+        "tests/test_hook_scripts.py::test_history_gate_outcome_is_monotonic_and_evidence_bound"
+      ],
+      "why": "a checkout WITH a chain skips the shipped-green evidence check as if it had none"
+    },
+    {
+      "id": "record-root-pinned",
+      "edits": [
+        {
+          "file": "scripts/_doc_common.py",
+          "find": "    env[\"SUBSTRATE_PROJECT_DIR\"] = str(root)\n    try:\n        p = _sp.run(",
+          "replace": "    try:\n        p = _sp.run("
+        },
+        {
+          "file": "scripts/_doc_common.py",
+          "find": "env = {k: v for k, v in os.environ.items() if k != \"CLAUDE_PROJECT_DIR\"}",
+          "replace": "env = dict(os.environ)"
+        }
+      ],
+      "tests": [
+        "tests/test_hook_scripts.py::test_history_append_is_recorded_and_an_edit_breaks_verify"
+      ],
+      "why": "REDUNDANT pair (either alone suffices): the record lands in whatever repo CLAUDE_PROJECT_DIR names"
+    },
+    {
+      "id": "release-gate-pre-record-config",
+      "file": "scripts/release_gate.sh",
+      "find": "    if ! _pre_record_fp=\"$(_substrate_config_fingerprint)\" \\\n       || [ \"$_pre_record_fp\" != \"$_SUBSTRATE_CONFIG_AT_START\" ]; then",
+      "replace": "    if false; then",
+      "tests": [
+        "tests/test_hook_scripts.py::test_release_gate_records_release_pass_before_the_anchor"
+      ],
+      "why": "a release-pass is recorded under a configuration the repository no longer has"
+    },
+    {
+      "id": "sandbox-eval-exact-rc",
+      "file": "scripts/run_substrate_evals.py",
+      "find": "return p.returncode == 7, f\"contained rc={p.returncode}\"",
+      "replace": "return p.returncode != 0, f\"contained rc={p.returncode}\"",
+      "tests": [
+        "tests/test_hook_scripts.py::test_sandbox_eval_requires_positive_control_and_exact_rc"
+      ],
+      "why": "a sandbox probe that failed for any reason scores as containment"
+    },
+    {
+      "id": "sandbox-eval-positive-control",
+      "file": "scripts/run_substrate_evals.py",
+      "find": "    if ctl.returncode != 0:\n        return True, f\"skipped: sandbox backend present but cannot execute code",
+      "replace": "    if False:\n        return True, f\"skipped: sandbox backend present but cannot execute code",
+      "tests": [
+        "tests/test_hook_scripts.py::test_sandbox_eval_requires_positive_control_and_exact_rc"
+      ],
+      "why": "a backend that cannot run code at all is scored instead of reported"
+    },
+    {
+      "id": "handoff-intent-guarded-read",
+      "file": "scripts/session_handoff.py",
+      "find": "raw = _safe_read_text(INTENT_MD, ROOT, max_bytes=_HISTORY_TAIL_BYTES)",
+      "replace": "raw = INTENT_MD.read_text() if INTENT_MD.exists() else None",
+      "tests": [
+        "tests/test_hook_scripts.py::test_session_handoff_intent_link_refused"
+      ],
+      "why": "a symlinked INTENT.md injects an outside file into every session's context"
+    },
+    {
+      "id": "handoff-history-newest-kept",
+      "file": "scripts/session_handoff.py",
+      "find": "fitted = _fit_block(header, list(reversed(lines)), HISTORY_SUMMARY_BUDGET)",
+      "replace": "fitted = _fit_block(header, lines, HISTORY_SUMMARY_BUDGET)",
+      "tests": [
+        "tests/test_hook_scripts.py::test_session_handoff_history_block_keeps_newest_whole"
+      ],
+      "why": "under budget pressure the NEWEST history entry is the one dropped"
+    },
+    {
+      "id": "handoff-knowledge-lead-sentence",
+      "file": "scripts/session_handoff.py",
+      "find": "lead = _SENTENCE_END.split(\" \".join(know.split()), maxsplit=1)[0]",
+      "replace": "lead = know",
+      "tests": [
+        "tests/test_hook_scripts.py::test_session_handoff_injects_knowledge_lead_sentence"
+      ],
+      "why": "the whole Knowledge narrative spends the lesson budget"
+    },
+    {
+      "id": "prove-no-bytecode-cache",
+      "file": "scripts/prove_guards.py",
+      "find": "    env[\"PYTHONDONTWRITEBYTECODE\"] = \"1\"\n",
+      "replace": "\n",
+      "tests": [
+        "tests/test_hook_scripts.py::test_prove_runs_tests_without_a_bytecode_cache"
+      ],
+      "why": "a stale .pyc runs the wrong code under a mutation, crediting a failure to the wrong guard"
+    },
+    {
+      "id": "prove-rc1-only",
+      "file": "scripts/prove_guards.py",
+      "find": "            if rc == 1 and (\"failed\" in out or \"FAILED\" in out):",
+      "replace": "            if rc != 0:",
+      "tests": [
+        "tests/test_hook_scripts.py::test_prove_does_not_count_an_import_error_as_proof"
+      ],
+      "why": "a neutralization that breaks the import (tests never ran) is counted as proof"
+    },
+    {
+      "id": "prove-baseline",
+      "file": "scripts/prove_guards.py",
+      "find": "        rc, out = run_tests(copy, nodes)\n        if rc != 0:",
+      "replace": "        rc, out = 0, \"\"\n        if rc != 0:",
+      "tests": [
+        "tests/test_hook_scripts.py::test_prove_does_not_count_a_collection_error_as_proof",
+        "tests/test_hook_scripts.py::test_prove_requires_a_failing_baseline_to_be_fixed_first"
+      ],
+      "why": "a typo'd node id or an already-failing test counts as proof of a guard"
+    },
+    {
+      "id": "prove-private-copy",
+      "file": "scripts/prove_guards.py",
+      "find": "        copy = Path(td) / \"repo\"\n        copy.mkdir()\n        make_copy(root, copy)",
+      "replace": "        copy = root",
+      "tests": [
+        "tests/test_hook_scripts.py::test_prove_passes_a_load_bearing_guard_and_leaves_the_tree_alone"
+      ],
+      "why": "prove mutates the live tree, so an interrupted run leaves a guard neutralized in place"
+    },
+    {
+      "id": "lessons-inject-committed-only",
+      "file": "scripts/session_handoff.py",
+      "find": "    raw = _git(\"show\", \"HEAD:docs/lessons.jsonl\")",
+      "replace": "    raw = _safe_read_text(ROOT / \"docs\" / \"lessons.jsonl\", ROOT, max_bytes=1 << 20)",
+      "tests": [
+        "tests/test_hook_scripts.py::test_uncommitted_lesson_is_not_injected"
+      ],
+      "why": "a lesson appended to the working tree, never committed, reaches every session's context"
+    },
+    {
+      "id": "lessons-inject-evidence-present",
+      "file": "scripts/session_handoff.py",
+      "find": "if not isinstance(ev.get(\"test\"), str) or not evidence_exists(ROOT, ev[\"test\"]):",
+      "replace": "if False:",
+      "tests": [
+        "tests/test_hook_scripts.py::test_lessons_injected_only_when_matched_recorded_and_evidenced"
+      ],
+      "why": "a lesson whose proof was deleted is still presented as established"
+    },
+    {
+      "id": "lessons-inject-status-and-superseded",
+      "file": "scripts/session_handoff.py",
+      "find": "        if not isinstance(d, dict) or d.get(\"status\") not in (\"test\", \"gate\") \\\n                or d.get(\"superseded_by\") is not None:",
+      "replace": "        if not isinstance(d, dict):",
+      "tests": [
+        "tests/test_hook_scripts.py::test_lessons_injected_only_when_matched_recorded_and_evidenced"
+      ],
+      "why": "prose-only and superseded lessons are injected as if they held"
+    },
+    {
+      "id": "check-lessons-evidence",
+      "file": "scripts/check_lessons.py",
+      "find": "elif not isinstance(test, str) or not evidence_exists(root, test):",
+      "replace": "elif False:",
+      "tests": [
+        "tests/test_hook_scripts.py::test_check_lessons_fails_missing_evidence_and_warns_prose"
+      ],
+      "why": "deleting a lesson's test leaves the lesson standing as a belief nobody re-checks"
+    },
+    {
+      "id": "recall-query-quoted",
+      "file": "scripts/recall.py",
+      "find": "    return \" OR \".join(f'\"{t}\"' for t in terms if t)",
+      "replace": "    return q",
+      "tests": [
+        "tests/test_hook_scripts.py::test_recall_query_never_reaches_fts_grammar_and_builds_no_index"
+      ],
+      "why": "raw user text reaches the FTS5 query grammar (column filters, NEAR, syntax errors)"
+    },
+    {
+      "id": "recall-guarded-read",
+      "file": "scripts/recall.py",
+      "find": "            text = safe_read_text(p, root, max_bytes=_MAX_FILE)",
+      "replace": "            text = p.read_text()",
+      "tests": [
+        "tests/test_hook_scripts.py::test_recall_does_not_read_a_linked_doc"
+      ],
+      "why": "a symlinked knowledge doc prints an outside file into the agent's context"
+    },
+    {
+      "id": "doctor-pre-push-hook",
+      "file": "scripts/substrate_doctor.py",
+      "find": "        if hook is None or not hook.is_file():",
+      "replace": "        if False:",
+      "tests": [
+        "tests/test_hook_scripts.py::test_doctor_warns_when_the_pre_push_hook_is_missing"
+      ],
+      "why": "a clone without the pre-push hook silently stops running the test suite locally"
+    },
+    {
+      "id": "completion-gate-canonical-parser",
+      "file": "scripts/completion_gate.py",
+      "find": "        return _substrate_profile(_safe_cfg_text() or \"\") == \"strict\"",
+      "replace": "        return \"strict\" in next((ln for ln in (_safe_cfg_text() or \"\").splitlines() if ln.startswith(\"SUBSTRATE_PROFILE\")), \"\")",
+      "tests": ["tests/test_hook_scripts.py::test_every_profile_reader_decides_like_the_shell_loader"],
+      "why": "the completion gate decides strict with a first-match parser the shell loader disagrees with"
+    },
+    {
+      "id": "doctor-profile-canonical-parser",
+      "file": "scripts/substrate_doctor.py",
+      "find": "    return _substrate_profile(_safe_read_text(cfg, ROOT, max_bytes=1 << 20) or '') or 'standard'",
+      "replace": "    return next((ln.split('=', 1)[1].strip().strip('\"') for ln in (_safe_read_text(cfg, ROOT, max_bytes=1 << 20) or '').splitlines() if ln.startswith('SUBSTRATE_PROFILE=')), 'standard')",
+      "tests": ["tests/test_hook_scripts.py::test_every_profile_reader_decides_like_the_shell_loader"],
+      "why": "the doctor's profile row reports a tier the config does not resolve to"
+    },
+    {
+      "id": "check-runs-pre-push-stage",
+      "edits": [
+        {"file": "manage.sh",
+         "find": "    subtool pre-commit run --all-files --hook-stage pre-push --show-diff-on-failure ;;",
+         "replace": "    ;;"},
+        {"file": "templates/manage.sh.template",
+         "find": "    subtool pre-commit run --all-files --hook-stage pre-push --show-diff-on-failure ;;",
+         "replace": "    ;;"}
+      ],
+      "tests": ["tests/test_hook_scripts.py::test_check_runs_every_hook_stage_the_pre_commit_config_uses"],
+      "why": "`check` stops running the test suite once it moved to the pre-push stage (kit and consumer)"
+    },
+    {
+      "id": "ci-admin-token-not-on-pull-requests",
+      "edits": [
+        {"file": ".github/workflows/ci.yml",
+         "find": "        if: steps.admin.outputs.present == 'yes' && github.event_name != 'pull_request'",
+         "replace": "        if: steps.admin.outputs.present == 'yes'"},
+        {"file": "workflows/ci.yml.template",
+         "find": "        if: steps.admin.outputs.present == 'yes' && github.event_name != 'pull_request'",
+         "replace": "        if: steps.admin.outputs.present == 'yes'"}
+      ],
+      "tests": ["tests/test_hook_scripts.py::test_ci_admin_token_is_step_scoped_and_never_on_pull_requests"],
+      "why": "PR code runs with the admin token in scope and can print it"
+    },
+    {
+      "id": "narrative-history-verbs",
+      "file": "scripts/check_knowledge_narrative.py",
+      "find": "        r\"\\b(?:used to|formerly)\\b\"",
+      "replace": "        r\"(?!x)x\"",
+      "tests": ["tests/test_hook_scripts.py::test_narrative_lint_warns_only_and_skips_front_matter_and_fences"],
+      "why": "past-tense change narrative accumulates in knowledge docs unflagged"
+    },
+    {
+      "id": "narrative-release-stamps",
+      "file": "scripts/check_knowledge_narrative.py",
+      "find": "        r\"\\(v\\d+\\.\\d+\\.\\d+\\b|\\bv\\d+\\.\\d+\\.\\d+\\s*[:(]|\\bround-\\d+\\b|\\bCodex round\\b\")),",
+      "replace": "        r\"(?!x)x\")),",
+      "tests": ["tests/test_hook_scripts.py::test_narrative_lint_warns_only_and_skips_front_matter_and_fences"],
+      "why": "version-stamped release narrative accumulates in knowledge docs unflagged"
+    },
+    {
+      "id": "prove-missing-pytest-is-environment",
+      "file": "scripts/prove_guards.py",
+      "find": "    if importlib.util.find_spec(\"pytest\") is None:\n        print(f\"prove: pytest is not installed",
+      "replace": "    if False:\n        print(f\"prove: pytest is not installed",
+      "tests": ["tests/test_hook_scripts.py::test_prove_reports_a_missing_pytest_as_an_environment_error"],
+      "why": "a pytest-less interpreter reads as a failed baseline, sending the operator after a guard that is fine"
+    },
+    {
+      "id": "handoff-stripped-lines-dropped",
+      "file": "scripts/session_handoff.py",
+      "find": "    return safe == _STRIPPED_HISTORY or \"[instruction-line stripped]\" in safe",
+      "replace": "    return safe == _STRIPPED_HISTORY",
+      "tests": [
+        "tests/test_hook_scripts.py::test_session_handoff_knowledge_sanitized_and_budgeted"
+      ],
+      "why": "an instruction-shaped lesson reaches context as a placeholder line"
+    }
+  ]
+}

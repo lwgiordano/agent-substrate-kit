@@ -22,7 +22,8 @@ What this validator catches (claims it CAN make):
 CORRECTING A BAD SHA (v3.8.49). HISTORY is append-only, so a wrong
 SHA cannot be edited out — the remedy has to be additive. Append an
 entry whose third field is `Correction-of-<bad-sha>`; that supersedes
-the unresolvable-SHA finding for exactly that SHA, and the body should
+the unresolvable-SHA finding for every EARLIER entry naming that SHA (a
+repeated typo needs one correction, not one per occurrence), and the body should
 name the right commit for human readers. This gate PRINTED that advice
 from the start but never implemented the pairing: the marker was
 counted and skipped, so following the printed instruction changed
@@ -54,6 +55,7 @@ Usage (prefix with `uv run` / `poetry run` per your dep manager):
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import subprocess
 import sys
@@ -71,6 +73,11 @@ try:
 except Exception:  # pragma: no cover - stripped install
     def _safe_read_text(path, root=None, max_bytes=None, tail_bytes=None):
         return None
+# v3.9.0: the outcome rule is the one append_history enforces at write time —
+# imported, not restated. No fallback: a validator that cannot load the rule must
+# not pass labelled entries unchecked.
+from _doc_common import HISTORY_OUTCOME_LINE_RE as _OUTCOME_LINE_RE  # noqa: E402
+from _doc_common import history_outcome_problem as _outcome_problem  # noqa: E402
 
 # `## <ts> — <token> — <sha|WORKING|Correction...>` with em-dash
 # separators. The token is usually a ULID (uppercase Crockford-32:
@@ -156,6 +163,20 @@ def _is_future_dated(commit_iso: str, entry_ts: str) -> bool:
     return ct - et > timedelta(hours=24)
 
 
+def _is_shallow_clone() -> bool:
+    """True when git reports a shallow repository. Errors (no git, no repo) are
+    NOT shallow: those surface as their own failures downstream, and this must
+    never turn a real gate result into a silent skip."""
+    try:
+        r = subprocess.run(
+            ["git", "rev-parse", "--is-shallow-repository"],
+            cwd=_REPO, capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return r.returncode == 0 and r.stdout.strip() == "true"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument(
@@ -163,6 +184,26 @@ def main() -> int:
         help="print every checked entry, not just findings",
     )
     args = parser.parse_args()
+
+    # v3.8.51 (self-audit P2): in a SHALLOW clone every SHA older than the
+    # fetch boundary is simply absent, and this gate reported each one as
+    # "does not resolve" with the standard remedy — append Correction-of-<sha>.
+    # Following that advice in a shallow checkout corrupts HISTORY permanently:
+    # in every full clone those corrections then name SHAs that RESOLVE, which
+    # the v3.8.50 guard rightly treats as drift, on an append-only file that
+    # cannot be edited back. GitHub Actions checks out depth=1 by default; this
+    # kit's CI only avoided the trap via fetch-depth: 0, and the workaround had
+    # been recorded in a knowledge note instead of in the gate. Refuse to judge
+    # what cannot be seen, and name the real remedy.
+    if _is_shallow_clone():
+        print(
+            "check-history-sha: SHALLOW CLONE — commit history is truncated, so "
+            "HISTORY SHAs cannot be verified here. This is not drift. Run "
+            "`git fetch --unshallow` (or check out with fetch-depth: 0) and re-run. "
+            "Do NOT append Correction entries in this state.",
+            file=sys.stderr,
+        )
+        return 2
 
     if not _HISTORY.is_file():
         print(f"check-history-sha: missing {_HISTORY}", file=sys.stderr)
@@ -351,6 +392,41 @@ def main() -> int:
         if args.verbose:
             print(f"  {ts} {sha} ok")
 
+    # OUTCOME LABELS (v3.9.0). Monotonic, so the 61 entries written before the
+    # field existed stay valid and nothing after it can opt out: once ANY entry
+    # carries **Outcome:**, every later entry must carry exactly one, and each
+    # must pass the same rule append_history applied when it was written — so a
+    # hand-appended `shipped-green` with no release-pass behind it is drift.
+    n_outcome = n_unverifiable = 0
+    bodies = [text[m.end():(headers[i + 1].start() if i + 1 < len(headers) else len(text))]
+              for i, m in enumerate(headers)]
+    first = next((i for i, b in enumerate(bodies) if _OUTCOME_LINE_RE.search(b)), None)
+    if first is not None:
+        for i in range(first, len(headers)):
+            ts = headers[i].group("ts")
+            vals = _OUTCOME_LINE_RE.findall(bodies[i])
+            if len(vals) != 1:
+                findings.append(
+                    f"{ts}: {'no' if not vals else len(vals)} **Outcome:** line(s) — every "
+                    "entry after the first labelled one needs exactly one "
+                    "(append_history --outcome ...)")
+                continue
+            # The chain lives in .substrate/memory/, which is gitignored: a CI
+            # checkout or a fresh clone has NONE, so shipped-green evidence can
+            # only be judged in the producing clone (append_history already did,
+            # at write time). ABSENT is reported as unverifiable-here, not as
+            # drift and not as verified; a chain that is PRESENT but broken or
+            # linked is still judged, and fails.
+            if vals[0] == "shipped-green" and not os.path.lexists(
+                    _REPO / ".substrate" / "memory" / "events.jsonl"):
+                n_unverifiable += 1
+                continue
+            problem = _outcome_problem(vals[0], entry_shas[i], entry_shas[:i], _REPO)
+            if problem:
+                findings.append(f"{ts}: {problem}")
+                continue
+            n_outcome += 1
+
     if findings:
         print("check-history-sha: HISTORY SHA DRIFT DETECTED", file=sys.stderr)
         print("=" * 72, file=sys.stderr)
@@ -368,8 +444,12 @@ def main() -> int:
     print(
         f"check-history-sha: {total} entries verified "
         f"({n_sha} sha-resolved / {n_working} bootstrap / "
-        f"{n_correction} correction)."
+        f"{n_correction} correction; {n_outcome} outcome-labelled)."
     )
+    if n_unverifiable:
+        print(f"check-history-sha: {n_unverifiable} shipped-green label(s) NOT verifiable in "
+              "this checkout — no memory chain here (.substrate/memory/ is gitignored); "
+              "their release-pass evidence lives in the producing clone.")
     return 0
 
 

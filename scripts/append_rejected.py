@@ -35,7 +35,7 @@ from pathlib import Path
 # Explicit local import path so this works under `python -I` (isolated mode
 # does NOT auto-prepend the script dir). Stdlib imports above resolve first.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _doc_common import locked_atomic_append, repo_root, utc_now_iso
+from _doc_common import locked_atomic_append, record_in_chain, repo_root, utc_now_iso
 
 REJECTED_HEADER = """\
 # REJECTED.md — Append-only log of rejected approaches
@@ -100,6 +100,12 @@ def main(argv=None) -> int:
         print(f"append_rejected: cannot write {target}: {e}", file=sys.stderr)
         return 2
     print(entry.rstrip("\n"))
+    # v3.9.0: attest the entry in the memory chain, so a later edit is a BREAK.
+    rc, out = record_in_chain(root, "docs/REJECTED.md")
+    if rc != 0:
+        print(f"append_rejected: entry APPENDED but NOT recorded in the memory chain "
+              f"({out}). Run `./manage.sh memory record docs/REJECTED.md`.", file=sys.stderr)
+        return 2
     return 0
 
 

@@ -869,11 +869,17 @@ def _apply_profile_ratchet(root: Path, target: str) -> None:
     cfg = root / ".substrate" / "config"
     try:
         lines = (_safe_read_text(cfg, root, max_bytes=1 << 20) or "").splitlines()
+        # Rewrite EVERY assignment, not the first (v3.8.57, round-39 sweep). The
+        # loader takes the LAST one, so rewriting the first and breaking left a
+        # later duplicate winning — an upgrade that raised the profile would not
+        # have taken effect. Rewriting all of them also removes the ambiguity
+        # rather than preserving it.
+        seen = False
         for i, line in enumerate(lines):
-            if line.startswith("SUBSTRATE_PROFILE="):
+            if line.strip().startswith("SUBSTRATE_PROFILE="):
                 lines[i] = f'SUBSTRATE_PROFILE="{target}"'
-                break
-        else:
+                seen = True
+        if not seen:
             lines.append(f'SUBSTRATE_PROFILE="{target}"')
         _safe_atomic_write(cfg, "\n".join(lines) + "\n", root=root)
         req = root / ".substrate" / "required_profile"

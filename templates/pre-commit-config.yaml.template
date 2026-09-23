@@ -2,6 +2,13 @@
 # Profile markers: bootstrap.sh strips blocks not matching the selected
 # profile. starter < standard < strict (each level includes the ones
 # below it). python-only blocks are stripped when --lang != python.
+# Friction budget (v3.9.0): the fast safety validators run on every COMMIT; the
+# full pytest suite runs on PUSH (and in `./manage.sh check`, CI, and the release
+# gate). A six-minute commit hook was paid on every docs typo and pushed people
+# toward --no-verify, which skips the safety hooks too. Hooks without an explicit
+# `stages:` run at commit only.
+default_install_hook_types: [pre-commit, pre-push]
+default_stages: [pre-commit]
 repos:
   - repo: local
     hooks:
@@ -84,6 +91,12 @@ repos:
         language: system
         pass_filenames: false
         always_run: true
+      - id: check-lessons
+        name: Lessons carry evidence that exists
+        entry: {{PY}} -I scripts/check_lessons.py
+        language: system
+        pass_filenames: false
+        always_run: true
       # >>> standard
       # >>> python-only
       - id: ruff-format
@@ -104,6 +117,7 @@ repos:
         language: system
         pass_filenames: false
         always_run: true
+        stages: [pre-push]
       # <<< python-only
       - id: check-postmortem-gates-resolved
         name: Postmortem gates resolve to real files

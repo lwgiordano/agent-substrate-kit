@@ -7,14 +7,17 @@ hooks at context tail — never add it here.
 
 ## Startup protocol (keep it light)
 
-1. Session start injects the last 5 `docs/HISTORY.md` summaries; verify
-   them there (read the file directly only if none were injected). It also
-   injects the newest `docs/REJECTED.md` entries — do not re-propose a
-   rejected approach without new information (`./manage.sh reject` logs one).
+1. Session start injects the `docs/INTENT.md` objectives, the last 5
+   `docs/HISTORY.md` summaries with each entry's Knowledge lesson, the
+   `docs/lessons.jsonl` rules whose triggers match recently changed files,
+   and the newest `docs/REJECTED.md` entries; verify them there (read the
+   files directly only if none were injected). Do not re-propose a rejected
+   approach without new information (`./manage.sh reject` logs one).
 2. If a session-handoff block was injected at session start, verify it
    against `git log -5 --oneline` before trusting it.
 3. Read `docs/knowledge/*.md` and `docs/decisions/*.md` ONLY for the
-   area you are about to touch (just-in-time, not wholesale).
+   area you are about to touch (just-in-time, not wholesale);
+   `./manage.sh recall "<question>"` returns the matching sections.
 
 ## Source-of-truth order
 
@@ -84,6 +87,7 @@ Substrate profile: `{{PROFILE}}` (see `.substrate/config`).
 ./manage.sh doctor    # readiness: file/hook wiring, security, operational
 ./manage.sh check      # full validator chain + lint/typecheck/test + pre-commit
 ./manage.sh evals      # prove the policy BEHAVES (block-rate / false-positive-rate)
+./manage.sh prove      # remove each registered guard in a copy; its tests must fail
 ./manage.sh audit      # quick self-audit report
 ./manage.sh release    # package + verify from the built artifact
 ```

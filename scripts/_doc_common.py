@@ -1117,3 +1117,122 @@ def utc_now_iso() -> str:
         .isoformat()
         .replace("+00:00", "Z")
     )
+
+
+def substrate_profile(raw: str) -> str:
+    """SUBSTRATE_PROFILE exactly as `_substrate_config.sh` reads it, or "".
+
+    THE CANONICAL PYTHON READER. Every Python consumer of the profile routes
+    here; a second implementation is a second answer to the same policy
+    question, which is how round-38 and round-39 both went:
+
+      * `memory_log` stopped at the FIRST line starting with the key and asked
+        whether "strict" appeared anywhere in the rest, so a config assigning
+        standard then strict was strict to the release gate and base-tier to
+        anchor publication (round-38);
+      * fixing that with `str.splitlines()` still disagreed, because Python
+        breaks lines on VT/FF/NEL/LS/PS and `while IFS= read -r` does not — a
+        strict assignment followed by a VT and a second assignment inside what
+        the shell sees as a COMMENT read as standard (round-39);
+      * `command_policy` — the runtime hook boundary — was a THIRD parser with
+        the original first-match bug, missed by the round-38 sweep that claimed
+        to inventory every reader (round-39).
+
+    Mirrors the shell loader line for line: split on "\\n" only, skip blank and
+    comment lines, drop a trailing inline comment introduced by " #", require
+    the exact key, strip one layer of matching quotes, LAST assignment wins.
+    Returns "" when the key never appears; validation of the value against the
+    allowed domain belongs to the caller, which is where the two
+    callers differ in what an invalid value means.
+    """
+    profile = ""
+    for line in raw.split("\n"):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "  #" in line:
+            line = line.split("  #", 1)[0]
+        if " #" in line:
+            line = line.split(" #", 1)[0]
+        line = line.rstrip()
+        key, sep, val = line.partition("=")
+        if not sep or key.strip() != "SUBSTRATE_PROFILE":
+            continue
+        val = val.strip()
+        if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
+            val = val[1:-1]
+        profile = val
+    return profile
+
+
+# HISTORY outcome labels (v3.9.0). "What happened" was recorded; "did it work"
+# was not, so a session could not tell a shipped fix from an abandoned one.
+# `shipped-green` is the only label that claims success, and it is the only one
+# that needs evidence: a release-pass event for that commit, from a chain that
+# verifies, recorded by a gate that STARTED on a clean tracked tree.
+HISTORY_OUTCOMES = ("shipped-green", "unverified", "wip", "abandoned")
+HISTORY_OUTCOME_REF_RE = re.compile(r"^(?:reverts|supersedes):([0-9a-f]{7,40})$")
+HISTORY_OUTCOME_LINE_RE = re.compile(r"^\*\*Outcome:\*\*\s*(\S*)\s*$", re.MULTILINE)
+
+
+def history_outcome_problem(outcome: str, entry_sha: str, earlier_shas: list[str],
+                            root: Path) -> str | None:
+    """Why `outcome` is not a valid label for an entry documenting `entry_sha`,
+    or None. `earlier_shas` are the header shas of entries BEFORE this one —
+    a revert or supersede can only name what was already written."""
+    ref = HISTORY_OUTCOME_REF_RE.match(outcome)
+    if ref:
+        target = ref.group(1)
+        if not any(s.startswith(target) or target.startswith(s)
+                   for s in earlier_shas if re.fullmatch(r"[0-9a-f]{7,40}", s)):
+            return (f"outcome {outcome!r} names {target}, which no EARLIER HISTORY entry "
+                    "documents")
+        return None
+    if outcome not in HISTORY_OUTCOMES:
+        return (f"outcome {outcome!r} is not one of {', '.join(HISTORY_OUTCOMES)}, "
+                "reverts:<sha>, supersedes:<sha>")
+    if outcome != "shipped-green":
+        return None
+    full = _git(["rev-parse", "--verify", f"{entry_sha}^{{commit}}"], cwd=root)
+    if not full:
+        return f"shipped-green: {entry_sha!r} does not resolve to a commit"
+    import memory_log as _ml  # lazy: memory_log imports this module
+    passes, why = _ml.verified_release_passes(root)
+    if passes is None:
+        return f"shipped-green needs release-gate evidence, but {why}"
+    hits = [d for d in passes if d.get("commit") == full]
+    if not hits:
+        return (f"shipped-green: no release-pass event for {full[:12]} in the memory chain — "
+                "run `./manage.sh release` on that commit, or label it `unverified`")
+    if not any(d.get("clean_start") is True for d in hits):
+        return (f"shipped-green: every release-pass for {full[:12]} started on a DIRTY tree, "
+                "so its tests ran on uncommitted edits, not on the commit")
+    return None
+
+
+def record_in_chain(root: Path, relpath: str) -> tuple[int, str]:
+    """Attest the entries just appended to an append-only record file by
+    running `memory_log.py record <relpath>` against `root` (v3.9.0).
+
+    One implementation for every appender (HISTORY, REJECTED, lessons) so the
+    record step cannot exist in one writer and be forgotten in the next. Runs
+    memory_log as a subprocess pinned to `root` via SUBSTRATE_PROJECT_DIR: its
+    own root discovery honours CLAUDE_PROJECT_DIR, which in a test or a nested
+    checkout names a DIFFERENT repository, and a record written there would be
+    evidence about the wrong log. A repo without `.substrate/` has no chain;
+    that is (0, "no chain") — absent, not failed."""
+    import subprocess as _sp
+    import sys as _sys
+    if not (root / ".substrate").is_dir():
+        return 0, "no chain"
+    ml = Path(__file__).resolve().parent / "memory_log.py"
+    if not ml.is_file():
+        return 1, "memory_log.py missing"
+    env = {k: v for k, v in os.environ.items() if k != "CLAUDE_PROJECT_DIR"}
+    env["SUBSTRATE_PROJECT_DIR"] = str(root)
+    try:
+        p = _sp.run([_sys.executable, "-I", str(ml), "record", relpath], cwd=root,
+                    capture_output=True, text=True, timeout=60, env=env)
+    except Exception as e:  # pragma: no cover - environment failure
+        return 1, f"memory_log did not run: {e}"
+    return p.returncode, (p.stdout + p.stderr).strip()

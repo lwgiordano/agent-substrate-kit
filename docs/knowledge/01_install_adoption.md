@@ -4,7 +4,7 @@ asserts:
   - bootstrap.sh::_safe_mkdir_p
   - bootstrap.sh::wappend
   - scripts/run_python_gate.sh::_ruff_args
-last_human_reviewed: 2026-08-28
+last_human_reviewed: 2026-09-23
 covers:
   - bootstrap.sh
   - manage.sh
@@ -81,11 +81,19 @@ additional project knowledge siblings remain governed context but stay outside
 the upgrade drift baseline.
 
 `doctor` reports operational readiness, integrity, hook wiring, and configured
-governance. Offline doctor and go-live checks do not claim live remote protection
+governance; it warns when the pre-push hook that runs the test suite is missing. Offline doctor and go-live checks do not claim live remote protection
 or a sandbox backend that the host cannot prove. Its stripped-install ownership
 fallback is parity-checked against the canonical surface inventory so a missing
 helper import cannot silently remove newly governed files from the readiness
 scan.
+
+The same refusal to overclaim applies to its memory row, which delegates to
+`memory_log verify --anchor` and reports what that actually proved: `pass` for an
+anchor confirmed against the remote, `pass` for a local anchor in a repo with no
+remote (offline-complete is the documented base, so local is then the strongest
+anchor obtainable), `warn` when an origin exists but does not publish it, and
+`fail` for a strict repo with an unpublished anchor or a local note that
+disagrees with the remote.
 
 
 A present-but-unusable `.substrate/config` is tampering, not an absent config.
@@ -93,3 +101,5 @@ A present-but-unusable `.substrate/config` is tampering, not an absent config.
 file used to fall into the "missing config" branch and let every default
 through; the gate now distinguishes absent from unreadable and fails closed on
 the latter, matching how the frozen `required_*` locks already behave.
+
+`manage.sh enable profile <tier>` rewrites EVERY `SUBSTRATE_PROFILE` line in `.substrate/config`. Rewriting only the first left a later duplicate winning, so the command printed success over a config that still resolved to the old tier (v3.8.57); the doctor's reported profile comes from the same canonical parser every other reader uses.

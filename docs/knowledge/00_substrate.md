@@ -25,6 +25,7 @@ The source kit keeps detail in function-oriented documents:
 - [Agent context governance](07_agent_context_governance.md)
 - [The memory trust anchor](08_memory_anchor.md)
 - [Deterministic validators](09_deterministic_validators.md)
+- [Lessons, records, and recall](10_lessons_recall.md)
 
 ## Operating model
 

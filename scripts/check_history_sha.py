@@ -55,6 +55,7 @@ Usage (prefix with `uv run` / `poetry run` per your dep manager):
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import subprocess
 import sys
@@ -72,6 +73,11 @@ try:
 except Exception:  # pragma: no cover - stripped install
     def _safe_read_text(path, root=None, max_bytes=None, tail_bytes=None):
         return None
+# v3.9.0: the outcome rule is the one append_history enforces at write time —
+# imported, not restated. No fallback: a validator that cannot load the rule must
+# not pass labelled entries unchecked.
+from _doc_common import HISTORY_OUTCOME_LINE_RE as _OUTCOME_LINE_RE  # noqa: E402
+from _doc_common import history_outcome_problem as _outcome_problem  # noqa: E402
 
 # `## <ts> — <token> — <sha|WORKING|Correction...>` with em-dash
 # separators. The token is usually a ULID (uppercase Crockford-32:
@@ -386,6 +392,41 @@ def main() -> int:
         if args.verbose:
             print(f"  {ts} {sha} ok")
 
+    # OUTCOME LABELS (v3.9.0). Monotonic, so the 61 entries written before the
+    # field existed stay valid and nothing after it can opt out: once ANY entry
+    # carries **Outcome:**, every later entry must carry exactly one, and each
+    # must pass the same rule append_history applied when it was written — so a
+    # hand-appended `shipped-green` with no release-pass behind it is drift.
+    n_outcome = n_unverifiable = 0
+    bodies = [text[m.end():(headers[i + 1].start() if i + 1 < len(headers) else len(text))]
+              for i, m in enumerate(headers)]
+    first = next((i for i, b in enumerate(bodies) if _OUTCOME_LINE_RE.search(b)), None)
+    if first is not None:
+        for i in range(first, len(headers)):
+            ts = headers[i].group("ts")
+            vals = _OUTCOME_LINE_RE.findall(bodies[i])
+            if len(vals) != 1:
+                findings.append(
+                    f"{ts}: {'no' if not vals else len(vals)} **Outcome:** line(s) — every "
+                    "entry after the first labelled one needs exactly one "
+                    "(append_history --outcome ...)")
+                continue
+            # The chain lives in .substrate/memory/, which is gitignored: a CI
+            # checkout or a fresh clone has NONE, so shipped-green evidence can
+            # only be judged in the producing clone (append_history already did,
+            # at write time). ABSENT is reported as unverifiable-here, not as
+            # drift and not as verified; a chain that is PRESENT but broken or
+            # linked is still judged, and fails.
+            if vals[0] == "shipped-green" and not os.path.lexists(
+                    _REPO / ".substrate" / "memory" / "events.jsonl"):
+                n_unverifiable += 1
+                continue
+            problem = _outcome_problem(vals[0], entry_shas[i], entry_shas[:i], _REPO)
+            if problem:
+                findings.append(f"{ts}: {problem}")
+                continue
+            n_outcome += 1
+
     if findings:
         print("check-history-sha: HISTORY SHA DRIFT DETECTED", file=sys.stderr)
         print("=" * 72, file=sys.stderr)
@@ -403,8 +444,12 @@ def main() -> int:
     print(
         f"check-history-sha: {total} entries verified "
         f"({n_sha} sha-resolved / {n_working} bootstrap / "
-        f"{n_correction} correction)."
+        f"{n_correction} correction; {n_outcome} outcome-labelled)."
     )
+    if n_unverifiable:
+        print(f"check-history-sha: {n_unverifiable} shipped-green label(s) NOT verifiable in "
+              "this checkout — no memory chain here (.substrate/memory/ is gitignored); "
+              "their release-pass evidence lives in the producing clone.")
     return 0
 
 

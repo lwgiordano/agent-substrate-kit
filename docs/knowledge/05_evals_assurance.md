@@ -14,6 +14,7 @@ covers:
   - scripts/diy_ultrareview.sh
   - scripts/run_smoke_verification.py
   - scripts/run_substrate_evals.py
+  - scripts/prove_guards.py
   - scripts/substrate_audit.py
 ---
 
@@ -108,6 +109,19 @@ tasks did exactly that — one referencing a variable defined above its split, o
 running a script never staged. Assert the REASON the refusal prints. The sandbox
 containment task runs a positive control first and accepts only its probe's own
 exit code: a backend installed but unable to execute code scored as containment.
+
+## Guard proof
+
+`./manage.sh prove` (and the release gate) makes "the test pins the guard" a
+check instead of a habit. `tests/guards.json` names each guard by an exact
+source snippet, its neutralized form, and the pytest node ids that must catch
+it. In a private copy of the working tree, never the live one, every snippet
+must occur exactly once, the mapped tests must pass unmodified, and with each
+guard neutralized its tests must fail with pytest rc 1. A collection error, a
+typo'd node id, or a broken import is not proof. Tests run without a bytecode
+cache: a neutralization the guard's own length reused a stale `.pyc` and
+credited one guard's failure to another. A redundant guard is registered as an
+`edits` pair, reverted together, because reverting one proves nothing.
 
 Generated shell must quote what it interpolates: a gate fragment built around a
 bare interpreter path split on the first space, so under a directory with a space

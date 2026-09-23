@@ -89,7 +89,8 @@ the note itself and, when refused, prints the payload plus the `git notes
 --ref=substrate-memory add -f -m` command that recreates it anywhere: the
 payload travels in text where the ref does not.
 
-The gate certifies the END state. Its memory check runs before the fresh note is
+The gate records its `release-pass` event BEFORE writing the note, so the
+anchor covers that evidence. The gate certifies the END state. Its memory check runs before the fresh note is
 written, so announcing success there described the state the release started in:
 a refused push left a strict release green over a repo whose next
 `verify --anchor` failed outright. The anchor is written, published, and

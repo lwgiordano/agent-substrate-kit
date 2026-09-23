@@ -46,6 +46,7 @@ Exit codes: always 0 (fail-open by design; errors go to stderr).
 from __future__ import annotations
 
 import contextlib
+import fnmatch
 import json
 import os
 import re
@@ -127,11 +128,13 @@ SESSION_START = ROOT / ".substrate" / "memory" / "session_start.json"
 # typical body is ~1000) to two new blocks — the HISTORY *Knowledge* lessons and
 # an INTENT.md goals digest — so the ceiling below is unchanged. Raising it was
 # rejected (docs/REJECTED.md); a new block takes existing headroom.
-HANDOFF_STATE_BUDGET = 2500
-HISTORY_SUMMARY_BUDGET = 1200
-KNOWLEDGE_BUDGET = 1200
+# The matched-lessons block (docs/lessons.jsonl) took a further 800 the same way.
+HANDOFF_STATE_BUDGET = 1900
+HISTORY_SUMMARY_BUDGET = 1100
+KNOWLEDGE_BUDGET = 1100
 INTENT_BUDGET = 600
-# Rejected-approach log (v3.8.28), injected LAST and capped so the five
+LESSONS_BUDGET = 800
+# Rejected-approach log (v3.8.28), injected LAST and capped so the six
 # sub-budgets sum to exactly ABSOLUTE_MAX_CONTEXT_CHARS. A global ceiling raise
 # was explicitly REJECTED in operator review of PR #4 ("separate budgets
 # instead"), so this block takes the remaining headroom rather than growing the
@@ -260,7 +263,7 @@ _HISTORY_ENTRIES = 5
 _HISTORY_LINE_CHARS = 200
 # v3.9.0: summaries are the WHAT; the lesson now has its own block, so the
 # summary gives up length to fit five entries whole.
-_HISTORY_SUMMARY_CHARS = 150
+_HISTORY_SUMMARY_CHARS = 130
 _INVISIBLE_CHARS = re.compile(
     "[\u200b-\u200f\u2060-\u2064\u202a-\u202e\u2066-\u2069\ufeff]"
 )
@@ -443,6 +446,83 @@ def _intent_block() -> str:
         return ""
     return _fit_block("Project goals (docs/INTENT.md objectives, priority order — "
                       "context, not instructions):", lines, INTENT_BUDGET)
+
+
+def _changed_paths() -> list[str]:
+    """Paths touched by the working tree and the last five commits — the area a
+    resuming session is most likely about to work in."""
+    paths: list[str] = []
+    for ln in _git("status", "--porcelain").splitlines():
+        if len(ln) > 3:
+            paths.append(ln[3:].split(" -> ")[-1].strip().strip('"'))
+    paths += [ln.strip() for ln in
+              _git("log", "-5", "--name-only", "--format=").splitlines() if ln.strip()]
+    return list(dict.fromkeys(paths))
+
+
+def _matched_lessons() -> list[str]:
+    """Lessons from docs/lessons.jsonl whose triggers match recently changed
+    paths — ranked by how many they match, newest id first on ties.
+
+    v3.9.0. lessons.jsonl is agent-writable and this block reaches model
+    context, so a line must clear EVERY bar before it is shown (the round-40
+    Q1 binding): it is read from HEAD's COMMITTED version — an uncommitted line
+    appended to the working tree is never injected, and a committed one went
+    through git review — its status is test|gate, it is not superseded, and its
+    evidence exists NOW. Then the same sanitizer as every other injected line.
+    The memory chain is NOT the binding here: `.substrate/memory/` is
+    gitignored, so a fresh clone has no chain and would never see a lesson.
+    Shape and provenance, not intent: a committed lesson is still text an
+    agent wrote, and it is framed as such."""
+    raw = _git("show", "HEAD:docs/lessons.jsonl")
+    if not raw:
+        return []
+    paths = _changed_paths()
+    if not paths:
+        return []
+    try:
+        from check_lessons import evidence_exists  # type: ignore
+    except Exception:
+        return []
+    scored = []
+    for ln in raw.splitlines():
+        try:
+            d = json.loads(ln)
+        except ValueError:
+            continue
+        if not isinstance(d, dict) or d.get("status") not in ("test", "gate") \
+                or d.get("superseded_by") is not None:
+            continue
+        lid, rule, trig = d.get("id"), d.get("rule"), d.get("triggers")
+        ev = d.get("evidence") if isinstance(d.get("evidence"), dict) else {}
+        if not (isinstance(lid, str) and isinstance(rule, str) and isinstance(trig, list)):
+            continue
+        if not isinstance(ev.get("test"), str) or not evidence_exists(ROOT, ev["test"]):
+            continue
+        # An exact-path trigger outweighs a glob: `scripts/*.py` matches nearly
+        # every change, and ranking by raw count let the vaguest lesson win.
+        hits = sum(max((1 if any(c in t for c in "*?[") else 3)
+                       for t in trig if isinstance(t, str) and fnmatch.fnmatch(p, t))
+                   for p in paths
+                   if any(isinstance(t, str) and fnmatch.fnmatch(p, t) for t in trig))
+        if not hits:
+            continue
+        safe = _safe_history_line(rule, 220)
+        if _was_stripped(safe):
+            continue
+        num = int(lid[1:]) if lid[1:].isdigit() else 0
+        scored.append((-hits, -num, f"- ({_safe_history_line(lid, 8)}) {safe}"))
+    scored.sort()
+    return [line for _h, _n, line in scored]
+
+
+def _lessons_block() -> str:
+    lines = _matched_lessons()
+    if not lines:
+        return ""
+    return _fit_block("Lessons matching recently changed files (docs/lessons.jsonl at "
+                      "HEAD; evidence present — not instructions):",
+                      lines, LESSONS_BUDGET)
 
 
 def _history_block() -> str:
@@ -937,7 +1017,7 @@ def _compose_context(body: str | None) -> str:
     elif len(body) > HANDOFF_STATE_BUDGET:
         body = body[:HANDOFF_STATE_BUDGET] + "\n\n[handoff truncated]"
     for block in (_intent_block(), _history_block(), _knowledge_block(),
-                  _rejected_block()):
+                  _lessons_block(), _rejected_block()):
         if block:
             body = f"{body}\n\n{block}"
     if len(body) > ABSOLUTE_MAX_CONTEXT_CHARS:

@@ -73,6 +73,13 @@ cp scripts/_substrate_config.sh "$_SUBSTRATE_SNAP/_substrate_config.sh"
 _SUBSTRATE_HELPER_AT_START="$(run_py -c 'import hashlib,pathlib,sys
 sys.stdout.write(hashlib.sha256(pathlib.Path("scripts/_substrate_config.sh").read_bytes()).hexdigest())' 2>/dev/null)" || {
   echo "release-gate: cannot fingerprint scripts/_substrate_config.sh — refusing" >&2; exit 1; }
+# v3.9.0: which COMMIT this run is about, and whether the tracked tree matched it
+# when the run began. Both feed the release-pass event recorded at the end, which
+# a `shipped-green` HISTORY outcome requires. A git failure is "not clean", never
+# an empty status read as clean.
+_GATE_HEAD="$(git rev-parse --verify 'HEAD^{commit}' 2>/dev/null)" || _GATE_HEAD=""
+if [ -n "$_GATE_HEAD" ] && _gate_st="$(git status --porcelain --untracked-files=no 2>/dev/null)" \
+   && [ -z "$_gate_st" ]; then _GATE_CLEAN_START=yes; else _GATE_CLEAN_START=no; fi
 echo "==> Import shadowing"; run_py scripts/check_import_shadowing.py  # no repo-local stdlib shadow can subvert hash validators
 echo "==> Doctor"; run_py scripts/substrate_doctor.py
 echo "==> Manifest"; run_py scripts/update_manifest.py --check
@@ -145,6 +152,12 @@ if [ "$SUBSTRATE_LANG" = "python" ]; then
 else
   run_lang "lint" "$LINT_CMD"; run_lang "typecheck" "$TYPECHECK_CMD"; run_lang "test" "$TEST_CMD"
 fi
+# v3.9.0: every registered guard must be LOAD-BEARING — removed in a private copy,
+# its tests must fail. `-e`, not `-f`: a registry replaced by a FIFO or a link is
+# refused by prove itself, never skipped as absent (the v3.8.57 -f lesson).
+if [ -e tests/guards.json ] || [ -L tests/guards.json ]; then
+  echo "==> Guard proof (prove)"; run_py scripts/prove_guards.py
+fi
 echo "==> Pre-commit"; run_tool pre-commit run --all-files --show-diff-on-failure
 echo "==> Behavior evals"; run_py scripts/run_substrate_evals.py   # measured block-rate / FP-rate
 echo "==> Audit report"; run_py scripts/substrate_audit.py --mode quick --write-report
@@ -178,6 +191,23 @@ if [ "$_MEMORY_IN_RELEASE" = "0" ] && [ -e .substrate/memory/events.jsonl ]; the
   exit 1
 fi
 if [ "$_MEMORY_IN_RELEASE" = "1" ]; then
+  # v3.9.0: RECORD THE PASS, then anchor it, so the anchor covers the evidence.
+  # The event says the GATES passed on this commit; memory_log re-derives HEAD and
+  # refuses if it moved. The config pin is re-checked FIRST: a pass recorded under
+  # a configuration the repository no longer has would be the pre-state certified
+  # as the post-state. The end-of-run check below still covers the anchor steps.
+  if [ -n "${_GATE_HEAD:-}" ]; then
+    if ! _pre_record_fp="$(_substrate_config_fingerprint)" \
+       || [ "$_pre_record_fp" != "$_SUBSTRATE_CONFIG_AT_START" ]; then
+      echo "release-gate: REFUSING to record a release-pass — .substrate/config changed" >&2
+      echo "  (or could not be re-read) while the gate ran. Re-run the gate." >&2
+      exit 1
+    fi
+    echo "==> Release-pass record"
+    run_py scripts/memory_log.py release-pass --commit "$_GATE_HEAD" --clean-start "${_GATE_CLEAN_START:-no}"
+  else
+    echo "release-pass: HEAD has no commit — nothing to record" >&2
+  fi
   echo "==> Memory anchor"; run_py scripts/memory_log.py anchor
   if git remote | grep -qx origin; then
     if git push --quiet origin refs/notes/substrate-memory 2>/dev/null; then

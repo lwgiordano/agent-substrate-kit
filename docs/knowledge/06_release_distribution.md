@@ -101,8 +101,11 @@ note payload and the `git notes --ref=substrate-memory add -f -m` command that
 recreates it on any clone, because the payload travels in text where the ref
 does not.
 
-The release gate runs deterministic validators, project tests, policy evals, and
-artifact verification in sequence. A finalizer or verifier failure is a release
+The release gate runs deterministic validators, project tests, the guard proof
+(`prove`, when `tests/guards.json` exists), policy evals, and artifact
+verification in sequence, then records a `release-pass` memory event for the
+commit it started on before writing the anchor (see
+[lessons, records, and recall](10_lessons_recall.md)). A finalizer or verifier failure is a release
 failure. Published HISTORY entries refer to real immutable commit objects, so
 published release commits must merge without squash rewriting.
 

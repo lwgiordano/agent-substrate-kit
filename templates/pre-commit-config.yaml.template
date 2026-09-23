@@ -91,6 +91,12 @@ repos:
         language: system
         pass_filenames: false
         always_run: true
+      - id: check-lessons
+        name: Lessons carry evidence that exists
+        entry: {{PY}} -I scripts/check_lessons.py
+        language: system
+        pass_filenames: false
+        always_run: true
       # >>> standard
       # >>> python-only
       - id: ruff-format

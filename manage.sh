@@ -275,6 +275,8 @@ case "$cmd" in
     run_py scripts/check_hook_smoke.py                # hooks actually DENY (compile-clean but neutered hook)
     run_py scripts/check_agent_harness.py
     run_py scripts/check_substrate_config.py   # reject dangerous LINT/TEST values before they run
+    run_py scripts/check_lessons.py            # every test/gate lesson's evidence still exists
+    run_py scripts/check_knowledge_narrative.py  # WARN-ONLY: knowledge docs state contracts, not release history
     # Dependency-cooldown tier (v3.7.2): opt-in fresh-version risk signal. Networked +
     # skip-honest; only runs when SUBSTRATE_DEP_COOLDOWN>0, so the base check stays offline.
     if [ "${SUBSTRATE_DEP_COOLDOWN:-0}" != "0" ]; then run_py scripts/check_dep_cooldown.py; fi
@@ -301,18 +303,22 @@ case "$cmd" in
   handoff) run_py scripts/session_handoff.py capture ;;
   memory) run_py scripts/memory_log.py "$@" ;;
   reject) run_py scripts/append_rejected.py "$@" ;;
+  prove) run_py scripts/prove_guards.py "$@" ;;
+  recall) run_py scripts/recall.py "$@" ;;
   bus) run_py scripts/bus_claims.py "$@" ;;
   new-validator) run_py scripts/new_validator.py "$@" ;;
   design-init) mkdir -p design-system/pages design-system/tokens; echo "design-system/ scaffolded" ;;
   *) cat <<'HELP'
-Usage: ./manage.sh setup|doctor|go-live|context-report|code-shape|verify-release|upgrade|enable|security|check|evals|audit|full-audit|release|manifest|agent-system-audit|handoff|memory|reject|bus|design-init|new-validator
+Usage: ./manage.sh setup|doctor|go-live|context-report|code-shape|verify-release|upgrade|enable|security|check|evals|audit|full-audit|release|manifest|agent-system-audit|handoff|memory|reject|prove|recall|bus|design-init|new-validator
   evals                                       adversarial behavior evals (block-rate / FP-rate, writes a trace)
   doctor [--quick|--security|--operational]   readiness levels
   go-live [--json]                            local/remote/deep readiness map (offline, side-effect-light)
   context-report [--json] [--budget]          token/context footprint: always-loaded vs on-demand, cache prefix; --budget = warn-only token thresholds
   code-shape [--json]                         engineering-shape report (warn-only): large files, long fns, diff size, source-without-tests
   enable remote [--plan|--write|--check]      turn on the remote-governance tier (CODEOWNERS + trusted-base)
-  memory [verify|tail|tasks]                  append-only event log
+  memory [verify|tail|tasks|record <file>]    append-only event log (records HISTORY/REJECTED/lessons entries)
+  prove [--only ID..|--list]                  remove each registered guard in a copy; its tests must then FAIL
+  recall "<query>" [--budget N] [--k N]       ranked section search over knowledge/ADRs/postmortems/HISTORY/lessons
   reject --what "<X>" --why "<Y>"             log a rejected approach (injected at SessionStart so it is not re-proposed)
   bus [--all|--strict]                        AGENT_BUS.md claim-lease report (expired leases are reclaimable)
 Config: .substrate/config (profile, language, LINT_CMD/TYPECHECK_CMD/TEST_CMD indirection)

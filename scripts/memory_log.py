@@ -38,6 +38,8 @@ Usage:
   memory_log.py anchor              # write head hash to a git note
   memory_log.py tail [N]
   memory_log.py tasks
+  memory_log.py record docs/HISTORY.md   # attest unrecorded append-only entries
+  memory_log.py release-pass --commit <sha> --clean-start yes|no   # release gate only
 
 Exit codes: 0 ok | 1 chain broken / anchor mismatch / error.
 """
@@ -194,6 +196,10 @@ def _read_events() -> list[dict]:
             # containment refused it (routed parent) though the leaf looked fine
             raise MemoryLogUnsafe("events.jsonl is outside the repo (routed parent)")
         return []
+    return _parse_events(text)
+
+
+def _parse_events(text: str) -> list[dict]:
     out = []
     for line in text.splitlines():
         line = line.strip()
@@ -206,8 +212,223 @@ def _read_events() -> list[dict]:
     return out
 
 
+def _chain_break(events: list[dict]) -> str | None:
+    """The first link failure in `events`, or None. The one walk `verify` and
+    every evidence reader use — evidence read from a chain that does not verify
+    is not evidence."""
+    prev = ZERO
+    for i, ev in enumerate(events):
+        if "_corrupt" in ev:
+            return f"BREAK at line {i + 1}: not valid JSON"
+        if ev.get("seq") != i:
+            return f"BREAK at seq {i}: out-of-order/missing seq"
+        if ev.get("prev") != prev:
+            return f"BREAK at seq {i}: prev-hash mismatch"
+        try:
+            expect = _event_hash(prev, ev["seq"], ev["ts"], ev["type"], ev.get("data"))
+        except (KeyError, TypeError):
+            return f"BREAK at seq {i}: malformed event"
+        if ev.get("hash") != expect:
+            return f"BREAK at seq {i}: content hash mismatch (tampered)"
+        prev = ev["hash"]
+    return None
+
+
 def append(etype: str, data) -> int:
     return _append_returning_head(etype, data)[0]
+
+
+# --- The record the chain attests (v3.9.0) ----------------------------------
+# Before v3.9.0 the chain held 44 events, 43 of them session handoffs: it
+# attested heartbeats while HISTORY, REJECTED and the lessons — the record a
+# future session actually reads — sat outside it. A `record` event carries the
+# sha256 of each append-only ENTRY (not of the whole file: HISTORY and REJECTED
+# are merge=union, so concurrent branches interleave whole entries and a
+# whole-file or prefix hash would break on every legitimate merge). `verify`
+# then requires every recorded entry to still be present, byte-for-byte after
+# whitespace normalization, so editing or deleting a recorded entry is a BREAK.
+# What this does not give: an entry INSERTED without a record is not detected
+# here (git history shows it), and a rewrite of both an entry and the chain
+# suffix after the last published anchor is the anchor's documented limit.
+RECORD_FILES = ("docs/HISTORY.md", "docs/REJECTED.md", "docs/lessons.jsonl")
+# Written only by their own code paths; `append --type` refuses them so the CLI
+# cannot mint evidence the gates later read as authoritative.
+RESERVED_TYPES = frozenset({"record", "release-pass", "anchor-forced"})
+
+
+def record_units(relpath: str, text: str) -> list[str]:
+    """The append-only units of a record file, whitespace-normalized."""
+    if relpath == "docs/HISTORY.md":
+        units: list[str] = []
+        cur: list[str] | None = None
+        for ln in text.splitlines():
+            if ln.startswith("## "):
+                if cur is not None:
+                    units.append("\n".join(cur).strip())
+                cur = [ln.rstrip()]
+            elif cur is not None:
+                cur.append(ln.rstrip())
+        if cur is not None:
+            units.append("\n".join(cur).strip())
+        return units
+    if relpath == "docs/REJECTED.md":
+        return [ln.strip() for ln in text.splitlines() if ln.strip().startswith("- [")]
+    # lessons.jsonl: a lesson's `status` and `last_confirmed` legitimately move
+    # (prose -> test -> gate, re-confirmed each release), so the unit is its id
+    # and RULE text only. Rewording a recorded rule is a mismatch: change a rule
+    # by superseding it with a new id, never by editing it in place.
+    units = []
+    for ln in text.splitlines():
+        if not ln.strip():
+            continue
+        try:
+            d = json.loads(ln)
+        except ValueError:
+            d = None
+        if isinstance(d, dict) and isinstance(d.get("id"), str) and isinstance(d.get("rule"), str):
+            units.append(d["id"] + "\x1f" + " ".join(d["rule"].split()))
+        else:
+            units.append(ln.strip())
+    return units
+
+
+def _unit_hash(unit: str) -> str:
+    return hashlib.sha256(unit.encode("utf-8")).hexdigest()
+
+
+def _read_record_file(relpath: str) -> str | None:
+    """Guarded read; None when ABSENT. Present-but-unsafe raises: a linked or
+    special record file must not verify as 'entries missing' or as empty."""
+    path = ROOT / relpath
+    if not os.path.lexists(str(path)):
+        return None
+    text = _safe_read_text(path, ROOT, max_bytes=None)
+    if text is None:
+        raise MemoryLogUnsafe(f"{relpath} is linked, special, or outside the repo")
+    return text
+
+
+def _recorded(events: list[dict]) -> dict[str, list[tuple[int, str]]]:
+    out: dict[str, list[tuple[int, str]]] = {}
+    for ev in events:
+        d = ev.get("data")
+        if ev.get("type") != "record" or not isinstance(d, dict):
+            continue
+        f, hashes = d.get("file"), d.get("entries")
+        if f in RECORD_FILES and isinstance(hashes, list):
+            out.setdefault(f, []).extend((ev.get("seq"), h) for h in hashes if isinstance(h, str))
+    return out
+
+
+def record(relpath: str) -> int:
+    """Append a `record` event for every entry of `relpath` not yet recorded.
+    Idempotent. Called by append_history / append_rejected after they append,
+    and once by hand to adopt an existing file."""
+    if relpath not in RECORD_FILES:
+        print(f"memory-log: record: {relpath!r} is not a record file "
+              f"(one of {', '.join(RECORD_FILES)})", file=sys.stderr)
+        return 2
+    text = _read_record_file(relpath)
+    if text is None:
+        print(f"memory-log: record: {relpath} does not exist; nothing to record")
+        return 0
+    already = {h for _s, h in _recorded(_read_events()).get(relpath, [])}
+    new: list[str] = []
+    for u in record_units(relpath, text):
+        h = _unit_hash(u)
+        if h not in already and h not in new:
+            new.append(h)
+    if not new:
+        print(f"memory-log: record: {relpath} — every entry already recorded")
+        return 0
+    rc = append("record", {"file": relpath, "entries": new})
+    if rc == 0:
+        print(f"memory-log: record: {relpath} — {len(new)} entr{'y' if len(new) == 1 else 'ies'} recorded")
+    return rc
+
+
+def _record_findings(events: list[dict]) -> list[str]:
+    findings = []
+    for relpath, recs in _recorded(events).items():
+        text = _read_record_file(relpath)
+        present = set() if text is None else {_unit_hash(u) for u in record_units(relpath, text)}
+        missing = [(s, h) for s, h in recs if h not in present]
+        if missing:
+            findings.append(
+                f"{len(missing)} entr{'y' if len(missing) == 1 else 'ies'} recorded in the chain "
+                f"(first at seq {missing[0][0]}, sha256 {missing[0][1][:12]}) "
+                f"{'is' if len(missing) == 1 else 'are'} no longer in {relpath}"
+                + (" (file missing)" if text is None else ""))
+    return findings
+
+
+def release_pass(expect_commit: str, clean_start: bool) -> int:
+    """Record that the release gate's checks passed for `expect_commit`.
+
+    Only the gate calls this, after every check and before the anchor, so the
+    anchor covers it. HEAD is re-derived HERE and must equal the commit the gate
+    saw at start: a gate that ran while HEAD moved certifies nothing. The event
+    says the GATES passed on that commit — publication of the anchor is a
+    separate result the gate reports on its own. `clean_start` records whether
+    the tracked tree matched the commit when the gate began: tests that ran on
+    uncommitted edits are not evidence about the commit, and a `shipped-green`
+    HISTORY outcome requires it."""
+    head = _git_s("rev-parse", "--verify", "HEAD^{commit}")
+    if not head or head != expect_commit:
+        print(f"memory-log: release-pass REFUSED — HEAD is {head[:12] or '?'} but the gate "
+              f"started on {expect_commit[:12]}; the checks did not run on this commit",
+              file=sys.stderr)
+        return 1
+    tree = _git_s("rev-parse", "--verify", "HEAD^{tree}")
+    vtext = _safe_read_text(ROOT / "VERSION", ROOT, max_bytes=256) or ""
+    return append("release-pass", {"commit": head, "tree": tree,
+                                   "version": vtext.strip()[:40], "clean_start": bool(clean_start)})
+
+
+def verified_release_passes(root: Path) -> tuple[list[dict] | None, str]:
+    """release-pass events from `root`'s chain, ONLY if the chain verifies.
+    (None, reason) when it is absent, unsafe, or broken — a caller deciding
+    `shipped-green` must not read evidence out of a log that fails its own walk."""
+    path = Path(root) / ".substrate" / "memory" / "events.jsonl"
+    if not os.path.lexists(str(path)):
+        return None, "no memory chain (.substrate/memory/events.jsonl absent)"
+    text = _safe_read_text(path, Path(root), max_bytes=None)
+    if text is None:
+        return None, "memory chain is linked, special, or outside the repo"
+    events = _parse_events(text)
+    brk = _chain_break(events)
+    if brk is not None:
+        return None, f"memory chain does not verify ({brk})"
+    return release_passes(events), ""
+
+
+def recorded_hashes(root: Path, relpath: str) -> set[str] | None:
+    """The unit hashes `root`'s chain has recorded for `relpath`, ONLY if the
+    chain verifies; None when it is absent, unsafe, or broken."""
+    path = Path(root) / ".substrate" / "memory" / "events.jsonl"
+    if not os.path.lexists(str(path)):
+        return None
+    text = _safe_read_text(path, Path(root), max_bytes=None)
+    if text is None:
+        return None
+    events = _parse_events(text)
+    if _chain_break(events) is not None:
+        return None
+    return {h for _s, h in _recorded(events).get(relpath, [])}
+
+
+def lesson_unit_hash(lesson_id: str, rule: str) -> str:
+    """The recorded identity of one lesson (id + normalized rule text)."""
+    return _unit_hash(record_units("docs/lessons.jsonl",
+                                   json.dumps({"id": lesson_id, "rule": rule}))[0])
+
+
+def release_passes(events: list[dict] | None = None) -> list[dict]:
+    """Every well-formed release-pass event's data, in chain order."""
+    evs = _read_events() if events is None else events
+    return [ev["data"] for ev in evs
+            if ev.get("type") == "release-pass" and isinstance(ev.get("data"), dict)
+            and isinstance(ev["data"].get("commit"), str)]
 
 
 def _append_returning_head(etype: str, data) -> tuple[int, str | None]:
@@ -1021,22 +1242,15 @@ def _remote_anchor(commit: str) -> str | None:
 
 def verify(check_anchor: bool = False) -> int:
     events = _read_events()
-    prev = ZERO
-    for i, ev in enumerate(events):
-        if "_corrupt" in ev:
-            print(f"memory-log: BREAK at line {i + 1}: not valid JSON", file=sys.stderr)
-            return 1
-        if ev.get("seq") != i:
-            print(f"memory-log: BREAK at seq {i}: out-of-order/missing seq", file=sys.stderr)
-            return 1
-        if ev.get("prev") != prev:
-            print(f"memory-log: BREAK at seq {i}: prev-hash mismatch", file=sys.stderr)
-            return 1
-        expect = _event_hash(prev, ev["seq"], ev["ts"], ev["type"], ev.get("data"))
-        if ev.get("hash") != expect:
-            print(f"memory-log: BREAK at seq {i}: content hash mismatch (tampered)", file=sys.stderr)
-            return 1
-        prev = ev["hash"]
+    brk = _chain_break(events)
+    if brk is not None:
+        print(f"memory-log: {brk}", file=sys.stderr)
+        return 1
+    # v3.9.0: the chain is intact — now require the RECORD it attests to be too.
+    for finding in _record_findings(events):
+        print(f"memory-log: RECORD MISMATCH — {finding}: an append-only entry was "
+              "edited or removed after it was recorded", file=sys.stderr)
+        return 1
     if check_anchor:
         # MEMBERSHIP, not equality (v3.8.51). The old check required the
         # current head to EQUAL the anchored hash, so every legitimate append
@@ -1177,6 +1391,11 @@ def main(argv: list[str]) -> int:
     ap_tail = sub.add_parser("tail")
     ap_tail.add_argument("n", nargs="?", type=int, default=10)
     sub.add_parser("tasks")
+    ap_rec = sub.add_parser("record", help="record unrecorded entries of an append-only file")
+    ap_rec.add_argument("file", choices=RECORD_FILES)
+    ap_rp = sub.add_parser("release-pass", help="(release gate only) record gates passed")
+    ap_rp.add_argument("--commit", required=True)
+    ap_rp.add_argument("--clean-start", choices=("yes", "no"), required=True)
     ap_sk = sub.add_parser("skill-run")
     ap_sk.add_argument("name")
     ap_sk.add_argument("--note", default="")
@@ -1195,7 +1414,16 @@ def main(argv: list[str]) -> int:
                 return 1
         else:
             data = {"message": a.message}
+        if a.type in RESERVED_TYPES:
+            print(f"memory-log: type {a.type!r} is reserved — it is evidence other gates "
+                  "trust, written only by its own command (record / release-pass / "
+                  "anchor --force)", file=sys.stderr)
+            return 2
         return append(a.type, data)
+    if a.cmd == "record":
+        return record(a.file)
+    if a.cmd == "release-pass":
+        return release_pass(a.commit, a.clean_start == "yes")
     if a.cmd == "skill-run":
         return skill_run(a.name, a.result, a.note, verify=a.verify)
     if a.cmd == "verify":

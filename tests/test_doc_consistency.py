@@ -38,10 +38,15 @@ KNOWLEDGE_DOCS = {
     "07_agent_context_governance.md": "Agent context inventory, harness scanning, budgets, and doc drift.",
     "08_memory_anchor.md": "The memory trust anchor — monotonic advance, remote confirmation, and limits.",
     "09_deterministic_validators.md": "Deterministic validator layers, pinned copies, and append-only gates.",
+    "10_lessons_recall.md": "Lessons with evidence, the record the chain attests, outcome labels, and recall.",
 }
 
 KNOWLEDGE_ASSERTS = {
     "bootstrap.sh::_safe_mkdir_p",
+    "scripts/_doc_common.py::history_outcome_problem",
+    "scripts/check_lessons.py::evidence_exists",
+    "scripts/memory_log.py::record_units",
+    "scripts/memory_log.py::release_pass",
     "bootstrap.sh::wappend",
     "scripts/_doc_common.py::locked_atomic_append",
     "scripts/command_policy.py::looks_dangerous_command",

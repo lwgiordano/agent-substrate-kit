@@ -74,6 +74,10 @@ fits newest-first — a blind slice cut the newest entry, the one most needed.
 
 ## Append-only coordination logs
 
+Each appended entry is also recorded in the memory chain, so a later edit is a
+`RECORD MISMATCH`; outcome labels and lessons are in
+[lessons, records, and recall](10_lessons_recall.md).
+
 HISTORY and REJECTED share `_doc_common.locked_atomic_append`. It takes a bounded,
 nonblocking exclusive lock on the parent directory, rereads under the lock,
 writes a same-directory temporary file, and replaces the leaf before unlocking.

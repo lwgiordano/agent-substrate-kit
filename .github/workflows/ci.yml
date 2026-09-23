@@ -9,6 +9,8 @@ jobs:
   checks:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      SUBSTRATE_ADMIN_TOKEN: ${{ secrets.SUBSTRATE_ADMIN_TOKEN }}
     steps:
       - uses: actions/checkout@v4
         with: {fetch-depth: 0}
@@ -45,3 +47,34 @@ jobs:
           ./manage.sh doctor "$MODE"
       - name: Substrate + language checks
         run: ./manage.sh check
+      # v3.9.0: containment is MEASURED in CI, not skipped. Without a backend the
+      # sandbox eval reported "skipped" and left the denominator; with
+      # --require-sandbox-evals a skip is a failure.
+      - name: OS sandbox backend (bubblewrap)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bubblewrap
+          # Ubuntu 24.04 restricts unprivileged user namespaces through AppArmor,
+          # so bwrap cannot build its sandbox and every probe fails for the wrong
+          # reason. Lift it on this throwaway runner, then prove bwrap RUNS code.
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          bwrap --unshare-net --dev-bind / / true
+      - name: Behavior evals (sandbox containment required)
+        run: ./manage.sh evals --require-sandbox-evals
+      # Live GitHub governance (branch protection, required reviews) can only be
+      # read with an admin-readable token. When the operator has added one as the
+      # SUBSTRATE_ADMIN_TOKEN secret it is ENFORCED; when not, CI says so instead of
+      # implying it was checked.
+      - name: Remote governance (live branch protection)
+        if: env.SUBSTRATE_ADMIN_TOKEN != ''
+        env:
+          GITHUB_TOKEN: ${{ secrets.SUBSTRATE_ADMIN_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: ./manage.sh enable remote --check
+      - name: Remote governance not verified
+        if: env.SUBSTRATE_ADMIN_TOKEN == ''
+        run: echo "::notice::Live branch protection NOT verified — add an admin-readable token as the SUBSTRATE_ADMIN_TOKEN secret to enforce it."

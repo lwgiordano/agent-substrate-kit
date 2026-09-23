@@ -109,6 +109,11 @@ tasks did exactly that — one referencing a variable defined above its split, o
 running a script never staged. Assert the REASON the refusal prints. The sandbox
 containment task runs a positive control first and accepts only its probe's own
 exit code: a backend installed but unable to execute code scored as containment.
+CI installs bubblewrap and runs the evals with `--require-sandbox-evals`, so
+containment is measured on every run instead of skipped out of the denominator.
+The memory tasks include a fresh clone with no chain or handoff whose first
+session must be told the INTENT goals, the last Knowledge lesson, and the
+committed lesson matching what just changed.
 
 ## Guard proof
 

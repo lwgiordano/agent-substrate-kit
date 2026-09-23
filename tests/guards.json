@@ -643,6 +643,14 @@
       "why": "version-stamped release narrative accumulates in knowledge docs unflagged"
     },
     {
+      "id": "prove-missing-pytest-is-environment",
+      "file": "scripts/prove_guards.py",
+      "find": "    if importlib.util.find_spec(\"pytest\") is None:\n        print(f\"prove: pytest is not installed",
+      "replace": "    if False:\n        print(f\"prove: pytest is not installed",
+      "tests": ["tests/test_hook_scripts.py::test_prove_reports_a_missing_pytest_as_an_environment_error"],
+      "why": "a pytest-less interpreter reads as a failed baseline, sending the operator after a guard that is fine"
+    },
+    {
       "id": "handoff-stripped-lines-dropped",
       "file": "scripts/session_handoff.py",
       "find": "    return safe == _STRIPPED_HISTORY or \"[instruction-line stripped]\" in safe",

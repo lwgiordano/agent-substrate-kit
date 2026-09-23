@@ -167,6 +167,14 @@ def _tail(out: str, n: int = 6) -> str:
 
 
 def prove(root: Path, guards: list[dict]) -> int:
+    # An interpreter without pytest makes every run exit nonzero for a reason
+    # that has nothing to do with any guard. Say that, as an environment error,
+    # instead of reporting a baseline failure the operator would chase.
+    import importlib.util
+    if importlib.util.find_spec("pytest") is None:
+        print(f"prove: pytest is not installed for {sys.executable} — run "
+              "`./manage.sh setup` (the substrate venv carries it)", file=sys.stderr)
+        return 2
     t0 = time.time()
     with tempfile.TemporaryDirectory(prefix="substrate-prove.") as td:
         copy = Path(td) / "repo"

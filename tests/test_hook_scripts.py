@@ -14505,3 +14505,18 @@ def test_check_lessons_staleness_counts_releases_not_minor_jumps() -> None:
              ("3.9.0", "3.9.1", 0)]
     for cur, confirmed, want in cases:
         assert mod._releases_behind(cur, confirmed) == want, (cur, confirmed)
+
+
+def test_prove_reports_a_missing_pytest_as_an_environment_error(tmp_path) -> None:
+    """agent-config-audit CI runs on a Python with no pytest. prove then failed
+    its baseline for a reason unrelated to any guard, and the prove eval saw a
+    bare rc 1 — correctly refusing to count it as a block, but naming nothing.
+    A missing pytest is now rc 2 with the cause, before any guard is judged."""
+    venv = tmp_path / "nopytest"
+    subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(venv)], check=True,
+                   capture_output=True, timeout=120)
+    td, _prove = _prove_repo(tmp_path)
+    r = subprocess.run([str(venv / "bin" / "python"), "-I",
+                        str(td / "scripts" / "prove_guards.py")],
+                       cwd=str(td), capture_output=True, text=True, timeout=120)
+    assert r.returncode == 2 and "pytest is not installed" in r.stderr, r.stdout + r.stderr

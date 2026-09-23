@@ -1444,7 +1444,13 @@ def t_shipped_green_without_release_pass_refused():
 
 
 def t_prove_catches_a_test_that_does_not_pin_its_guard():
-    """A registered guard whose test passes without it is a prove FAILURE."""
+    """A registered guard whose test passes without it is a prove FAILURE.
+    Needs pytest in the eval interpreter: without it prove exits 2 for the
+    environment, which is a SKIP here (surfaced, out of the denominator), never
+    a block — agent-config-audit CI runs the evals on a pytest-less Python."""
+    import importlib.util
+    if importlib.util.find_spec("pytest") is None:
+        return True, "skipped: pytest unavailable for this interpreter"
     with tempfile.TemporaryDirectory() as td:
         td = Path(td)
         _stage(td, "prove_guards.py")

@@ -53,6 +53,11 @@ appends merge instead of conflicting. A consumer's own pytest fixtures go in
 `tests/conftest_project.py`, which upgrades preserve; `tests/conftest.py` is
 substrate-owned and replaced.
 
+Bootstrap copies every `tests/*.py` except the kit self-tests named by
+`_substrate_surfaces.py --consumer-strip-tests`. Those shipped files must pass the
+kit's own ruff rule set with no local config, because a consumer may lint `tests/`
+even though the kit's default `pyproject.toml` excludes it (v3.9.2).
+
 ## Existing repositories
 
 The substrate reserves `scripts/`. Project automation belongs in `tools/`,

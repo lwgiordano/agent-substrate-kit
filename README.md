@@ -42,7 +42,10 @@ bash /path/to/agent_substrate_kit_v3/bootstrap.sh --profile standard --lang auto
 | 4-field bug-fix commit protocol + postmortem-per-bugfix hooks | — | — | yes |
 | Extras (calibration, stale-phrases, license headers) | — | — | yes |
 
-## Current status (v3.9.1)
+## Current status (v3.9.2)
+
+**v3.9.2** — the test files the kit copies into a consumer's `tests/` pass the
+consumer's ruff rules. A consumer that lints `tests/` saw its 3.9.1 upgrade land red.
 
 **v3.9.1 — fixes found in consumer repos.** Every tree walker skips a nested
 session worktree (`.claude/worktrees/<name>`) that git confirms, and skips

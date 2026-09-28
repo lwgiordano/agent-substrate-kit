@@ -14789,3 +14789,27 @@ def test_nested_worktrees_ignores_an_inherited_git_dir(tmp_path, monkeypatch) ->
     assert ss.nested_worktrees(root) == ()
     monkeypatch.setenv("GIT_DIR", str(other / ".git"))
     assert ss.nested_worktrees(root) == (), "an inherited GIT_DIR chose the skip set"
+
+
+def test_tests_shipped_to_consumers_pass_the_consumers_ruff_rules() -> None:
+    """v3.9.2: bootstrap copies every tests/*.py except the strip list into the consumer's
+    tests/, and a consumer may lint tests/ (domain-lookup does). Three shipped files failed
+    its ruff rules after the upgrade to 3.9.1, so the upgrade landed red. Lint exactly the
+    shipped set with the rules the kit's own pyproject selects, ignoring any local config."""
+    import shutil
+    ruff = shutil.which("ruff") or next(
+        (str(p) for p in (SCRIPTS.parent / ".venv/bin/ruff",
+                          SCRIPTS.parent / ".substrate/venv/bin/ruff") if p.is_file()), None)
+    if ruff is None:
+        pytest.skip("ruff not installed")
+    strip = subprocess.run([sys.executable, "-I", str(SCRIPTS / "_substrate_surfaces.py"),
+                            "--consumer-strip-tests"], capture_output=True, text=True,
+                           timeout=60, check=True).stdout.split()
+    assert strip, "strip list is empty; the shipped set would be the whole suite"
+    shipped = sorted(str(p) for p in (SCRIPTS.parent / "tests").glob("*.py")
+                     if p.name not in strip)
+    assert any(s.endswith("conftest.py") for s in shipped)
+    r = subprocess.run([ruff, "check", "--isolated", "--no-cache", "--line-length", "100",
+                        "--target-version", "py311", "--select", "E,F,I,B,UP,SIM,C4",
+                        *shipped], capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-500:]

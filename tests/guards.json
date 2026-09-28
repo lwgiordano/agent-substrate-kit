@@ -851,6 +851,16 @@
         "tests/test_hook_scripts.py::test_bus_output_neutralizes_terminal_escapes_and_bidi"
       ],
       "why": "agent-written bus text reaches terminals and agent context with escapes intact"
+    },
+    {
+      "id": "shipped-tests-ruff-clean",
+      "file": "tests/conftest.py",
+      "find": "    with contextlib.suppress(Exception):\n        faulthandler.cancel_dump_traceback_later()\n",
+      "replace": "    try:\n        faulthandler.cancel_dump_traceback_later()\n    except Exception:\n        pass\n",
+      "tests": [
+        "tests/test_hook_scripts.py::test_tests_shipped_to_consumers_pass_the_consumers_ruff_rules"
+      ],
+      "why": "a kit test file copied into a consumer that lints tests/ turns its upgrade red"
     }
   ]
 }

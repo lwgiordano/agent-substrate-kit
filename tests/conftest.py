@@ -74,10 +74,8 @@ def pytest_configure(config):
 def pytest_unconfigure(config):
     if _project is not None and hasattr(_project, "pytest_unconfigure"):
         _project.pytest_unconfigure(config)
-    try:
+    with contextlib.suppress(Exception):
         faulthandler.cancel_dump_traceback_later()
-    except Exception:
-        pass
     if _watchdog_file is not None:
         with contextlib.suppress(Exception):
             _watchdog_file.close()

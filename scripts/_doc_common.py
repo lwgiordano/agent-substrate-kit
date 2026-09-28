@@ -205,11 +205,16 @@ def iter_code_modules(
 ) -> Iterator[Path]:
     """Yield repo-relative Paths for every source module under `root`.
 
-    Excludes generated, vendored, and runtime directories per spec §2.4.
+    Excludes generated, vendored, and runtime directories per spec §2.4, and
+    every registered linked worktree nested under `root` (the Claude app's
+    .claude/worktrees/<name>, v3.9.1): another tree, whose modules its own docs
+    and hooks cover.
     """
+    from _substrate_surfaces import nested_worktrees   # lazy: it imports this module
     root = Path(root).resolve()
     bare_excludes = {d for d in exclude_dirs if "/" not in d}
     path_excludes = [d.strip("/") for d in exclude_dirs if "/" in d]
+    path_excludes += list(nested_worktrees(root))
 
     for path in root.rglob("*"):
         if not path.is_file():

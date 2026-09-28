@@ -1,6 +1,6 @@
 ---
 purpose: Deterministic validator layers, pinned copies, and append-only gates.
-last_human_reviewed: 2026-09-23
+last_human_reviewed: 2026-09-28
 covers:
   - extras/check_license_headers.py
   - extras/check_stale_phrases.py
@@ -12,6 +12,7 @@ covers:
   - scripts/check_import_shadowing.py
   - scripts/check_policy_code_integrity.py
   - scripts/check_python_syntax.py
+  - scripts/check_leaks.py
   - scripts/check_secrets.py
   - scripts/code_shape.py
   - scripts/run_security_scanners.py
@@ -28,6 +29,14 @@ and the real agent-context scanner form separate layers. The harness smoke uses
 randomized encoded families and runs the actual scanner against disposable
 context. Each governed surface must block independently so a working root scan
 cannot mask an ignored sibling.
+
+The credential-pattern scanner is `check_leaks.py` (v3.9.1). Its old name matched
+the substrate's own read deny rule and the exfil guard's sensitive-path pattern,
+so an agent could not read or run the kit's scanner source; the file was
+renamed rather than either guard weakened. The old path is a `runpy` shim so
+configs that still name it keep working, and a test derives the protected
+names from the deny rules and the command policy so no substrate file wears
+one again. The scan skips nested session worktrees.
 
 `code_shape.py` reports reviewability risks in project code while excluding the
 vendored substrate and generated caches. Governance-only diffs remain visible.

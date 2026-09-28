@@ -1,6 +1,6 @@
 ---
 purpose: The memory trust anchor — monotonic advance, remote confirmation, and limits.
-last_human_reviewed: 2026-09-23
+last_human_reviewed: 2026-09-28
 covers:
   - scripts/memory_log.py
   - scripts/release_gate.sh

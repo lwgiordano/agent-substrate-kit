@@ -21,6 +21,16 @@ A lease older than the TTL (default 72h, SUBSTRATE_CLAIM_TTL_HOURS to
 override) is EXPIRED: per the bus protocol any agent may RECLAIM it by
 posting a RECLAIM entry — no operator needed.
 
+UNPARSEABLE CLAIMS ARE REPORTED (v3.9.1). A consumer wrote claims as
+`CLAIM <paths> — why — agent — date`, which this grammar does not match, and the
+reader printed "no open claims" while four were open. A claim-shaped line the
+grammar cannot read is now counted and shown, and "no open claims" is never
+printed while such lines exist.
+
+DIGEST (v3.9.1): `--digest` prints the open claims, then the last N entries
+(`--n`, default 15), each capped — what an agent needs before starting work,
+instead of reading a bus that had grown to ~450k tokens in one consumer.
+
 ADVISORY ONLY — never wired into any gate. Coordination state must not be
 able to block a commit. Exit 0 always; `--strict` exits 1 when expired
 claims exist (for agents that want a hard signal in their own loop).
@@ -41,6 +51,16 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _doc_common import repo_root
 
+# Bus text is written by agents and shown to terminals and other agents' context:
+# a C0/C1 control (terminal escapes), a bidi override or an invisible character is
+# shown as `?` rather than passed through (v3.9.1).
+_UNPRINTABLE = re.compile("[\x00-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e"
+                          "\u2060-\u2064\u2066-\u2069\ufeff]")
+
+
+def _shown(s: str) -> str:
+    return _UNPRINTABLE.sub("?", s)
+
 # v3.8.44 (round-27, surfaced by the gate's new interprocedural pass): the bus
 # is agent-writable and this reader opened it raw, so a symlinked/hard-linked
 # AGENT_BUS.md fed OUTSIDE claim prose to every agent reading lease state, and
@@ -58,6 +78,12 @@ _ENTRY = re.compile(
     r"\*\*(?P<agent>[A-Za-z0-9_-]+)\*\*: "
     r"(?P<verb>CLAIM EXPANSION|CLAIM|RECLAIM|HEARTBEAT|RELEASE)\b(?P<rest>.*)$")
 _VERSION_NEAR_VERB = re.compile(r"^.{0,80}?v?(\d+\.\d+\.\d+)")
+# A line that is trying to be a claim-protocol entry: the verb near the start, after
+# an optional list marker, timestamp, and/or bold agent name.
+_CLAIM_LIKE = re.compile(
+    r"^\s*(?:[-*]\s+)?(?:\[[^\]]{0,40}\]\s*)?(?:\*\*[^*]{1,40}\*\*:?\s*)?"
+    r"(?:CLAIM EXPANSION|CLAIM|RECLAIM|HEARTBEAT|RELEASE)\b")
+_ANY_ENTRY = re.compile(r"^- \[\d{4}-\d{2}-\d{2}T[^\]]{0,30}\] \*\*[A-Za-z0-9_-]+\*\*:")
 _DEFAULT_TTL_HOURS = 72.0
 
 
@@ -115,6 +141,28 @@ def read_bus_tail(bus: Path, root: Path | None = None) -> str:
         if _ENTRY.match(line):
             entries.append(line)
     return "\n".join(entries)
+
+
+def unparsed_claim_lines(text: str) -> list[tuple[int, str]]:
+    """(line number, line) for every claim-shaped line the entry grammar rejects."""
+    out = []
+    for n, line in enumerate(text.splitlines(), 1):
+        if _CLAIM_LIKE.match(line) and not _ENTRY.match(line):
+            out.append((n, line))
+    return out
+
+
+def recent_entries(text: str, n: int, width: int = 300) -> list[str]:
+    """The last `n` bus entries (any verb), newest last, each capped at `width`."""
+    lines = [ln for ln in text.splitlines() if _ANY_ENTRY.match(ln)]
+    return [ln if len(ln) <= width else ln[:width - 1] + "\u2026" for ln in lines[-n:]]
+
+
+def _read_whole(bus: Path, root: Path) -> str:
+    raw = _safe_read_bytes(bus, root, max_bytes=_BUS_HARD_CAP)
+    if raw is None:
+        raw = _safe_read_bytes(bus, root, tail_bytes=_BUS_HARD_CAP) or b""
+    return raw.decode("utf-8", errors="replace")
 
 
 def _expired_at(lease: dict, ts: datetime, ttl: timedelta) -> bool:
@@ -240,6 +288,9 @@ def main(argv=None) -> int:
                     help="include released claims (default: active/expired only)")
     ap.add_argument("--strict", action="store_true",
                     help="exit 1 when any claim lease is expired")
+    ap.add_argument("--digest", action="store_true",
+                    help="open claims + the last N entries: read this, not the whole bus")
+    ap.add_argument("--n", type=int, default=15, help="entries shown by --digest")
     a = ap.parse_args(argv)
     bus = repo_root() / "AGENT_BUS.md"
     # v3.8.39/40 (round-22/23): a symlinked, non-regular, OR HARD-LINKED
@@ -269,24 +320,50 @@ def main(argv=None) -> int:
     now = datetime.now(UTC)
     claims, violations = parse_claims(text, now)
     ttl_h = _ttl().total_seconds() / 3600
+    whole = _read_whole(bus, repo_root())
+    unparsed = unparsed_claim_lines(whole)
     for v in violations:
-        print(f"  PROTOCOL VIOLATION (ignored): {v}")
+        print(f"  PROTOCOL VIOLATION (ignored): {_shown(v)}")
+    if unparsed:
+        print(f"bus-claims: WARNING — {len(unparsed)} claim-like line(s) do not match the "
+              "grammar `- [<ISO-8601>Z] **<agent>**: CLAIM ...` and are NOT counted below:")
+        for n, line in unparsed[-5:]:
+            print(f"    AGENT_BUS.md:{n}: {_shown(line[:160])}")
     shown = [c for c in claims if a.all or c["state"] != "released"]
+    if a.digest:
+        size = len(whole.encode("utf-8"))
+        print(f"bus digest: {size // 1024} KiB (~{size // 4000}k tokens) — read this, "
+              "not the whole file")
     if not shown:
-        print(f"bus-claims: no open claims (TTL {ttl_h:g}h).")
+        if unparsed:
+            print(f"bus-claims: no open claims IN THE PARSED GRAMMAR (TTL {ttl_h:g}h) — "
+                  f"{len(unparsed)} unparsed claim-like line(s) above may be open.")
+        else:
+            print(f"bus-claims: no open claims (TTL {ttl_h:g}h).")
+        if a.digest:
+            _print_recent(whole, a.n)
         return 0
     expired = 0
     for c in sorted(shown, key=lambda c: c["since"]):
         age_h = (now - c["since"]).total_seconds() / 3600
         label = c["key"] and f"v{c['key']}" or "(unkeyed)"
-        print(f"  {c['state'].upper():8} {label:12} {c['agent']:8} "
-              f"age {age_h:6.1f}h  {c['text']}")
+        print(f"  {c['state'].upper():8} {_shown(label):12} {_shown(c['agent']):8} "
+              f"age {age_h:6.1f}h  {_shown(c['text'])}")
         if c["state"] == "expired":
             expired += 1
     if expired:
         print(f"bus-claims: {expired} EXPIRED lease(s) (TTL {ttl_h:g}h) — per the bus "
               "protocol any agent may RECLAIM them now.")
+    if a.digest:
+        _print_recent(whole, a.n)
     return 1 if (a.strict and expired) else 0
+
+
+def _print_recent(whole: str, n: int) -> None:
+    rec = recent_entries(whole, max(1, n))
+    print(f"last {len(rec)} entr{'y' if len(rec) == 1 else 'ies'} (newest last):")
+    for ln in rec:
+        print(f"  {_shown(ln)}")
 
 
 if __name__ == "__main__":

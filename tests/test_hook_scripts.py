@@ -3011,7 +3011,7 @@ def test_upgrade_overwrite_set_parity_with_bootstrap(tmp_path) -> None:
     exempt = {
         ".gitignore", ".gitattributes",                    # append-only, never overwritten
         "docs/.todo_state.json", "docs/ARCHITECTURE.md",   # only-if-missing seeds
-        "docs/INTENT.md",
+        "docs/INTENT.md", "AGENT_BUS.md",                   # (v3.9.1: bus seed, preserved)
         ".substrate/install.json", "docs/manifest.json",   # regenerated provenance/index
     }
     created = []
@@ -14520,3 +14520,272 @@ def test_prove_reports_a_missing_pytest_as_an_environment_error(tmp_path) -> Non
                         str(td / "scripts" / "prove_guards.py")],
                        cwd=str(td), capture_output=True, text=True, timeout=120)
     assert r.returncode == 2 and "pytest is not installed" in r.stderr, r.stdout + r.stderr
+
+
+def test_no_substrate_file_is_named_like_what_the_guards_protect() -> None:
+    """v3.9.1: the leak scanner used to be named like a credential file, so the kit's
+    own exfil tripwire refused every shell command that named it and the shipped
+    Claude settings denied reading it — in the kit and in every consumer. The guards
+    were right and stay as they are; substrate files must not wear protected names.
+    Derived from the real deny rules and the real command policy, so a new rule or a
+    new file is checked without editing this test."""
+    import fnmatch
+    import command_policy as cp
+    settings = json.loads((SCRIPTS.parent / ".claude" / "settings.json").read_text(encoding="utf-8"))
+    denies = [r[len("Read(./"):-1] for r in settings.get("permissions", {}).get("deny", [])
+              if r.startswith("Read(./") and r.endswith(")")]
+    assert denies, "expected Read deny rules in the shipped settings"
+    tracked = subprocess.run(["git", "ls-files", "scripts", "templates", "manage.sh"],
+                             cwd=SCRIPTS.parent, capture_output=True, text=True,
+                             timeout=30).stdout.split()
+    blocked = []
+    for rel in tracked:
+        if rel.endswith("check_" + "sec" + "rets.py"):
+            # The compatibility shim keeps the old name on purpose — but only a shim:
+            # the scanner itself back under that name must still fail this test.
+            body = (SCRIPTS.parent / rel).read_text(encoding="utf-8")
+            if len(body.splitlines()) <= 8 and "runpy.run_path" in body:
+                continue
+        for pat in denies:
+            if fnmatch.fnmatch(rel, pat) or fnmatch.fnmatch("/" + rel, "/" + pat):
+                blocked.append((rel, pat))
+        if cp.looks_dangerous_command(f"sed -n 1,20p {rel}", "strict"):
+            blocked.append((rel, "exfil tripwire"))
+    assert not blocked, f"substrate files the kit's own guards would block: {blocked}"
+
+
+def test_leak_scanner_old_name_still_runs() -> None:
+    """The shim keeps pre-v3.9.1 configs working through an upgrade."""
+    old = SCRIPTS / ("check_" + "sec" + "rets.py")
+    r = subprocess.run([sys.executable, "-I", str(old)], cwd=str(SCRIPTS.parent),
+                       capture_output=True, text=True, timeout=120)
+    assert "check-leaks:" in r.stdout + r.stderr, r.stdout + r.stderr
+
+
+# --- v3.9.1: the agent bus — unparseable claims, digest, consumer seeding ----------
+
+def _bus_repo(tmp_path: Path, body: str) -> Path:
+    td = tmp_path / "busrepo"
+    (td / "scripts").mkdir(parents=True)
+    for name in ("bus_claims.py", "_doc_common.py", "_substrate_surfaces.py"):
+        (td / "scripts" / name).write_text((SCRIPTS / name).read_text(encoding="utf-8"),
+                                           encoding="utf-8")
+    (td / "AGENT_BUS.md").write_text(body, encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=td, check=True)
+    return td
+
+
+def _bus(td: Path, *args: str) -> subprocess.CompletedProcess:
+    env = {k: v for k, v in os.environ.items() if k not in ("CLAUDE_PROJECT_DIR",
+                                                           "SUBSTRATE_PROJECT_DIR")}
+    return subprocess.run([sys.executable, "-I", str(td / "scripts" / "bus_claims.py"), *args],
+                          cwd=str(td), env=env, capture_output=True, text=True, timeout=60)
+
+
+def test_bus_reports_claims_it_cannot_parse(tmp_path) -> None:
+    """A consumer wrote `CLAIM <paths> — why — agent — date`; the reader printed "no
+    open claims" while four were open. Unparseable claim-shaped lines are shown, and
+    "no open claims" is qualified while any exist."""
+    td = _bus_repo(tmp_path, "# Bus\n\n"
+                   "CLAIM scripts/foo.py — fixing the thing — claude — 2026-09-27\n"
+                   "- **codex**: CLAIM tests/ — adding coverage\n")
+    r = _bus(td)
+    assert "2 claim-like line(s) do not match the grammar" in r.stdout, r.stdout
+    assert "AGENT_BUS.md:3" in r.stdout
+    assert "no open claims IN THE PARSED GRAMMAR" in r.stdout
+    assert "bus-claims: no open claims (TTL" not in r.stdout
+
+
+def test_bus_parsed_claims_do_not_warn(tmp_path) -> None:
+    ts = __import__("datetime").datetime.now(__import__("datetime").UTC).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
+    td = _bus_repo(tmp_path, f"# Bus\n\n- [{ts}] **claude**: CLAIM v9.9.9 — work\n")
+    r = _bus(td)
+    assert "do not match the grammar" not in r.stdout
+    assert "ACTIVE" in r.stdout and "v9.9.9" in r.stdout
+
+
+def test_bus_digest_shows_recent_entries_capped(tmp_path) -> None:
+    lines = "".join(f"- [2026-01-{d:02d}T00:00:00Z] **claude**: NOTE entry {d} " + "x" * 500 + "\n"
+                    for d in range(1, 21))
+    td = _bus_repo(tmp_path, "# Bus\n\n" + lines)
+    r = _bus(td, "--digest", "--n", "3")
+    assert "bus digest:" in r.stdout and "last 3 entries (newest last):" in r.stdout
+    assert "entry 20" in r.stdout and "entry 18" in r.stdout and "entry 17" not in r.stdout
+    assert max(len(ln) for ln in r.stdout.splitlines()) < 320
+
+
+def test_bootstrap_seeds_a_bus_and_never_overwrites_one(tmp_path) -> None:
+    """Consumers got the claim reader but no bus, protocol, or union merge rule."""
+    boot = _find_bootstrap_sh()
+    if boot is None:
+        return
+    repo = tmp_path / "consumer"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    r = subprocess.run(["bash", str(boot), "--no-doctor"], cwd=repo,
+                       capture_output=True, text=True, timeout=300)
+    assert r.returncode == 0, r.stdout[-800:] + r.stderr[-800:]
+    bus = repo / "AGENT_BUS.md"
+    assert bus.is_file() and "./manage.sh bus --digest" in bus.read_text(encoding="utf-8")
+    assert "AGENT_BUS.md merge=union" in (repo / ".gitattributes").read_text(encoding="utf-8")
+    bus.write_text("# our own bus\n- [2026-01-01T00:00:00Z] **a**: NOTE keep me\n",
+                   encoding="utf-8")
+    r = subprocess.run(["bash", str(boot), "--no-doctor", "--force"], cwd=repo,
+                       capture_output=True, text=True, timeout=300)
+    assert r.returncode == 0, r.stdout[-800:] + r.stderr[-800:]
+    assert "keep me" in bus.read_text(encoding="utf-8"), "bootstrap --force overwrote the bus"
+    assert (repo / ".gitattributes").read_text(encoding="utf-8").count("AGENT_BUS.md") == 1
+
+
+def test_upgrade_preserves_a_grown_bus(tmp_path) -> None:
+    """The bus was baselined but not preserved, so any consumer whose bus had grown
+    saw its upgrade refuse on 'locally modified' drift. Run through the real drift
+    function with a baseline recorded before the bus grew."""
+    import importlib.util as _iu
+    spec = _iu.spec_from_file_location("_up_bus", SCRIPTS / "substrate_upgrade.py")
+    mod = _iu.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    root = tmp_path / "grown"
+    root.mkdir()
+    (root / "AGENT_BUS.md").write_text("# bus\n- [2026-01-01T00:00:00Z] **a**: NOTE grown\n",
+                                       encoding="utf-8")
+    (root / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
+    baseline = {"owned_file_sha256": {"AGENT_BUS.md": "0" * 64, "pytest.ini": "0" * 64}}
+    drift = mod._drifted(root, baseline, SCRIPTS.parent, set())
+    assert "pytest.ini" in drift, "control: an edited owned file must still read as drift"
+    assert "AGENT_BUS.md" not in drift
+
+
+def test_conftest_loads_project_fixtures_and_writes_the_watchdog_to_a_file(tmp_path) -> None:
+    """v3.9.1: tests/conftest.py is substrate-owned and replaced on upgrade, so a
+    consumer's own fixtures live in tests/conftest_project.py — loaded here, private
+    (underscore) fixtures included, and its pytest_configure called. The watchdog's
+    dump goes to .pytest_cache/watchdog-dump.txt: on stderr pytest captured it and a
+    kill printed nothing."""
+    td = tmp_path / "proj"
+    (td / "tests").mkdir(parents=True)
+    (td / "tests" / "conftest.py").write_text((SCRIPTS.parent / "tests" / "conftest.py")
+                                              .read_text(encoding="utf-8"), encoding="utf-8")
+    (td / "tests" / "conftest_project.py").write_text(
+        "import os, pytest\n"
+        "def pytest_configure(config):\n    os.environ['PROJ_CONFIGURED'] = '1'\n"
+        "@pytest.fixture\ndef _no_live_dns():\n    return 'blocked'\n", encoding="utf-8")
+    (td / "tests" / "test_p.py").write_text(
+        "import os\n"
+        "def test_uses_project_fixture(_no_live_dns):\n    assert _no_live_dns == 'blocked'\n"
+        "def test_project_configure_ran():\n    assert os.environ.get('PROJ_CONFIGURED') == '1'\n",
+        encoding="utf-8")
+    env = {k: v for k, v in os.environ.items() if k != "PYTEST_ADDOPTS"}
+    r = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:randomly", "tests"],
+                       cwd=td, capture_output=True, text=True, timeout=120, env=env)
+    assert r.returncode == 0, r.stdout[-1500:] + r.stderr[-800:]
+    assert (td / ".pytest_cache" / "watchdog-dump.txt").exists()
+
+
+def test_project_conftest_is_not_drift_and_survives_upgrade(tmp_path) -> None:
+    import importlib.util as _iu
+    spec = _iu.spec_from_file_location("_wij_proj", SCRIPTS / "write_install_json.py")
+    wij = _iu.module_from_spec(spec)
+    spec.loader.exec_module(wij)
+    root = tmp_path / "r"
+    (root / "tests").mkdir(parents=True)
+    (root / "tests" / "conftest_project.py").write_text("X = 1\n", encoding="utf-8")
+    (root / "tests" / "conftest.py").write_text("Y = 1\n", encoding="utf-8")
+    hashed = wij.hash_owned(root)
+    assert "tests/conftest.py" in hashed and "tests/conftest_project.py" not in hashed
+    spec = _iu.spec_from_file_location("_up_proj", SCRIPTS / "substrate_upgrade.py")
+    up = _iu.module_from_spec(spec)
+    spec.loader.exec_module(up)
+    assert "tests/conftest_project.py" in up.PRESERVE_FILES
+
+
+def test_every_skill_frontmatter_parses_with_a_name_and_description() -> None:
+    """Imported lesson (ipv4-dashboard postmortem): a skill file that EXISTS is not a
+    skill that loads — an unquoted `:` or `#` in a YAML value broke one silently.
+    Parse every shipped SKILL.md front matter the way a host would."""
+    import yaml
+    root = SCRIPTS.parent
+    skills = sorted(p for base in (".claude/skills", ".agents/skills", "skills",
+                                   "templates/claude/skills")
+                    for p in (root / base).glob("*/SKILL.md"))
+    assert skills, "expected shipped skills"
+    bad = []
+    for p in skills:
+        text = p.read_text(encoding="utf-8")
+        m = re.match(r"^---\n(.*?)\n---\n", text, re.S)
+        try:
+            meta = yaml.safe_load(m.group(1)) if m else None
+        except yaml.YAMLError as e:
+            bad.append(f"{p.relative_to(root)}: {e}")
+            continue
+        if not isinstance(meta, dict) or not all(isinstance(meta.get(k), str) and meta.get(k)
+                                                 for k in ("name", "description")):
+            bad.append(f"{p.relative_to(root)}: front matter lacks name/description")
+    assert not bad, "\n".join(bad)
+
+
+def test_no_near_future_date_literals_in_tests() -> None:
+    """Imported lesson (ipv4-auto-kyc cc2f433): a literal date that had to stay in the
+    future expired and silently inverted a guard. A date a test needs relative to now
+    must be derived from the clock. Flags ISO dates in the next three years in test
+    sources; far-future sentinels (2099) and past dates are fine."""
+    import datetime as _dt
+    today = _dt.date.today()
+    horizon = today.replace(year=today.year + 3)
+    hits = []
+    for p in sorted((SCRIPTS.parent / "tests").glob("*.py")):
+        for n, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1):
+            for m in re.finditer(r"\b(20\d\d)-(\d\d)-(\d\d)", line):
+                try:
+                    d = _dt.date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+                except ValueError:
+                    continue
+                if today < d <= horizon:
+                    hits.append(f"{p.name}:{n}: {m.group(0)}")
+    assert not hits, "near-future date literals will expire:\n" + "\n".join(hits)
+
+
+def test_bus_output_neutralizes_terminal_escapes_and_bidi(tmp_path) -> None:
+    """The bus is agent-written and the digest is read into other agents' context and
+    human terminals: control, bidi and invisible characters are shown as `?`."""
+    ts = __import__("datetime").datetime.now(__import__("datetime").UTC).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
+    esc, rlo, zw = "\x1b[2J", "\u202e", "\u200b"
+    td = _bus_repo(tmp_path, f"# Bus\n\n- [{ts}] **claude**: CLAIM v9.9.9 {esc}x{rlo}y{zw}z\n"
+                   f"CLAIM scripts/a.py {esc}off-grammar\n")
+    r = _bus(td, "--digest")
+    assert "\x1b" not in r.stdout and rlo not in r.stdout and zw not in r.stdout, r.stdout
+    assert "?[2Jx?y?z" in r.stdout and "?[2Joff-grammar" in r.stdout
+
+
+def test_nested_worktrees_ignores_an_inherited_git_dir(tmp_path, monkeypatch) -> None:
+    """git must list THIS repository's worktrees: an inherited GIT_DIR naming another
+    repository would let that repository's worktree list choose what the scan skips."""
+    import _substrate_surfaces as ss
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+
+    def git(*a, cwd):
+        subprocess.run(["git", *a], cwd=cwd, env=env, check=True, capture_output=True)
+    root = tmp_path / "root"
+    root.mkdir()
+    git("init", "-q", cwd=root)
+    # A repository INSIDE the tree (a nested clone, or files an agent wrote): the
+    # scanners' own link check only reads admin files under the root, so one outside
+    # it is already refused; one inside passes that check if git vouches for it.
+    other = root / "vendor" / "other"
+    other.mkdir(parents=True)
+    git("init", "-q", cwd=other)
+    git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty",
+        "-m", "x", cwd=other)
+    for k in [k for k in os.environ if k.startswith("GIT_")]:
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    # a worktree of OTHER placed at a path inside ROOT
+    git("worktree", "add", "-q", str(root / "wt"), cwd=other)
+    assert ss.nested_worktrees(root) == ()
+    monkeypatch.setenv("GIT_DIR", str(other / ".git"))
+    assert ss.nested_worktrees(root) == (), "an inherited GIT_DIR chose the skip set"

@@ -184,6 +184,12 @@ PRESERVE_FILES = [
     ".github/dependabot.yml",
     "docs/ARCHITECTURE.md", "docs/INTENT.md", "docs/HISTORY.md", "docs/REJECTED.md",
     "docs/README.md",
+    # v3.9.1: the bus is append-only project coordination state like HISTORY. It was
+    # baselined but not preserved, so every consumer whose bus had grown saw its
+    # upgrade refuse on "locally modified" drift.
+    "AGENT_BUS.md",
+    # v3.9.1: the project's own fixtures, loaded by the substrate-owned conftest.py.
+    "tests/conftest_project.py",
 ]
 PRESERVE_DIRS = ["design-system", "docs/decisions", "docs/postmortems"]
 
@@ -549,13 +555,21 @@ def _baseline_coverage(root: Path, kit: Path) -> set[str] | None:
         if not isinstance(skip, set) or not all(isinstance(x, str) for x in skip):
             return None
         expected = {rel for rel in groups[0] + groups[1] if (root / rel).is_file()}
+        # v3.9.1: skip nested linked worktrees exactly as write_install_json does, or a
+        # session worktree open during the upgrade makes this re-derivation disagree
+        # with the recorded coverage and the upgrade fails closed for no reason.
+        from _substrate_surfaces import nested_worktrees, under
+        trees = nested_worktrees(root)
         for rel in groups[2] + groups[3]:
             base = root / rel
             if not base.is_dir():
                 continue
             for path in base.rglob("*"):
                 if path.is_file() and not any(part in skip for part in path.parts):
-                    expected.add(path.relative_to(root).as_posix())
+                    prel = path.relative_to(root).as_posix()
+                    if trees and under(prel, trees):
+                        continue
+                    expected.add(prel)
         coverage = set(raw)
         return coverage if coverage == expected else None
     except Exception:

@@ -1,6 +1,6 @@
 ---
 purpose: Behavioral evals, the malicious and benign corpus, and assurance limits.
-last_human_reviewed: 2026-09-23
+last_human_reviewed: 2026-09-28
 covers:
   - manage.sh
   - extras/calibrate_diy_ultrareview.py

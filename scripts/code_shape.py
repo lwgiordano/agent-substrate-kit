@@ -150,10 +150,14 @@ def _line_count(p: Path) -> int:
 def _repo_shape(root: Path, file_lines: int, func_lines: int, include_substrate: bool) -> dict:
     proj, subs = [], []
     long_funcs = []
+    from _substrate_surfaces import nested_worktrees, under   # v3.9.1: not another tree
+    trees = nested_worktrees(root)
     for p in root.rglob("*"):
         if not p.is_file():
             continue
         rel = p.relative_to(root).as_posix()
+        if trees and under(rel, trees):
+            continue
         if _skip(rel) or p.suffix not in _CODE_SUFFIXES:
             continue
         owned = _is_substrate_owned(rel)

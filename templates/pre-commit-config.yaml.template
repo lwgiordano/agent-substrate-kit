@@ -79,9 +79,9 @@ repos:
         language: system
         pass_filenames: false
         always_run: true
-      - id: check-secrets
+      - id: check-leaks
         name: Secrets scan
-        entry: {{PY}} -I scripts/check_secrets.py
+        entry: {{PY}} -I scripts/check_leaks.py
         language: system
         pass_filenames: false
         always_run: true

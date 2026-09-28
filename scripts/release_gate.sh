@@ -91,7 +91,7 @@ echo "==> Harness smoke"; run_py scripts/check_harness_smoke.py        # scanner
 echo "==> Hook smoke"; run_py scripts/check_hook_smoke.py              # hooks must actually DENY (compile-clean but neutered hook)
 echo "==> Agent harness"; run_py scripts/check_agent_harness.py
 echo "==> Config commands"; run_py scripts/check_substrate_config.py   # before run_lang executes them
-echo "==> Secrets"; run_py scripts/check_secrets.py
+echo "==> Secrets"; run_py scripts/check_leaks.py
 echo "==> History"; run_py scripts/check_history_sha.py
 # Durable memory integrity: verify the hash chain, and the anchor in strict
 # (the structured handoff + event log are the tamper-evident record).

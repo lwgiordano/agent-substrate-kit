@@ -1,6 +1,6 @@
 ---
 purpose: Agent context inventory, harness scanning, budgets, and doc drift.
-last_human_reviewed: 2026-09-23
+last_human_reviewed: 2026-09-28
 covers:
   - agentsync.sh
   - manage.sh
@@ -117,7 +117,16 @@ deterministically from AGENT_BUS.md entries (default TTL 72h; HEARTBEAT and
 CLAIM EXPANSION refresh; an expired lease is reclaimable by any agent, and ONLY
 via an explicit RECLAIM — a foreign CLAIM/HEARTBEAT/RELEASE on a lapsed lease is
 a reported no-op, not a silent takeover). Advisory only — coordination state is
-never a gate input.
+never a gate input. A claim-shaped line that does not match the entry grammar is
+listed with its line number and is not counted, and "no open claims" is then
+qualified as "in the parsed grammar" — a consumer's off-grammar claims once read
+as none open. `--digest [--n N]` prints the bus size, open claims, and the last
+N entries capped at 300 characters, so agents need not read the whole file.
+Bus text is agent-written, so every line the reader prints shows control, bidi
+and invisible characters as `?`.
+`bootstrap.sh` seeds a consumer bus from `templates/AGENT_BUS.md.template` (never
+over an existing one) and adds `AGENT_BUS.md merge=union` to `.gitattributes`.
+The kit's own bus is not rotated: harness carve-outs pin line numbers in it.
 
 The harness scan applies the same leaf rules to the surfaces it inventories. A
 governed prompt file that is a symlink, a FIFO/socket/device, or a HARD LINK
@@ -132,6 +141,25 @@ finding rather than a raw `read_text()` hang or redirect. The guarded reader
 walks components under the pinned scan root, refuses linked or non-regular leaves
 on both the initial read and the post-read reopen, and compares device/inode so
 a parent replacement cannot silently serve stale bytes.
+
+## Nested session worktrees
+
+A host may place a session's linked worktree inside the checkout
+(`.claude/worktrees/<name>`). Without a skip, every tree walker scanned that
+worktree's copy of the substrate as if it were this repo's own: the harness
+reported its `.claude/` files as ungoverned, drift reported its modules as
+uncovered, and the install baseline vouched for its files. `nested_worktrees()`
+in `_substrate_surfaces.py` returns a directory only when `git worktree list`
+names it AND its `.git` file and the admin directory's `gitdir` point at each
+other; when git cannot answer, it returns nothing, so the scan fails toward
+scanning more. The git call drops inherited repository-routing and config
+variables (`GIT_DIR`, `GIT_COMMON_DIR`, `GIT_CONFIG*`, ...), so a repository
+nested in the tree cannot answer for the root. `check_agent_harness.py` does not take the helper's word: it
+re-reads both link files through its own guarded reader before skipping. A
+scan run INSIDE a worktree still scans that worktree, including under the
+`GIT_DIR`/`GIT_INDEX_FILE` a git hook exports. Drift, leak scanning, CODEOWNERS
+coverage, code shape, the install baseline, and upgrade coverage all use the
+same skip; `under()` requires a path boundary so `wt2/` is not inside `wt`.
 
 `AGENT_BUS.md` is both an agent-read surface and the audit coordination channel,
 so it is scanned with one legacy-compatibility carve-out: only exact

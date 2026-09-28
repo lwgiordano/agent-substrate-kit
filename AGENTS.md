@@ -14,7 +14,9 @@ hooks at context tail — never add it here.
    files directly only if none were injected). Do not re-propose a rejected
    approach without new information (`./manage.sh reject` logs one).
 2. If a session-handoff block was injected at session start, verify it
-   against `git log -5 --oneline` before trusting it.
+   against `git log -5 --oneline` before trusting it. If other agents work
+   this repo, run `./manage.sh bus --digest` (open claims + recent entries)
+   instead of reading all of `AGENT_BUS.md`.
 3. Read `docs/knowledge/*.md` and `docs/decisions/*.md` ONLY for the
    area you are about to touch (just-in-time, not wholesale);
    `./manage.sh recall "<question>"` returns the matching sections.

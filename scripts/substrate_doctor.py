@@ -168,6 +168,10 @@ def _sensitive_files_on_disk():
     # .github/, repo root, or docs/ (GitHub searches those in order).
     co=_codeowners_path()
     if co is not None: out.append(co.relative_to(ROOT).as_posix())
+    # v3.9.1: a registered linked worktree nested here (.claude/worktrees/<name>) is
+    # another tree, not this repo's owned surface.
+    from _substrate_surfaces import nested_worktrees, under
+    trees=nested_worktrees(ROOT)
     for d in (_SENSITIVE_DIRS+_SENSITIVE_OPTIONAL_DIRS+_SENSITIVE_GOVERNED_DIRS
               +_SENSITIVE_GOVERNED_OPTIONAL_DIRS):
         base=ROOT/d
@@ -176,6 +180,7 @@ def _sensitive_files_on_disk():
             if not p.is_file(): continue
             rel=p.relative_to(ROOT)
             if any(part in _COVERAGE_SKIP_PARTS for part in rel.parts): continue
+            if trees and under(rel.as_posix(), trees): continue
             out.append(rel.as_posix())
     return sorted(set(out))
 # A "real" owner is a syntactically valid GitHub handle/team or email —

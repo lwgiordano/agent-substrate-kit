@@ -4,7 +4,7 @@ asserts:
   - bootstrap.sh::_safe_mkdir_p
   - bootstrap.sh::wappend
   - scripts/run_python_gate.sh::_ruff_args
-last_human_reviewed: 2026-09-23
+last_human_reviewed: 2026-09-28
 covers:
   - bootstrap.sh
   - manage.sh
@@ -46,6 +46,12 @@ abort, but `--force` does not authorize an external write.
 `--install-tools` runs the rendered `manage.sh setup` and fails the bootstrap if
 setup fails. Interpreter selection falls back from `python3` to `python` only
 where the installer explicitly supports that path.
+
+Bootstrap seeds `AGENT_BUS.md` from its template only when none exists, and
+adds `AGENT_BUS.md merge=union` to `.gitattributes` once, so two agents'
+appends merge instead of conflicting. A consumer's own pytest fixtures go in
+`tests/conftest_project.py`, which upgrades preserve; `tests/conftest.py` is
+substrate-owned and replaced.
 
 ## Existing repositories
 

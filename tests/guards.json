@@ -589,7 +589,9 @@
       "file": "scripts/completion_gate.py",
       "find": "        return _substrate_profile(_safe_cfg_text() or \"\") == \"strict\"",
       "replace": "        return \"strict\" in next((ln for ln in (_safe_cfg_text() or \"\").splitlines() if ln.startswith(\"SUBSTRATE_PROFILE\")), \"\")",
-      "tests": ["tests/test_hook_scripts.py::test_every_profile_reader_decides_like_the_shell_loader"],
+      "tests": [
+        "tests/test_hook_scripts.py::test_every_profile_reader_decides_like_the_shell_loader"
+      ],
       "why": "the completion gate decides strict with a first-match parser the shell loader disagrees with"
     },
     {
@@ -597,33 +599,47 @@
       "file": "scripts/substrate_doctor.py",
       "find": "    return _substrate_profile(_safe_read_text(cfg, ROOT, max_bytes=1 << 20) or '') or 'standard'",
       "replace": "    return next((ln.split('=', 1)[1].strip().strip('\"') for ln in (_safe_read_text(cfg, ROOT, max_bytes=1 << 20) or '').splitlines() if ln.startswith('SUBSTRATE_PROFILE=')), 'standard')",
-      "tests": ["tests/test_hook_scripts.py::test_every_profile_reader_decides_like_the_shell_loader"],
+      "tests": [
+        "tests/test_hook_scripts.py::test_every_profile_reader_decides_like_the_shell_loader"
+      ],
       "why": "the doctor's profile row reports a tier the config does not resolve to"
     },
     {
       "id": "check-runs-pre-push-stage",
       "edits": [
-        {"file": "manage.sh",
-         "find": "    subtool pre-commit run --all-files --hook-stage pre-push --show-diff-on-failure ;;",
-         "replace": "    ;;"},
-        {"file": "templates/manage.sh.template",
-         "find": "    subtool pre-commit run --all-files --hook-stage pre-push --show-diff-on-failure ;;",
-         "replace": "    ;;"}
+        {
+          "file": "manage.sh",
+          "find": "    subtool pre-commit run --all-files --hook-stage pre-push --show-diff-on-failure ;;",
+          "replace": "    ;;"
+        },
+        {
+          "file": "templates/manage.sh.template",
+          "find": "    subtool pre-commit run --all-files --hook-stage pre-push --show-diff-on-failure ;;",
+          "replace": "    ;;"
+        }
       ],
-      "tests": ["tests/test_hook_scripts.py::test_check_runs_every_hook_stage_the_pre_commit_config_uses"],
+      "tests": [
+        "tests/test_hook_scripts.py::test_check_runs_every_hook_stage_the_pre_commit_config_uses"
+      ],
       "why": "`check` stops running the test suite once it moved to the pre-push stage (kit and consumer)"
     },
     {
       "id": "ci-admin-token-not-on-pull-requests",
       "edits": [
-        {"file": ".github/workflows/ci.yml",
-         "find": "        if: steps.admin.outputs.present == 'yes' && github.event_name != 'pull_request'",
-         "replace": "        if: steps.admin.outputs.present == 'yes'"},
-        {"file": "workflows/ci.yml.template",
-         "find": "        if: steps.admin.outputs.present == 'yes' && github.event_name != 'pull_request'",
-         "replace": "        if: steps.admin.outputs.present == 'yes'"}
+        {
+          "file": ".github/workflows/ci.yml",
+          "find": "        if: steps.admin.outputs.present == 'yes' && github.event_name != 'pull_request'",
+          "replace": "        if: steps.admin.outputs.present == 'yes'"
+        },
+        {
+          "file": "workflows/ci.yml.template",
+          "find": "        if: steps.admin.outputs.present == 'yes' && github.event_name != 'pull_request'",
+          "replace": "        if: steps.admin.outputs.present == 'yes'"
+        }
       ],
-      "tests": ["tests/test_hook_scripts.py::test_ci_admin_token_is_step_scoped_and_never_on_pull_requests"],
+      "tests": [
+        "tests/test_hook_scripts.py::test_ci_admin_token_is_step_scoped_and_never_on_pull_requests"
+      ],
       "why": "PR code runs with the admin token in scope and can print it"
     },
     {
@@ -631,7 +647,9 @@
       "file": "scripts/check_knowledge_narrative.py",
       "find": "        r\"\\b(?:used to|formerly)\\b\"",
       "replace": "        r\"(?!x)x\"",
-      "tests": ["tests/test_hook_scripts.py::test_narrative_lint_warns_only_and_skips_front_matter_and_fences"],
+      "tests": [
+        "tests/test_hook_scripts.py::test_narrative_lint_warns_only_and_skips_front_matter_and_fences"
+      ],
       "why": "past-tense change narrative accumulates in knowledge docs unflagged"
     },
     {
@@ -639,7 +657,9 @@
       "file": "scripts/check_knowledge_narrative.py",
       "find": "        r\"\\(v\\d+\\.\\d+\\.\\d+\\b|\\bv\\d+\\.\\d+\\.\\d+\\s*[:(]|\\bround-\\d+\\b|\\bCodex round\\b\")),",
       "replace": "        r\"(?!x)x\")),",
-      "tests": ["tests/test_hook_scripts.py::test_narrative_lint_warns_only_and_skips_front_matter_and_fences"],
+      "tests": [
+        "tests/test_hook_scripts.py::test_narrative_lint_warns_only_and_skips_front_matter_and_fences"
+      ],
       "why": "version-stamped release narrative accumulates in knowledge docs unflagged"
     },
     {
@@ -647,7 +667,9 @@
       "file": "scripts/prove_guards.py",
       "find": "    if importlib.util.find_spec(\"pytest\") is None:\n        print(f\"prove: pytest is not installed",
       "replace": "    if False:\n        print(f\"prove: pytest is not installed",
-      "tests": ["tests/test_hook_scripts.py::test_prove_reports_a_missing_pytest_as_an_environment_error"],
+      "tests": [
+        "tests/test_hook_scripts.py::test_prove_reports_a_missing_pytest_as_an_environment_error"
+      ],
       "why": "a pytest-less interpreter reads as a failed baseline, sending the operator after a guard that is fine"
     },
     {
@@ -659,6 +681,176 @@
         "tests/test_hook_scripts.py::test_session_handoff_knowledge_sanitized_and_budgeted"
       ],
       "why": "an instruction-shaped lesson reaches context as a placeholder line"
+    },
+    {
+      "id": "worktree-harness-relinks",
+      "file": "scripts/check_agent_harness.py",
+      "find": "        return bool(back) and (a/back).resolve()==(d/'.git').resolve()",
+      "replace": "        return True",
+      "tests": [
+        "tests/test_nested_worktrees.py::test_harness_ignores_a_helper_that_names_directories_it_should_not"
+      ],
+      "why": "an edited, unpinned helper can name any directory and the pinned scanner stops scanning it"
+    },
+    {
+      "id": "worktree-harness-skips",
+      "file": "scripts/check_agent_harness.py",
+      "find": "    trees=tuple(t for t in nested_worktrees(ROOT) if _linked_worktree(ROOT/t))",
+      "replace": "    trees=()",
+      "tests": [
+        "tests/test_nested_worktrees.py::test_harness_passes_in_a_main_checkout_holding_a_session_worktree"
+      ],
+      "why": "every commit from a main checkout holding a session worktree is blocked by the copy's files"
+    },
+    {
+      "id": "worktree-helper-link-check",
+      "file": "scripts/_substrate_surfaces.py",
+      "find": "        if root in tree.parents and is_linked_worktree(tree, root):",
+      "replace": "        if root in tree.parents:",
+      "tests": [
+        "tests/test_nested_worktrees.py::test_drift_checks_a_worktree_whose_git_file_names_another"
+      ],
+      "why": "a directory whose .git file was swapped to name another worktree drops out of every scan"
+    },
+    {
+      "id": "worktree-helper-backlink",
+      "file": "scripts/_substrate_surfaces.py",
+      "find": "        return bool(back) and (admin / back).resolve() == (path / \".git\").resolve()",
+      "replace": "        return True",
+      "tests": [
+        "tests/test_nested_worktrees.py::test_drift_checks_a_worktree_whose_git_file_names_another"
+      ],
+      "why": "a copied .git file pointing at any admin dir exempts a directory from the scans"
+    },
+    {
+      "id": "worktree-under-boundary",
+      "file": "scripts/_substrate_surfaces.py",
+      "find": "    return any(rel == t or rel.startswith(t + \"/\") for t in trees)",
+      "replace": "    return any(rel.startswith(t) for t in trees)",
+      "tests": [
+        "tests/test_nested_worktrees.py::test_under_needs_a_path_boundary"
+      ],
+      "why": "a sibling named wt2 or wtx.md is skipped because it shares a worktree's prefix"
+    },
+    {
+      "id": "worktree-drift-skip",
+      "file": "scripts/_doc_common.py",
+      "find": "    path_excludes += list(nested_worktrees(root))",
+      "replace": "    pass",
+      "tests": [
+        "tests/test_nested_worktrees.py::test_drift_passes_in_a_main_checkout_holding_nested_worktrees"
+      ],
+      "why": "doc drift reports every session worktree's copied module as an uncovered gap"
+    },
+    {
+      "id": "worktree-leak-scan-skip",
+      "file": "scripts/check_leaks.py",
+      "find": "        if trees and under(rel.as_posix(), trees): continue",
+      "replace": "        pass",
+      "tests": [
+        "tests/test_nested_worktrees.py::test_leak_scan_skips_a_session_worktree_but_not_a_plain_directory"
+      ],
+      "why": "the leak scan blocks on another tree's scratch files"
+    },
+    {
+      "id": "worktree-install-baseline-skip",
+      "file": "scripts/write_install_json.py",
+      "find": "                if trees and under(rel, trees):\n                    continue",
+      "replace": "                if False:\n                    continue",
+      "tests": [
+        "tests/test_nested_worktrees.py::test_install_baseline_does_not_vouch_for_a_session_worktree"
+      ],
+      "why": "the install baseline vouches for a session's scratch copy of the repo"
+    },
+    {
+      "id": "bus-unparsed-warning",
+      "file": "scripts/bus_claims.py",
+      "find": "    if unparsed:\n        print(f\"bus-claims: WARNING",
+      "replace": "    if False:\n        print(f\"bus-claims: WARNING",
+      "tests": [
+        "tests/test_hook_scripts.py::test_bus_reports_claims_it_cannot_parse"
+      ],
+      "why": "claims in a format the reader cannot parse vanish from `manage.sh bus` silently"
+    },
+    {
+      "id": "bus-no-open-claims-qualified",
+      "file": "scripts/bus_claims.py",
+      "find": "        if unparsed:\n            print(f\"bus-claims: no open claims IN THE PARSED GRAMMAR",
+      "replace": "        if False:\n            print(f\"bus-claims: no open claims IN THE PARSED GRAMMAR",
+      "tests": [
+        "tests/test_hook_scripts.py::test_bus_reports_claims_it_cannot_parse"
+      ],
+      "why": "the reader states 'no open claims' while claims it could not parse are open"
+    },
+    {
+      "id": "bus-digest-caps-lines",
+      "file": "scripts/bus_claims.py",
+      "find": "    return [ln if len(ln) <= width else ln[:width - 1] + \"\\u2026\" for ln in lines[-n:]]",
+      "replace": "    return lines[-n:]",
+      "tests": [
+        "tests/test_hook_scripts.py::test_bus_digest_shows_recent_entries_capped"
+      ],
+      "why": "one long bus entry puts the whole release essay back into every agent's context"
+    },
+    {
+      "id": "bootstrap-never-overwrites-bus",
+      "file": "bootstrap.sh",
+      "find": "if [ ! -e AGENT_BUS.md ] && [ -f \"$KIT_DIR/templates/AGENT_BUS.md.template\" ]; then copy",
+      "replace": "if [ -f \"$KIT_DIR/templates/AGENT_BUS.md.template\" ]; then copy",
+      "tests": [
+        "tests/test_hook_scripts.py::test_bootstrap_seeds_a_bus_and_never_overwrites_one"
+      ],
+      "why": "bootstrap --force (every upgrade) replaces a project's coordination history"
+    },
+    {
+      "id": "upgrade-preserves-bus",
+      "file": "scripts/substrate_upgrade.py",
+      "find": "    \"AGENT_BUS.md\",\n    # v3.9.1: the project",
+      "replace": "    # v3.9.1: the project",
+      "tests": [
+        "tests/test_hook_scripts.py::test_upgrade_preserves_a_grown_bus"
+      ],
+      "why": "every consumer whose bus has grown sees its upgrade refused as locally modified"
+    },
+    {
+      "id": "project-conftest-not-hashed",
+      "file": "scripts/write_install_json.py",
+      "find": "_BASELINE_EXCLUDE = {\".substrate/install.json\", \"tests/conftest_project.py\"}",
+      "replace": "_BASELINE_EXCLUDE = {\".substrate/install.json\"}",
+      "tests": [
+        "tests/test_hook_scripts.py::test_project_conftest_is_not_drift_and_survives_upgrade"
+      ],
+      "why": "editing a project's own test fixtures reads as substrate drift and blocks upgrade"
+    },
+    {
+      "id": "conftest-loads-project",
+      "file": "tests/conftest.py",
+      "find": "_project = _load_project_conftest()",
+      "replace": "_project = None",
+      "tests": [
+        "tests/test_hook_scripts.py::test_conftest_loads_project_fixtures_and_writes_the_watchdog_to_a_file"
+      ],
+      "why": "project fixtures have nowhere to live that an upgrade will not delete"
+    },
+    {
+      "id": "worktree-list-clean-git-env",
+      "file": "scripts/_substrate_surfaces.py",
+      "find": "capture_output=True, check=True, timeout=30, env=env,",
+      "replace": "capture_output=True, check=True, timeout=30,",
+      "tests": [
+        "tests/test_hook_scripts.py::test_nested_worktrees_ignores_an_inherited_git_dir"
+      ],
+      "why": "an inherited GIT_DIR lets another repository's worktree list choose what scans skip"
+    },
+    {
+      "id": "bus-output-neutralized",
+      "file": "scripts/bus_claims.py",
+      "find": "    return _UNPRINTABLE.sub(\"?\", s)\n",
+      "replace": "    return s\n",
+      "tests": [
+        "tests/test_hook_scripts.py::test_bus_output_neutralizes_terminal_escapes_and_bidi"
+      ],
+      "why": "agent-written bus text reaches terminals and agent context with escapes intact"
     }
   ]
 }

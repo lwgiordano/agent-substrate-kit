@@ -51,7 +51,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # (identical on every Python — see the module docstring on why raw bytes, not AST).
 MODULE_SOURCE_SHA256 = {
     "command_policy.py": "3ab87ac7bf6c1549ab6a304908509a137fc4f39006387689f38f07b4f329ab0b",
-    "check_agent_harness.py": "90ac8b1a37395e2727359aa55cf71fa2a7d5e5b98e4f14cbb379497384cfd26f",
+    "check_agent_harness.py": "67907965c1aad5de9244b3c06cc18f79246cf741734dd95aa18ec8700469eb9f",
 }
 
 

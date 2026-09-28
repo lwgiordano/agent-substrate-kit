@@ -20,7 +20,7 @@ jobs:
         profile: [starter, standard, strict]
         lang: [python, node, go, none]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v5
         with: {python-version: "3.11"}
       - name: Bootstrap ${{ matrix.profile }}/${{ matrix.lang }}
@@ -57,7 +57,7 @@ jobs:
           - {profile: strict,        lang: none}   # strict-LOCAL: check passes with NO CODEOWNERS (decoupled, v3.6.0)
           - {profile: strict+remote, lang: none}   # remote tier: CODEOWNERS coverage REQUIRED
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v5
         with: {python-version: "3.11"}
       - uses: actions/setup-node@v4

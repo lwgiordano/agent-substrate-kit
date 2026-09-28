@@ -27,7 +27,7 @@ jobs:
           fi
       - name: Node toolchain
         if: hashFiles('package.json') != ''
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with: {node-version: "20"}
       - name: Node install
         if: hashFiles('package.json') != ''

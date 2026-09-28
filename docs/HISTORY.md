@@ -383,3 +383,10 @@ This file is `merge=union` in `.gitattributes` so concurrent branch entries comb
 **Knowledge:** A guard that passes its test without the guard is not evidence even when it is new: the GIT_DIR scrub first survived prove because the scanners' contained reader already refused a repository outside the root; the real exposure was a repository INSIDE the tree, and only removing the guard showed which case the test covered. Security-auditor WARN on tests/conftest_project.py accepted: a project can already add a tests/<sub>/conftest.py with hooks. Bus rotation deliberately not done: harness carve-outs pin line numbers in the kit's AGENT_BUS.md.
 **Outcome:** shipped-green
 
+## 2026-09-28T22:52:21Z — NO_SESSION — 0a50447
+**Summary:** v3.9.2: the test files the kit copies into a consumer's tests/ pass the consumer's ruff rules; domain-lookup's upgrade to 3.9.1 landed red on three of them.
+**Files:** tests/conftest.py,tests/test_substrate_files.py,tests/test_nested_worktrees.py,tests/test_hook_scripts.py,tests/guards.json,docs/lessons.jsonl,docs/knowledge/01_install_adoption.md
+**Intent:** The operator asked for domain-lookup to be upgraded; its first check after the upgrade failed ruff on kit-shipped test files, because that project lints tests/ while the kit's own pyproject excludes it.
+**Knowledge:** A file the kit ships is judged by the consumer's gates, not the kit's: the kit linted its tests under its own excludes and never saw the consumer's view. The new test lints exactly the shipped set with --isolated. 29 lessons were confirmed at 3.9.2 after their evidence re-ran green in the full check.
+**Outcome:** shipped-green
+

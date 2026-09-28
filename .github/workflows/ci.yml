@@ -34,7 +34,7 @@ jobs:
         run: npm ci || npm install
       - name: Go toolchain
         if: hashFiles('go.mod') != ''
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with: {go-version: "stable"}
       - name: Substrate setup (creates .substrate/venv with validators)
         run: ./manage.sh setup

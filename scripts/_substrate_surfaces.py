@@ -106,6 +106,82 @@ HARNESS_SKIP_GLOBS = ["tests/**/*.py"]
 # caught by CODEOWNERS review + the validator tests.
 HARNESS_ALLOWLIST = {"scripts/harness_patterns.json"}
 
+
+# --- nested linked worktrees: another tree's files, never this tree's (v3.9.1) ---
+# The Claude app checks each session out at .claude/worktrees/<name>/ INSIDE the main
+# checkout (git-ignored via .git/info/exclude), and people keep scratch worktrees under
+# build/. Every file-system walker then read each session's copy of the repo as this
+# tree's files: doc drift reported every copied module as a coverage gap and the harness
+# scanner blocked on each copied harness_patterns.json, failing every commit from the
+# main checkout. Found and fixed first in a consumer (domain-lookup a350bd4, three live
+# sessions: 369 false gaps); ported here. Such a directory is its own working tree: its
+# own hooks check it when it commits, and a CI checkout never holds one. ONLY a worktree
+# git has registered, whose .git FILE and admin dir name each other, counts; a plain
+# directory, a copied .git file, a pruned worktree's leftovers, a submodule or a nested
+# clone is still walked. If git cannot answer, nothing is skipped (fail closed).
+def nested_worktrees(root) -> tuple[str, ...]:
+    """Repo-relative POSIX paths of registered linked worktrees nested strictly
+    inside `root`. Empty when git is missing, fails or times out."""
+    import os
+    import subprocess
+    from pathlib import Path
+    root = Path(root).resolve()
+    # Only git's own list of worktrees can say which directories to skip, so git must
+    # answer for THIS repository: an inherited GIT_DIR / GIT_COMMON_DIR / GIT_WORK_TREE
+    # would answer for another one, and GIT_CONFIG* could inject config. Discover from
+    # `root` instead; a hook's GIT_DIR names the same repository `root` resolves to.
+    env = {k: v for k, v in os.environ.items()
+           if not (k.startswith("GIT_CONFIG") or k in (
+               "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+               "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+               "GIT_NAMESPACE", "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM"))}
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(root), "worktree", "list", "--porcelain", "-z"],
+            capture_output=True, check=True, timeout=30, env=env,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ()
+    found = set()
+    for field in out.split(b"\0"):
+        if not field.startswith(b"worktree "):
+            continue
+        try:
+            tree = Path(os.fsdecode(field[len(b"worktree "):])).resolve()
+        except (OSError, ValueError, RuntimeError):
+            continue
+        if root in tree.parents and is_linked_worktree(tree, root):
+            found.add(tree.relative_to(root).as_posix())
+    return tuple(sorted(found))
+
+
+def is_linked_worktree(path, root) -> bool:
+    """True when path/.git is a regular FILE naming an admin dir whose `gitdir` file
+    names path/.git back. Git refuses to track a `.git` path, so nothing committed —
+    nothing a CI checkout holds — can pass this. Both reads go through the guarded
+    reader (no links, no FIFOs, contained in `root`)."""
+    from pathlib import Path
+    try:
+        from _doc_common import safe_read_text   # lazy: _doc_common imports this module
+    except Exception:
+        return False
+    path, root = Path(path), Path(root)
+    try:
+        head = (safe_read_text(path / ".git", root, max_bytes=4096) or "").strip()
+        if not head.startswith("gitdir:"):
+            return False
+        admin = (path / head[len("gitdir:"):].strip()).resolve()
+        back = (safe_read_text(admin / "gitdir", root, max_bytes=4096) or "").strip()
+        return bool(back) and (admin / back).resolve() == (path / ".git").resolve()
+    except (OSError, ValueError, RuntimeError):
+        return False
+
+
+def under(rel: str, trees) -> bool:
+    """Whether repo-relative POSIX `rel` lies inside one of `trees` (with a '/'
+    boundary: `.claude/worktrees/wt` does not cover `.claude/worktrees/wt2`)."""
+    return any(rel == t or rel.startswith(t + "/") for t in trees)
+
 # --- strict CODEOWNERS coverage: required-owned files/dirs ---
 # Directories owned recursively (a trailing-slash CODEOWNERS rule covers them).
 OWNED_DIRS = [

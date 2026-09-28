@@ -64,6 +64,11 @@ except Exception:  # fail-soft: a baseline is a safety aid, not a gate
 def owned_files(root: Path) -> list[str]:
     """Every substrate-owned file present under root (repo-relative, sorted)."""
     out: set[str] = set()
+    # v3.9.1: a registered linked worktree nested under root (the Claude app's
+    # .claude/worktrees/<name>) is another tree. Hashing it made the install baseline
+    # vouch for a session's scratch copy (288 of 470 entries in one consumer).
+    from _substrate_surfaces import nested_worktrees, under
+    trees = nested_worktrees(root)
     for f in OWNED_FILES + OPTIONAL_FILES:
         if (root / f).is_file():
             out.add(f)
@@ -73,7 +78,10 @@ def owned_files(root: Path) -> list[str]:
             continue
         for p in base.rglob("*"):
             if p.is_file() and not any(part in COVERAGE_SKIP_PARTS for part in p.parts):
-                out.add(str(p.relative_to(root)).replace("\\", "/"))
+                rel = str(p.relative_to(root)).replace("\\", "/")
+                if trees and under(rel, trees):
+                    continue
+                out.add(rel)
     return sorted(out)
 
 
@@ -81,7 +89,10 @@ def owned_files(root: Path) -> list[str]:
 # it would embed a hash-of-itself that can never match after the file is rewritten — every
 # subsequent upgrade would then false-report .substrate/install.json as "locally modified"
 # (v3.7.16 P1). It stays a governed/owned surface; it is just excluded from the DRIFT baseline.
-_BASELINE_EXCLUDE = {".substrate/install.json"}
+# v3.9.1: tests/conftest_project.py is the PROJECT's fixture file, loaded by the
+# substrate-owned tests/conftest.py. It is inventoried (tests/ is owned) but never
+# hashed: editing a project's own fixtures is not drift.
+_BASELINE_EXCLUDE = {".substrate/install.json", "tests/conftest_project.py"}
 
 
 def hash_owned(root: Path) -> dict[str, str]:

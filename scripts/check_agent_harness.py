@@ -31,7 +31,7 @@ except Exception:
 SCRIPT_ROOT = Path(__file__).resolve().parent.parent
 from _substrate_surfaces import (CONTEXT_GLOBS, CODE_GLOBS, HARNESS_SKIP_GLOBS, HARNESS_ALLOWLIST,
                                  OWNED_DIRS, OPTIONAL_DIRS, GOVERNED_DIRS, GOVERNED_OPTIONAL_DIRS,
-                                 _SKILL_ROOTS)
+                                 _SKILL_ROOTS, nested_worktrees)
 def _guarded_json_bytes(p, root=None):
     """Read a governed JSON data file WITHOUT following a link or blocking.
 
@@ -208,10 +208,33 @@ def _glob(pats):
                 (bad if linked else out).add(p)
             elif p.exists(): bad.add(p)
     return out, links, bad
+def _linked_worktree(d):
+    # v3.9.1: a registered linked worktree nested under ROOT (the Claude app's
+    # .claude/worktrees/<name>) is ANOTHER working tree — its own hooks scan it and a
+    # CI checkout never holds one. The helper that lists these dirs is NOT pinned, so
+    # the link is re-checked HERE with this module's own guarded reader before a single
+    # file is left out: d/.git must be a private regular FILE naming an admin dir whose
+    # `gitdir` names d/.git back. git refuses to track a `.git` path, so nothing
+    # committed can pass this whatever the helper returns.
+    try:
+        g=_guarded_json_bytes(d/'.git').decode('utf-8').strip()
+        if not g.startswith('gitdir:'): return False
+        a=(d/g[7:].strip()).resolve()
+        back=_guarded_json_bytes(a/'gitdir').decode('utf-8').strip()
+        return bool(back) and (a/back).resolve()==(d/'.git').resolve()
+    except (OSError, ValueError, RuntimeError, UnicodeDecodeError): return False
 def main():
+    trees=tuple(t for t in nested_worktrees(ROOT) if _linked_worktree(ROOT/t))
+    def _outside_trees(ps):
+        return {p for p in ps if not any(
+            p.relative_to(ROOT).as_posix()==t or p.relative_to(ROOT).as_posix().startswith(t+'/')
+            for t in trees)}
     skip,_,_=_glob(HARNESS_SKIP_GLOBS)
     context,ctx_links,ctx_bad=_glob(CONTEXT_GLOBS); context-=skip
     code,code_links,code_bad=_glob(CODE_GLOBS); code-=skip
+    context,code=_outside_trees(context),_outside_trees(code)
+    ctx_links,code_links=_outside_trees(ctx_links),_outside_trees(code_links)
+    ctx_bad,code_bad=_outside_trees(ctx_bad),_outside_trees(code_bad)
     findings=[]
     for p in sorted((ctx_links|code_links)):
         if p in skip: continue

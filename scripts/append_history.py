@@ -7,7 +7,15 @@ CLI:
     --files    "<comma,separated>" \\
     --intent   "<why>"             \\
     --knowledge "<what next sessions need>" \\
-    [--commit-hash <short-sha>]
+    [--commit-hash <short-sha>] \\
+    [--outcome shipped-green|unverified|wip|abandoned|reverts:<sha>|supersedes:<sha>]
+
+--outcome (v3.9.0, default `unverified`) says whether the change WORKED.
+`shipped-green` is the only label that claims success and the only one that
+needs evidence: a release-pass event for that commit in a memory chain that
+verifies, from a release gate that started on a clean tree. reverts/supersedes
+must name an earlier entry. The new entry is then recorded in the memory chain,
+so a later edit to it is a BREAK.
 
 Each field is required and must be >= 10 characters (M15).
 
@@ -36,8 +44,11 @@ from pathlib import Path
 # does NOT auto-prepend the script dir). Stdlib imports above resolve first.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _doc_common import (
+    HISTORY_OUTCOME_LINE_RE,
     git_short_sha,
+    history_outcome_problem,
     locked_atomic_append,
+    record_in_chain,
     repo_root,
     safe_read_text,
     utc_now_iso,
@@ -121,6 +132,7 @@ def compose_entry(
     files: str,
     intent: str,
     knowledge: str,
+    outcome: str | None = None,
 ) -> str:
     return (
         f"## {timestamp} — {token} — {sha}\n"
@@ -128,7 +140,8 @@ def compose_entry(
         f"**Files:** {files}\n"
         f"**Intent:** {intent}\n"
         f"**Knowledge:** {knowledge}\n"
-        f"\n"
+        + (f"**Outcome:** {outcome}\n" if outcome is not None else "")
+        + "\n"
     )
 
 
@@ -161,6 +174,12 @@ def main() -> int:
         default=None,
         help="Short SHA the entry documents (overrides git HEAD capture). "
              "Use post-commit to avoid the parent-vs-current off-by-one.",
+    )
+    parser.add_argument(
+        "--outcome",
+        default="unverified",
+        help="Did it work? shipped-green (needs a release-pass for the commit), "
+             "unverified (default), wip, abandoned, reverts:<sha>, supersedes:<sha>",
     )
     args = parser.parse_args()
 
@@ -223,9 +242,20 @@ def main() -> int:
             return 1
     sha = args.commit_hash.strip() if args.commit_hash else git_short_sha(cwd=root)
     token = read_session_token(root)
-    entry = compose_entry(timestamp, token, sha, **fields)
-
     target = root / "docs" / "HISTORY.md"
+    outcome = args.outcome.strip()
+    existing = safe_read_text(target, root, max_bytes=64 << 20) or ""
+    earlier = [m.group(1).strip() for m in re.finditer(r"^## \S+ — \S+ — (.+)$", existing, re.M)]
+    problem = history_outcome_problem(outcome, sha, earlier, root)
+    if problem:
+        print(f"append_history: {problem}", file=sys.stderr)
+        return 1
+    entry = compose_entry(timestamp, token, sha, **fields, outcome=outcome)
+    if len(HISTORY_OUTCOME_LINE_RE.findall(entry)) != 1:
+        print("append_history: a field may not contain its own **Outcome:** line",
+              file=sys.stderr)
+        return 1
+
     try:
         atomic_append(target, entry)
     except OSError as e:
@@ -233,6 +263,11 @@ def main() -> int:
         return 2
 
     sys.stdout.write(entry)
+    rc, out = record_in_chain(root, "docs/HISTORY.md")
+    if rc != 0:
+        print(f"append_history: entry APPENDED but NOT recorded in the memory chain "
+              f"({out}). Run `./manage.sh memory record docs/HISTORY.md`.", file=sys.stderr)
+        return 2
     return 0
 
 

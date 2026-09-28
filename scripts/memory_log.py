@@ -9,8 +9,13 @@ rewritten: anyone with write access can edit an old event AND recompute
 every subsequent hash. For that guarantee you need an anchor OUTSIDE
 the agent's write scope — `memory_log.py anchor` writes the current head
 hash to a git note (refs/notes/substrate-memory), outside events.jsonl;
-`verify --anchor` checks the head against it. For strong assurance push
-that note to a protected remote or anchor in CI.
+`verify --anchor` finds the nearest annotated ancestor of HEAD and requires
+that anchored hash to be PRESENT in the current chain. Growth after the
+anchor passes; a chain replaced wholesale or truncated past the anchor
+fails; no anchor anywhere in the ancestry fails closed. A rewrite of the
+suffix after the anchor point is undetectable by any unkeyed hash chain —
+anchor at every release and push that note to a protected remote or anchor
+in CI; that is the documented limit, not a gap.
 
 CURRENT_SESSION.md is a derived, disposable VIEW — never authoritative.
 
@@ -33,6 +38,8 @@ Usage:
   memory_log.py anchor              # write head hash to a git note
   memory_log.py tail [N]
   memory_log.py tasks
+  memory_log.py record docs/HISTORY.md   # attest unrecorded append-only entries
+  memory_log.py release-pass --commit <sha> --clean-start yes|no   # release gate only
 
 Exit codes: 0 ok | 1 chain broken / anchor mismatch / error.
 """
@@ -96,45 +103,21 @@ except Exception:  # pragma: no cover - stripped install
 
 try:
     from _doc_common import safe_read_text as _safe_read_text
-except Exception:  # pragma: no cover - inline mirror for a stripped install
+except Exception:  # pragma: no cover - stripped install
+    # v3.8.51 (self-audit, architecture P3): this used to be a ~40-line
+    # "same algorithm" mirror of _doc_common.safe_read_text — the v3.8.42
+    # algorithm. The canonical primitive then gained component-walk descent
+    # (v3.8.44) and post-op liveness (v3.8.45) and the mirror did not: a copy
+    # of a security primitive that silently stayed two fixes behind, in a
+    # fallback path that _doc_common is never actually stripped from. A
+    # fallback that runs an OLDER guard is the same fail-open shape as one
+    # that drops the guard, only slower to notice. Refuse instead — and refuse
+    # LOUDLY: _read_events turns a None read into "no events", so a None stub
+    # here would let a stripped install verify an unreadable chain as empty and
+    # OK. A raise propagates to a nonzero exit; a stripped install cannot
+    # claim the chain verified.
     def _safe_read_text(path, root=None, max_bytes=None, tail_bytes=None):
-        """Fail-closed mirror of _doc_common.safe_read_text (v3.8.42): STRICT
-        ancestor containment, then refuse a symlinked/hard-linked/non-regular
-        leaf, and never block on a FIFO. Containment is mirrored here rather
-        than skipped — a fallback that drops the check is exactly the fail-open
-        shape the round-23 audit caught in this file."""
-        if root is not None:
-            try:
-                _p = Path(path).parent
-                _rel = os.path.relpath(str(_p), str(root))
-                if (_rel == os.pardir or _rel.startswith(os.pardir + os.sep)
-                        or os.path.isabs(_rel)):
-                    return None
-                _expected = os.path.normpath(os.path.join(os.path.realpath(str(root)), _rel))
-                if os.path.realpath(str(_p)) != _expected:
-                    return None
-            except (OSError, ValueError):
-                return None
-        try:
-            fd = os.open(str(path), os.O_RDONLY
-                         | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
-        except (OSError, ValueError):
-            return None
-        try:
-            st = os.fstat(fd)
-            if not stat.S_ISREG(st.st_mode) or st.st_nlink > 1:
-                return None
-            chunks = []
-            while True:
-                b = os.read(fd, 65536)
-                if not b:
-                    break
-                chunks.append(b)
-        except (OSError, ValueError):
-            return None
-        finally:
-            os.close(fd)
-        return b"".join(chunks).decode("utf-8", errors="replace")
+        raise OSError("safe_read_text unavailable — refusing an unguarded read of the memory chain")
 
 _SECRET_PATTERNS = [
     re.compile(r"\bsk-[A-Za-z0-9][A-Za-z0-9_-]{20,}\b"),
@@ -213,6 +196,10 @@ def _read_events() -> list[dict]:
             # containment refused it (routed parent) though the leaf looked fine
             raise MemoryLogUnsafe("events.jsonl is outside the repo (routed parent)")
         return []
+    return _parse_events(text)
+
+
+def _parse_events(text: str) -> list[dict]:
     out = []
     for line in text.splitlines():
         line = line.strip()
@@ -225,7 +212,239 @@ def _read_events() -> list[dict]:
     return out
 
 
+def _chain_break(events: list[dict]) -> str | None:
+    """The first link failure in `events`, or None. The one walk `verify` and
+    every evidence reader use — evidence read from a chain that does not verify
+    is not evidence."""
+    prev = ZERO
+    for i, ev in enumerate(events):
+        if "_corrupt" in ev:
+            return f"BREAK at line {i + 1}: not valid JSON"
+        if ev.get("seq") != i:
+            return f"BREAK at seq {i}: out-of-order/missing seq"
+        if ev.get("prev") != prev:
+            return f"BREAK at seq {i}: prev-hash mismatch"
+        try:
+            expect = _event_hash(prev, ev["seq"], ev["ts"], ev["type"], ev.get("data"))
+        except (KeyError, TypeError):
+            return f"BREAK at seq {i}: malformed event"
+        if ev.get("hash") != expect:
+            return f"BREAK at seq {i}: content hash mismatch (tampered)"
+        prev = ev["hash"]
+    return None
+
+
 def append(etype: str, data) -> int:
+    return _append_returning_head(etype, data)[0]
+
+
+# --- The record the chain attests (v3.9.0) ----------------------------------
+# Before v3.9.0 the chain held 44 events, 43 of them session handoffs: it
+# attested heartbeats while HISTORY, REJECTED and the lessons — the record a
+# future session actually reads — sat outside it. A `record` event carries the
+# sha256 of each append-only ENTRY (not of the whole file: HISTORY and REJECTED
+# are merge=union, so concurrent branches interleave whole entries and a
+# whole-file or prefix hash would break on every legitimate merge). `verify`
+# then requires every recorded entry to still be present, byte-for-byte after
+# whitespace normalization, so editing or deleting a recorded entry is a BREAK.
+# What this does not give: an entry INSERTED without a record is not detected
+# here (git history shows it), and a rewrite of both an entry and the chain
+# suffix after the last published anchor is the anchor's documented limit.
+RECORD_FILES = ("docs/HISTORY.md", "docs/REJECTED.md", "docs/lessons.jsonl")
+# Written only by their own code paths; `append --type` refuses them so the CLI
+# cannot mint evidence the gates later read as authoritative.
+RESERVED_TYPES = frozenset({"record", "release-pass", "anchor-forced"})
+
+
+def record_units(relpath: str, text: str) -> list[str]:
+    """The append-only units of a record file, whitespace-normalized."""
+    if relpath == "docs/HISTORY.md":
+        units: list[str] = []
+        cur: list[str] | None = None
+        for ln in text.splitlines():
+            if ln.startswith("## "):
+                if cur is not None:
+                    units.append("\n".join(cur).strip())
+                cur = [ln.rstrip()]
+            elif cur is not None:
+                cur.append(ln.rstrip())
+        if cur is not None:
+            units.append("\n".join(cur).strip())
+        return units
+    if relpath == "docs/REJECTED.md":
+        return [ln.strip() for ln in text.splitlines() if ln.strip().startswith("- [")]
+    # lessons.jsonl: a lesson's `status` and `last_confirmed` legitimately move
+    # (prose -> test -> gate, re-confirmed each release), so the unit is its id
+    # and RULE text only. Rewording a recorded rule is a mismatch: change a rule
+    # by superseding it with a new id, never by editing it in place.
+    units = []
+    for ln in text.splitlines():
+        if not ln.strip():
+            continue
+        try:
+            d = json.loads(ln)
+        except ValueError:
+            d = None
+        if isinstance(d, dict) and isinstance(d.get("id"), str) and isinstance(d.get("rule"), str):
+            units.append(d["id"] + "\x1f" + " ".join(d["rule"].split()))
+        else:
+            units.append(ln.strip())
+    return units
+
+
+def _unit_hash(unit: str) -> str:
+    return hashlib.sha256(unit.encode("utf-8")).hexdigest()
+
+
+def _read_record_file(relpath: str) -> str | None:
+    """Guarded read; None when ABSENT. Present-but-unsafe raises: a linked or
+    special record file must not verify as 'entries missing' or as empty."""
+    path = ROOT / relpath
+    if not os.path.lexists(str(path)):
+        return None
+    text = _safe_read_text(path, ROOT, max_bytes=None)
+    if text is None:
+        raise MemoryLogUnsafe(f"{relpath} is linked, special, or outside the repo")
+    return text
+
+
+def _recorded(events: list[dict]) -> dict[str, list[tuple[int, str]]]:
+    out: dict[str, list[tuple[int, str]]] = {}
+    for ev in events:
+        d = ev.get("data")
+        if ev.get("type") != "record" or not isinstance(d, dict):
+            continue
+        f, hashes = d.get("file"), d.get("entries")
+        if f in RECORD_FILES and isinstance(hashes, list):
+            out.setdefault(f, []).extend((ev.get("seq"), h) for h in hashes if isinstance(h, str))
+    return out
+
+
+def record(relpath: str) -> int:
+    """Append a `record` event for every entry of `relpath` not yet recorded.
+    Idempotent. Called by append_history / append_rejected after they append,
+    and once by hand to adopt an existing file."""
+    if relpath not in RECORD_FILES:
+        print(f"memory-log: record: {relpath!r} is not a record file "
+              f"(one of {', '.join(RECORD_FILES)})", file=sys.stderr)
+        return 2
+    text = _read_record_file(relpath)
+    if text is None:
+        print(f"memory-log: record: {relpath} does not exist; nothing to record")
+        return 0
+    already = {h for _s, h in _recorded(_read_events()).get(relpath, [])}
+    new: list[str] = []
+    for u in record_units(relpath, text):
+        h = _unit_hash(u)
+        if h not in already and h not in new:
+            new.append(h)
+    if not new:
+        print(f"memory-log: record: {relpath} — every entry already recorded")
+        return 0
+    rc = append("record", {"file": relpath, "entries": new})
+    if rc == 0:
+        print(f"memory-log: record: {relpath} — {len(new)} entr{'y' if len(new) == 1 else 'ies'} recorded")
+    return rc
+
+
+def _record_findings(events: list[dict]) -> list[str]:
+    findings = []
+    for relpath, recs in _recorded(events).items():
+        text = _read_record_file(relpath)
+        present = set() if text is None else {_unit_hash(u) for u in record_units(relpath, text)}
+        missing = [(s, h) for s, h in recs if h not in present]
+        if missing:
+            findings.append(
+                f"{len(missing)} entr{'y' if len(missing) == 1 else 'ies'} recorded in the chain "
+                f"(first at seq {missing[0][0]}, sha256 {missing[0][1][:12]}) "
+                f"{'is' if len(missing) == 1 else 'are'} no longer in {relpath}"
+                + (" (file missing)" if text is None else ""))
+    return findings
+
+
+def release_pass(expect_commit: str, clean_start: bool) -> int:
+    """Record that the release gate's checks passed for `expect_commit`.
+
+    Only the gate calls this, after every check and before the anchor, so the
+    anchor covers it. HEAD is re-derived HERE and must equal the commit the gate
+    saw at start: a gate that ran while HEAD moved certifies nothing. The event
+    says the GATES passed on that commit — publication of the anchor is a
+    separate result the gate reports on its own. `clean_start` records whether
+    the tracked tree matched the commit when the gate began: tests that ran on
+    uncommitted edits are not evidence about the commit, and a `shipped-green`
+    HISTORY outcome requires it."""
+    head = _git_s("rev-parse", "--verify", "HEAD^{commit}")
+    if not head or head != expect_commit:
+        print(f"memory-log: release-pass REFUSED — HEAD is {head[:12] or '?'} but the gate "
+              f"started on {expect_commit[:12]}; the checks did not run on this commit",
+              file=sys.stderr)
+        return 1
+    tree = _git_s("rev-parse", "--verify", "HEAD^{tree}")
+    vtext = _safe_read_text(ROOT / "VERSION", ROOT, max_bytes=256) or ""
+    return append("release-pass", {"commit": head, "tree": tree,
+                                   "version": vtext.strip()[:40], "clean_start": bool(clean_start)})
+
+
+def verified_release_passes(root: Path) -> tuple[list[dict] | None, str]:
+    """release-pass events from `root`'s chain, ONLY if the chain verifies.
+    (None, reason) when it is absent, unsafe, or broken — a caller deciding
+    `shipped-green` must not read evidence out of a log that fails its own walk."""
+    root = Path(root)
+    path = root / ".substrate" / "memory" / "events.jsonl"
+    if not os.path.lexists(str(path)):
+        return None, "no memory chain (.substrate/memory/events.jsonl absent)"
+    text = _safe_read_text(path, root, max_bytes=None)
+    if text is None:
+        return None, "memory chain is linked, special, or outside the repo"
+    events = _parse_events(text)
+    brk = _chain_break(events)
+    if brk is not None:
+        return None, f"memory chain does not verify ({brk})"
+    return release_passes(events), ""
+
+
+def recorded_hashes(root: Path, relpath: str) -> set[str] | None:
+    """The unit hashes `root`'s chain has recorded for `relpath`, ONLY if the
+    chain verifies; None when it is absent, unsafe, or broken."""
+    root = Path(root)
+    path = root / ".substrate" / "memory" / "events.jsonl"
+    if not os.path.lexists(str(path)):
+        return None
+    text = _safe_read_text(path, root, max_bytes=None)
+    if text is None:
+        return None
+    events = _parse_events(text)
+    if _chain_break(events) is not None:
+        return None
+    return {h for _s, h in _recorded(events).get(relpath, [])}
+
+
+def lesson_unit_hash(lesson_id: str, rule: str) -> str:
+    """The recorded identity of one lesson (id + normalized rule text)."""
+    return _unit_hash(record_units("docs/lessons.jsonl",
+                                   json.dumps({"id": lesson_id, "rule": rule}))[0])
+
+
+def release_passes(events: list[dict] | None = None) -> list[dict]:
+    """Every well-formed release-pass event's data, in chain order."""
+    evs = _read_events() if events is None else events
+    return [ev["data"] for ev in evs
+            if ev.get("type") == "release-pass" and isinstance(ev.get("data"), dict)
+            and isinstance(ev["data"].get("commit"), str)]
+
+
+def _append_returning_head(etype: str, data) -> tuple[int, str | None]:
+    """append(), plus the hash it actually wrote.
+
+    v3.8.54 (round-36 P2): `anchor --force` checked this append's return code
+    and then RE-READ events.jsonl to choose the note payload. The lock is
+    released when the append returns, so a writer in that gap got a green
+    anchor over a chain containing no `anchor-forced` event at all — the
+    evidence precondition was satisfied and the thing it authorized was bound
+    to a different read. Returning the hash makes the anchored value the one
+    this append produced, so there is nothing to race.
+    """
+    h = None
     try:
         # v3.8.40 (round-23 P1): the tamper-evident log must never be routed
         # outside the repo. A symlinked `.substrate`/`.substrate/memory`
@@ -257,7 +476,7 @@ def append(etype: str, data) -> int:
         if not contained:
             print("memory-log: refusing append — memory dir escapes the repo "
                   "(symlinked ancestor)", file=sys.stderr)
-            return 1
+            return 1, None
         # v3.8.41 (round-24 P1): refuse a symlinked OR hard-linked leaf. Round-23
         # checked only is_symlink(), but a hard-linked events.jsonl/.lock is a
         # regular file that shares an outside inode, so EVENTS.open("a") appends
@@ -282,7 +501,7 @@ def append(etype: str, data) -> int:
                     _reason = None
             if _reason is not None:
                 print(f"memory-log: refusing append — {_leaf.name} {_reason}", file=sys.stderr)
-                return 1
+                return 1, None
         MEM.mkdir(parents=True, exist_ok=True)
         lock = MEM / ".lock"
         with lock.open("w") as lf:
@@ -305,8 +524,8 @@ def append(etype: str, data) -> int:
                     fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
     except Exception as e:
         print(f"memory-log: append failed: {e}", file=sys.stderr)
-        return 1
-    return 0
+        return 1, None
+    return 0, h
 
 
 _GIT_ROUTING_VARS = (
@@ -328,6 +547,67 @@ def _clean_env() -> dict:
         e.pop(k, None)
     for k in [k for k in e if k.startswith("GIT_CONFIG")]:
         e.pop(k, None)
+    return e
+
+
+_EVIDENCE_GIT_OK: bool | None = None
+
+
+def _git_isolates_user_config() -> bool:
+    """Can this git be told to IGNORE user/system config files (>= 2.32)?
+
+    GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM landed in Git 2.32. On anything older
+    there is no way to keep `$HOME/.gitconfig` out of a subprocess without also
+    moving HOME, which would take `~/.ssh` with it and break every ssh remote.
+    So on older git we do not weaken the check and we do not pretend: remote
+    confirmation is simply not available, which strict treats as unpublished.
+    """
+    global _EVIDENCE_GIT_OK
+    if _EVIDENCE_GIT_OK is None:
+        _EVIDENCE_GIT_OK = False
+        try:
+            p = subprocess.run(["git", "--version"], cwd=ROOT, capture_output=True,
+                               text=True, timeout=10, env=_clean_env())
+            m = re.search(r"(\d+)\.(\d+)", p.stdout) if p.returncode == 0 else None
+            if m:
+                _EVIDENCE_GIT_OK = (int(m.group(1)), int(m.group(2))) >= (2, 32)
+        except Exception:
+            _EVIDENCE_GIT_OK = False
+    return _EVIDENCE_GIT_OK
+
+
+def _evidence_env() -> dict:
+    """_clean_env() PLUS isolation from user/system git CONFIG FILES.
+
+    v3.8.54 (round-36 P1a). `_clean_env` was a denylist of the env vars that
+    redirect which REPOSITORY git reads, written in v3.8.10 when every call in
+    this module was local. v3.8.52 added calls where the answer comes from a
+    SERVER, and the denylist was never re-derived for them: `XDG_CONFIG_HOME`
+    (and, symmetrically, `HOME`) still selected the user config file, so a
+    `url.<attacker>.insteadOf` entry rewrote the origin URL and a genuine
+    ANCHOR CONFLICT was reported as `anchor verified against origin`.
+    Reproduced through both variables before this fix.
+
+    Config files are therefore taken out of the loop for the calls whose verdict
+    the remote decides, rather than one variable being deleted: point
+    GIT_CONFIG_GLOBAL/SYSTEM at /dev/null (which supersedes both `$HOME` and
+    XDG lookups), refuse system config, drop XDG_CONFIG_HOME anyway, and forbid
+    a credential prompt so an unauthenticated remote fails fast instead of
+    hanging. What survives is the repository's OWN config — the same trust
+    boundary as the working tree itself.
+
+    NOT applied to the purely local reads and to the note write: user config
+    cannot change which repository those reach once the routing vars are gone
+    (the git dir comes from cwd), the note write needs `user.email` and would
+    break on most machines without it, and the local note is never treated as
+    authority anyway — that is precisely why remote confirmation exists.
+    """
+    e = _clean_env()
+    e.pop("XDG_CONFIG_HOME", None)
+    e["GIT_CONFIG_GLOBAL"] = os.devnull
+    e["GIT_CONFIG_SYSTEM"] = os.devnull
+    e["GIT_CONFIG_NOSYSTEM"] = "1"
+    e["GIT_TERMINAL_PROMPT"] = "0"
     return e
 
 
@@ -655,19 +935,111 @@ def _head_hash() -> str:
     return events[-1].get("hash", ZERO) if events else ZERO
 
 
-def anchor() -> int:
-    """Write the current head hash to a git note outside events.jsonl."""
-    head = _head_hash()
+def anchor(force: bool = False) -> int:
+    """Write the current head hash to a git note outside events.jsonl.
+
+    MONOTONIC (v3.8.52, round-34 P1). A git note lives in the same writable
+    repo state as the log it vouches for, so the detection added in v3.8.51
+    was one command away from being undone: replace `events.jsonl` with a
+    different valid chain, re-run this command, and `verify --anchor` went
+    green over the replacement. Reproduced end to end before this fix.
+
+    Advancing the anchor is therefore only allowed ALONG the chain it already
+    vouches for: if a previous anchor exists, its recorded hash must still be
+    a member of the current chain. Growth satisfies that on every legitimate
+    release; replace-then-re-anchor does not, which is exactly the laundering
+    step. A real operator-intended reset (a wiped log, a new machine) uses
+    --force, and that is not a silent escape hatch: the break is APPENDED to
+    the new chain as a `anchor-forced` event naming the abandoned hash, so
+    the discontinuity is in the record instead of erased from it.
+
+    This closes the local move. It does not make a mutable local note a
+    cryptographic authority — see the module docstring and `verify --anchor`,
+    which reports a local-only anchor as local-only and requires remote
+    confirmation under strict.
+    """
+    # ONE snapshot of the chain (v3.8.54, round-36 P2). This used to take the
+    # head from one read of events.jsonl and the membership set from another,
+    # so the hash that got anchored need not have come from the chain the
+    # monotonicity check approved. Read once; decide and act on that read.
+    events = _read_events()
+    head = events[-1].get("hash", ZERO) if events else ZERO
+    seen = {ZERO} | {ev.get("hash") for ev in events}
+    prior = _nearest_anchor()
+    if prior is not None and not force:
+        commit, anchored = prior
+        if anchored not in seen:
+            print(
+                f"memory-log: REFUSING to re-anchor — the hash anchored at commit "
+                f"{commit[:12]} ({anchored[:12]}) is NOT in the current chain, so this "
+                "would move the anchor onto a chain that does not descend from the "
+                "anchored state. That is the shape of a replaced or truncated log. If "
+                "the log was legitimately reset, re-run with --force, which records the "
+                "break as an event in the new chain rather than hiding it.",
+                file=sys.stderr,
+            )
+            return 1
+    forced_break = None
+    if prior is not None and force:
+        commit, anchored = prior
+        if anchored not in seen:
+            forced_break = (commit, anchored)
+    if forced_break is not None:
+        # Append BEFORE anchoring so the anchor covers the record of its own
+        # discontinuity, and anchor THE HASH THAT APPEND PRODUCED.
+        #
+        # v3.8.54 (round-36 P2): re-reading events.jsonl here instead was a
+        # gap a writer could stand in. append() releases its lock when it
+        # returns, so replacing the file between the rc check and the re-read
+        # produced rc 0, a note over a chain with no `anchor-forced` event in
+        # it, and verify --anchor green. The precondition held and the thing
+        # it authorized was bound to a different read of a mutable file.
+        #
+        # The append rc is a PRECONDITION, not a formality (round-35 P2). v3.8.52
+        # ignored it, so making .substrate/memory/.lock a FIFO stopped the event
+        # from being written while the note was rewritten anyway — the recorded
+        # discontinuity is the entire justification for allowing --force, and it
+        # was optional. If the evidence cannot be written, the override does not
+        # happen: abort with the note untouched, leaving the mismatch standing.
+        commit, anchored = forced_break
+        rc, appended = _append_returning_head("anchor-forced", {
+            "abandoned_anchor_commit": commit,
+            "abandoned_anchor_head": anchored,
+            "reason": "operator-forced anchor over a chain that does not contain the "
+                      "previously anchored head",
+        })
+        if rc != 0 or not appended:
+            print(
+                "memory-log: REFUSING --force — could not append the `anchor-forced` "
+                "evidence event (see the error above), so the discontinuity would go "
+                "unrecorded. The note is UNCHANGED and the anchor mismatch still "
+                "stands. Fix the memory log, then re-run.",
+                file=sys.stderr,
+            )
+            return 1
+        head = appended
+    # POST-CONDITION, and it can only REFUSE (v3.8.54). Binding `head` to the
+    # snapshot above is what makes the payload unraceable; this re-read never
+    # chooses a value, it only asks whether the chain still contains the hash
+    # about to be certified. A writer that replaced events.jsonl while this ran
+    # is then a refusal here rather than a note that verifies against a chain
+    # nothing validated.
+    if head != ZERO and head not in {ev.get("hash") for ev in _read_events()}:
+        print("memory-log: REFUSING to anchor — events.jsonl changed while this "
+              "anchor ran and no longer contains the hash being anchored. The note "
+              "is UNCHANGED. Re-run once the log is quiescent.", file=sys.stderr)
+        return 1
     try:
         sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT,
-                             capture_output=True, text=True, timeout=10)
+                             capture_output=True, text=True, timeout=10,
+                             env=_clean_env())
         if sha.returncode != 0:
             print("memory-log: anchor needs a git repo with at least one commit", file=sys.stderr)
             return 1
         r = subprocess.run(
             ["git", "notes", "--ref", "substrate-memory", "add", "-f",
              "-m", f"substrate-memory-head:{head}", sha.stdout.strip()],
-            cwd=ROOT, capture_output=True, text=True, timeout=10,
+            cwd=ROOT, capture_output=True, text=True, timeout=10, env=_clean_env(),
         )
         if r.returncode != 0:
             print(f"memory-log: anchor failed: {r.stderr.strip()[:160]}", file=sys.stderr)
@@ -679,14 +1051,187 @@ def anchor() -> int:
     return 0
 
 
-def _anchored_head() -> str | None:
+def _nearest_anchor() -> tuple[str, str] | None:
+    """(commit, anchored_chain_head) for the nearest ancestor of HEAD that
+    carries a substrate-memory note, HEAD itself included; None if no ancestor
+    does.
+
+    v3.8.51 (self-audit P1): the previous lookup consulted ONLY the note on
+    HEAD, so an anchor was invisible from the very next commit and "no anchor"
+    became the normal state everywhere except the instant of anchoring. The
+    release gate hedged around that by requiring the anchor only when a note
+    happened to exist — a trust anchor that fails open on absence, which
+    INTENT.md forbids. Walking to the nearest annotated ancestor makes the
+    anchor durable across ordinary commits, so absence can mean what it should:
+    nobody ever anchored, refuse.
+    """
     try:
-        sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT,
-                             capture_output=True, text=True, timeout=10)
-        if sha.returncode != 0:
+        listed = subprocess.run(["git", "notes", "--ref", "substrate-memory", "list"],
+                                cwd=ROOT, capture_output=True, text=True, timeout=10,
+                                env=_clean_env())
+        if listed.returncode != 0 or not listed.stdout.strip():
             return None
-        r = subprocess.run(["git", "notes", "--ref", "substrate-memory", "show", sha.stdout.strip()],
-                          cwd=ROOT, capture_output=True, text=True, timeout=10)
+        annotated = {ln.split()[1] for ln in listed.stdout.splitlines() if len(ln.split()) == 2}
+        # Bounded walk: a repo with thousands of commits since its last anchor
+        # is not a repo whose anchor we should quietly accept anyway.
+        walk = subprocess.run(["git", "rev-list", "--max-count=5000", "HEAD"],
+                              cwd=ROOT, capture_output=True, text=True, timeout=20,
+                              env=_clean_env())
+        if walk.returncode != 0:
+            return None
+        for commit in walk.stdout.split():
+            if commit not in annotated:
+                continue
+            r = subprocess.run(["git", "notes", "--ref", "substrate-memory", "show", commit],
+                               cwd=ROOT, capture_output=True, text=True, timeout=10,
+                               env=_clean_env())
+            if r.returncode != 0:
+                return None
+            for line in r.stdout.splitlines():
+                if line.startswith("substrate-memory-head:"):
+                    return commit, line.split(":", 1)[1].strip()
+            return None
+    except Exception:
+        return None
+    return None
+
+
+def _require_published_anchor() -> bool:
+    """Strict demands the anchor be on the protected remote, not just local.
+
+    Read from `.substrate/config` through the guarded reader; an unreadable or
+    absent config is NOT "standard" — a trust decision must not be softened by
+    failing to read the file that sets it, so absence here means "do not
+    demand publication" only when the file genuinely says a weaker profile,
+    and an unreadable file is treated as strict.
+    """
+    cfg = ROOT / ".substrate" / "config"
+    raw = _safe_read_text(cfg, ROOT, max_bytes=1 << 20)
+    if raw is None:
+        return cfg.exists()  # present-but-unreadable => strict; absent => not strict
+    return _config_profile(raw) == "strict"
+
+
+def _config_profile(raw: str) -> str:
+    """SUBSTRATE_PROFILE via the CANONICAL parser (v3.8.57, round-39).
+
+    This module used to carry its own. Round 38 found it disagreed with the
+    shell loader on duplicate assignments; the replacement still disagreed on
+    LINE SPLITTING, because `str.splitlines()` breaks on VT/FF/NEL/LS/PS and
+    `while IFS= read -r` does not. Two implementations of one policy rule is the
+    defect — not the particular way they differed — so there is now one, in
+    `_doc_common`, and this is a thin delegation. The fallback RAISES rather
+    than reimplementing: a stripped install must not answer a trust question
+    with a second-best parser.
+    """
+    try:
+        from _doc_common import substrate_profile as _substrate_profile
+    except Exception:  # pragma: no cover - _doc_common is never stripped
+        raise OSError("substrate_profile unavailable — refusing to guess the profile")
+    return _substrate_profile(raw)
+
+
+def _has_origin() -> bool:
+    """Is there an 'origin' remote at all?
+
+    Load-bearing for honesty, not cosmetics: INTENT.md promises the base tier is
+    OFFLINE-COMPLETE, so in a repo with no remote a local-only anchor is the
+    strongest anchor that can exist and must not be reported as a deficiency.
+    Where an origin DOES exist, publishing is achievable and not doing it is
+    worth saying. Same shape as the profile tiers, where a strict-LOCAL repo is
+    not called broken for lacking a GitHub-only CODEOWNERS.
+    """
+    try:
+        r = subprocess.run(["git", "remote"], cwd=ROOT, capture_output=True,
+                           text=True, timeout=10, env=_evidence_env())
+        return r.returncode == 0 and "origin" in r.stdout.split()
+    except Exception:
+        return False
+
+
+def _diagnose_unreachable_remote() -> None:
+    """Say WHY the remote could not be reached when user config is the reason.
+
+    Isolating the evidence calls from user git config (v3.8.54) takes a
+    globally-configured credential helper or `safe.directory` with it. That is
+    the right trade — a remote reachable only through a file outside the
+    repository is not evidence about that repository — but it must not present
+    as an unexplained "local-only". So: retry once under the ordinary sanitized
+    env purely to CLASSIFY the failure. This retry never contributes to a
+    verdict; its only output is the message below.
+    """
+    try:
+        again = subprocess.run(
+            ["git", "ls-remote", "origin", "refs/notes/substrate-memory"],
+            cwd=ROOT, capture_output=True, text=True, timeout=30, env=_clean_env(),
+        )
+    except Exception:
+        return
+    if again.returncode == 0:
+        print("memory-log: origin is reachable ONLY with user/system git config in "
+              "play (a global credential helper, url rewrite, proxy, or "
+              "safe.directory). Config outside this repository chooses which server "
+              "answers, so it cannot be the evidence that the anchor is published. "
+              "Put what the fetch needs in the repository's own config or in the "
+              "environment. Reporting the anchor as unconfirmed.", file=sys.stderr)
+
+
+def _remote_anchor(commit: str) -> str | None:
+    """The anchored head that ORIGIN publishes for `commit`, or None.
+
+    Offline-safe and never fatal: no remote, no note on the remote, or no
+    network all return None, and the caller decides what that means (strict
+    refuses; otherwise it is reported as local-only). Confirmation is taken ONLY
+    from the remote in this process — an existence check against origin, then a
+    forced fetch whose return code is checked — never from a pre-existing local
+    tracking ref, which is writable by the same party the check defends against.
+
+    Every call here runs under `_evidence_env()` (v3.8.54, round-36 P1a): the
+    remote decides this verdict, so nothing outside the repository may choose
+    WHICH remote answers. A user git config selected by `XDG_CONFIG_HOME` or
+    `HOME` could rewrite the origin URL and did.
+    """
+    if not _git_isolates_user_config():
+        print("memory-log: cannot confirm the anchor against origin — this git is "
+              "older than 2.32, so user/system config cannot be kept out of the "
+              "subprocess and the remote that answers could be chosen by a file "
+              "outside the repository. Treating the anchor as unconfirmed.",
+              file=sys.stderr)
+        return None
+    try:
+        remotes = subprocess.run(["git", "remote"], cwd=ROOT, capture_output=True,
+                                 text=True, timeout=10, env=_evidence_env())
+        if remotes.returncode != 0 or "origin" not in remotes.stdout.split():
+            return None
+        # 1. Does ORIGIN actually publish the ref? Asking the remote directly means
+        #    "absent upstream" can never be mistaken for anything else.
+        lsr = subprocess.run(
+            ["git", "ls-remote", "origin", "refs/notes/substrate-memory"],
+            cwd=ROOT, capture_output=True, text=True, timeout=30, env=_evidence_env(),
+        )
+        if lsr.returncode != 0:
+            _diagnose_unreachable_remote()
+            return None
+        if not lsr.stdout.strip():
+            return None
+        # 2. Fetch it, and REQUIRE the fetch to succeed. v3.8.52 ignored this rc and
+        #    then read refs/notes/origin-substrate-memory — a LOCAL ref anyone with
+        #    write access can create. `git notes --ref=origin-substrate-memory add`
+        #    forged a full "verified against origin" pass against an origin with no
+        #    note at all (round-35 P1). `--force` overwrites any pre-planted ref, so
+        #    what is read below is what this fetch just wrote, not what was lying
+        #    there. A trust layer must not be built on an input its adversary writes.
+        fetched = subprocess.run(
+            ["git", "fetch", "--quiet", "--force", "origin",
+             "refs/notes/substrate-memory:refs/notes/origin-substrate-memory"],
+            cwd=ROOT, capture_output=True, text=True, timeout=30, env=_evidence_env(),
+        )
+        if fetched.returncode != 0:
+            return None
+        r = subprocess.run(
+            ["git", "notes", "--ref", "origin-substrate-memory", "show", commit],
+            cwd=ROOT, capture_output=True, text=True, timeout=10, env=_evidence_env(),
+        )
         if r.returncode != 0:
             return None
         for line in r.stdout.splitlines():
@@ -699,32 +1244,106 @@ def _anchored_head() -> str | None:
 
 def verify(check_anchor: bool = False) -> int:
     events = _read_events()
-    prev = ZERO
-    for i, ev in enumerate(events):
-        if "_corrupt" in ev:
-            print(f"memory-log: BREAK at line {i + 1}: not valid JSON", file=sys.stderr)
-            return 1
-        if ev.get("seq") != i:
-            print(f"memory-log: BREAK at seq {i}: out-of-order/missing seq", file=sys.stderr)
-            return 1
-        if ev.get("prev") != prev:
-            print(f"memory-log: BREAK at seq {i}: prev-hash mismatch", file=sys.stderr)
-            return 1
-        expect = _event_hash(prev, ev["seq"], ev["ts"], ev["type"], ev.get("data"))
-        if ev.get("hash") != expect:
-            print(f"memory-log: BREAK at seq {i}: content hash mismatch (tampered)", file=sys.stderr)
-            return 1
-        prev = ev["hash"]
+    brk = _chain_break(events)
+    if brk is not None:
+        print(f"memory-log: {brk}", file=sys.stderr)
+        return 1
+    # v3.9.0: the chain is intact — now require the RECORD it attests to be too.
+    for finding in _record_findings(events):
+        print(f"memory-log: RECORD MISMATCH — {finding}: an append-only entry was "
+              "edited or removed after it was recorded", file=sys.stderr)
+        return 1
     if check_anchor:
-        anchored = _anchored_head()
-        if anchored is None:
-            print("memory-log: no anchor note for HEAD (run `memory_log.py anchor`)", file=sys.stderr)
+        # MEMBERSHIP, not equality (v3.8.51). The old check required the
+        # current head to EQUAL the anchored hash, so every legitimate append
+        # after anchoring reported "history was rewritten" — a false positive
+        # that made the anchor unusable past the instant it was written and
+        # never tested the real threat. The threat is a chain that was
+        # REPLACED wholesale (a different valid chain swapped in — observed
+        # live during the v3.8.50 self-audit) or TRUNCATED past the anchor.
+        # Both leave the anchored hash absent from the chain; growth keeps it
+        # present. The chain walk above already proved every link from the
+        # genesis, so "present" means "this chain descends from the anchored
+        # state". What no unkeyed hash chain can detect is a rewrite of the
+        # suffix AFTER the anchor point — anchor often (every release) and
+        # push the note to a protected remote; that is the documented limit.
+        found = _nearest_anchor()
+        if found is None:
+            print("memory-log: NO ANCHOR in the ancestry of HEAD — the chain cannot be "
+                  "tied to any known-good state. Establish one with "
+                  "`memory_log.py anchor` (a release does this after its gate passes).",
+                  file=sys.stderr)
             return 1
-        if anchored != prev:
-            print("memory-log: ANCHOR MISMATCH — head hash differs from the git-note "
-                  "anchor; history was rewritten since the last anchor", file=sys.stderr)
+        commit, anchored = found
+        seen = {ZERO} | {ev.get("hash") for ev in events}
+        if anchored not in seen:
+            print(f"memory-log: ANCHOR MISMATCH — the head anchored at commit {commit[:12]} "
+                  f"({anchored[:12]}) is not in the current chain: history was replaced "
+                  "or truncated past the anchor", file=sys.stderr)
             return 1
-        print(f"memory-log: chain OK + anchor verified ({len(events)} events)")
+        at = next((ev.get("seq") for ev in events if ev.get("hash") == anchored), "genesis")
+        # LOCAL-ONLY vs REMOTE-CONFIRMED (v3.8.52, round-34 P1). A git note is
+        # mutable local state in the same writable repo as the log, so "a note
+        # exists and agrees" is evidence, not authority. `anchor` is monotonic
+        # now, which blocks the replace-then-re-anchor move, but an adversary
+        # who can also rewrite refs/notes/ directly is still only bounded by a
+        # copy kept somewhere it cannot write. Say which one we actually have
+        # instead of printing the same confident line for both.
+        published = _remote_anchor(commit)
+        if published == anchored:
+            print(f"memory-log: chain OK + anchor verified against origin "
+                  f"({len(events)} events; anchored at commit {commit[:12]}, "
+                  f"chain seq {at})")
+            return 0
+        # CONFLICT means the PUBLISHED anchor does not describe this chain — not
+        # merely that the two notes differ (v3.8.54, found by the round-36 P1b
+        # repro rather than reported). A release whose note push is refused
+        # leaves a local note legitimately AHEAD of the published one, and
+        # calling that "the local note was rewritten" accuses the operator of
+        # tampering for a failure the tooling itself reported. The tamper
+        # signal is membership: if what origin publishes is still in this
+        # chain, the chain descends from the published anchor and the only
+        # thing missing is publication. Reaching such a chain requires genuine
+        # descent, and re-anchoring onto it is still gated by monotonicity and
+        # the --force evidence event, so this narrows the message, not the check.
+        if published is not None and published not in seen:
+            print(f"memory-log: ANCHOR CONFLICT — the note at commit {commit[:12]} "
+                  f"records {anchored[:12]} locally, but what origin publishes "
+                  f"({published[:12]}) is NOT in this chain: the published anchor "
+                  "does not describe this log", file=sys.stderr)
+            return 1
+        ahead = published is not None
+        if _require_published_anchor():
+            print(f"memory-log: ANCHOR NOT PUBLISHED — the note at commit {commit[:12]} "
+                  + (f"has advanced past the published one ({published[:12]}) and the "
+                     "new head was never pushed. " if ahead else
+                     "exists only locally, where whatever can rewrite the log can "
+                     "rewrite it too. ")
+                  + "Strict requires the anchor to be on the protected remote: "
+                  "`git push origin refs/notes/substrate-memory` FROM THIS CLONE (a "
+                  "normal push/clone does not carry refs/notes/*, so no other clone "
+                  "can publish it for you).", file=sys.stderr)
+            return 1
+        if ahead:
+            print(f"memory-log: chain OK + anchor LOCAL AHEAD of origin ({len(events)} "
+                  f"events; anchored at commit {commit[:12]}, chain seq {at}) — origin "
+                  f"still publishes {published[:12]}, which IS in this chain, so the "
+                  "log descends from the published anchor; the newer note was not "
+                  "pushed. Publish FROM THIS CLONE: `git push origin "
+                  "refs/notes/substrate-memory`")
+            return 0
+        if _has_origin():
+            print(f"memory-log: chain OK + anchor present LOCAL-ONLY ({len(events)} "
+                  f"events; anchored at commit {commit[:12]}, chain seq {at}) — an "
+                  "origin exists but does not publish it, so it bounds accident and a "
+                  "single re-anchor, not an adversary with write access to "
+                  "refs/notes/. Publish FROM THIS CLONE: `git push origin "
+                  "refs/notes/substrate-memory`")
+            return 0
+        print(f"memory-log: chain OK + anchor verified LOCAL (no remote) ({len(events)} "
+              f"events; anchored at commit {commit[:12]}, chain seq {at}) — local is "
+              "the strongest anchor an offline repo can hold; it bounds accident and a "
+              "single re-anchor, not an adversary with write access to refs/notes/")
         return 0
     print(f"memory-log: chain OK ({len(events)} events)")
     return 0
@@ -765,10 +1384,20 @@ def main(argv: list[str]) -> int:
     ap_app.add_argument("--message", default="")
     ap_ver = sub.add_parser("verify")
     ap_ver.add_argument("--anchor", action="store_true")
-    sub.add_parser("anchor")
+    ap_anc = sub.add_parser("anchor")
+    ap_anc.add_argument(
+        "--force", action="store_true",
+        help="advance the anchor even though the previously anchored head is no "
+             "longer in the chain (a legitimate log reset). The break is APPENDED "
+             "to the new chain as an `anchor-forced` event, never hidden.")
     ap_tail = sub.add_parser("tail")
     ap_tail.add_argument("n", nargs="?", type=int, default=10)
     sub.add_parser("tasks")
+    ap_rec = sub.add_parser("record", help="record unrecorded entries of an append-only file")
+    ap_rec.add_argument("file", choices=RECORD_FILES)
+    ap_rp = sub.add_parser("release-pass", help="(release gate only) record gates passed")
+    ap_rp.add_argument("--commit", required=True)
+    ap_rp.add_argument("--clean-start", choices=("yes", "no"), required=True)
     ap_sk = sub.add_parser("skill-run")
     ap_sk.add_argument("name")
     ap_sk.add_argument("--note", default="")
@@ -787,13 +1416,22 @@ def main(argv: list[str]) -> int:
                 return 1
         else:
             data = {"message": a.message}
+        if a.type in RESERVED_TYPES:
+            print(f"memory-log: type {a.type!r} is reserved — it is evidence other gates "
+                  "trust, written only by its own command (record / release-pass / "
+                  "anchor --force)", file=sys.stderr)
+            return 2
         return append(a.type, data)
+    if a.cmd == "record":
+        return record(a.file)
+    if a.cmd == "release-pass":
+        return release_pass(a.commit, a.clean_start == "yes")
     if a.cmd == "skill-run":
         return skill_run(a.name, a.result, a.note, verify=a.verify)
     if a.cmd == "verify":
         return verify(check_anchor=a.anchor)
     if a.cmd == "anchor":
-        return anchor()
+        return anchor(force=a.force)
     if a.cmd == "tail":
         return tail(a.n)
     if a.cmd == "tasks":

@@ -42,7 +42,29 @@ bash /path/to/agent_substrate_kit_v3/bootstrap.sh --profile standard --lang auto
 | 4-field bug-fix commit protocol + postmortem-per-bugfix hooks | — | — | yes |
 | Extras (calibration, stale-phrases, license headers) | — | — | yes |
 
-## Current status (v3.8.50)
+## Current status (v3.9.1)
+
+**v3.9.1 — fixes found in consumer repos.** Every tree walker skips a nested
+session worktree (`.claude/worktrees/<name>`) that git confirms, and skips
+nothing when git cannot answer. The leak scanner is now `check_leaks.py`: its
+old name matched the kit's own read deny rule. The bus reader lists claims it
+cannot parse instead of reporting none open, `./manage.sh bus --digest` shows
+open claims and recent entries, and bootstrap seeds a bus with a union merge
+rule. Upgrades keep a grown bus and a project's `tests/conftest_project.py`.
+The pytest watchdog dumps to `.pytest_cache/watchdog-dump.txt`. Eleven lessons
+from those repos are in `docs/lessons.jsonl`, each with a test.
+
+**Memory that is delivered, not just kept.** A fresh session is told the
+operator's goals (`docs/INTENT.md` objectives), the lesson from each recent
+HISTORY entry, and the rules in `docs/lessons.jsonl` whose triggers match what
+just changed. Each lesson is bound to a test or gate that must still exist.
+HISTORY entries carry outcome labels; `shipped-green` needs release-gate
+evidence. The memory chain attests HISTORY, REJECTED and lessons entry by
+entry. `./manage.sh recall "<question>"` returns ranked doc sections under a
+token budget, and `./manage.sh prove` removes each registered guard in a copy of
+the tree and requires its tests to fail, in the release gate too. Commits stay
+fast: the full suite runs at push, in `check`, CI and release. CI measures
+sandbox containment instead of skipping it.
 
 **Local-first, remote-expandable.** The base is offline-complete (memory,
 hooks, validators, evals, sandbox, release bundle) — no GitHub/CI/token/remote

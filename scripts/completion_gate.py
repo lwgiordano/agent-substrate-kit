@@ -266,10 +266,13 @@ def main() -> int:
 
 
 def _strict_profile() -> bool:  # pragma: no cover — used by the v3.8.4 block path
+    # v3.8.57 (round-39): one canonical reader. Codex reported command_policy;
+    # the sweep it prompted found this one too, with the same first-match,
+    # splitlines() shape that disagrees with the shell loader on duplicate
+    # assignments and on control-character line breaks.
     try:
-        for line in (_safe_cfg_text() or "").splitlines():
-            if line.strip().startswith("SUBSTRATE_PROFILE="):
-                return line.split("=", 1)[1].strip().strip('"') == "strict"
+        from _doc_common import substrate_profile as _substrate_profile
+        return _substrate_profile(_safe_cfg_text() or "") == "strict"
     except Exception:
         pass
     return False

@@ -3,7 +3,7 @@ purpose: Upgrade provenance, authority floors, transactions, and postconditions.
 asserts:
   - scripts/substrate_upgrade.py::_exec_module_from_source
   - scripts/substrate_upgrade.py::_apply_capability_floor
-last_human_reviewed: 2026-08-28
+last_human_reviewed: 2026-09-28
 covers:
   - bootstrap.sh
   - manage.sh
@@ -96,6 +96,8 @@ answers. Render values come from that snapshot, not from agent-writable install
 provenance. Profile, sandbox, and remote-governance floors never move downward;
 language and runner come from validated live config.
 
+A profile RAISE rewrites every `SUBSTRATE_PROFILE` assignment in the config, not the first one. The loader takes the LAST assignment, so a first-match rewrite left a later duplicate winning and the raise silently not in force (v3.8.57). See [policy and governance](04_policy_governance.md) for the one canonical reader every consumer of that key uses.
+
 Authority is re-read before mutation and after restore. A concurrent raise is
 preserved and makes the upgrade fail so the operator can rerun with a consistent
 render. `_apply_capability_floor` reconciles only upward.
@@ -111,6 +113,19 @@ No user-space check can eliminate the final instruction-scale interval against a
 non-cooperating process that already has concurrent write and execute access.
 The postcondition converts detected changes into failure and leaves raised locks
 intact instead of claiming a consistent apply.
+
+## Project-owned files the upgrade keeps
+
+Some installed files are the project's to grow. `AGENT_BUS.md` is append-only
+coordination state and `tests/conftest_project.py` holds the consumer's own test
+fixtures (the substrate-owned `tests/conftest.py` loads it). Both are in
+`PRESERVE_FILES`: excluded from drift and restored around `bootstrap --force`.
+`conftest_project.py` is also in `_BASELINE_EXCLUDE`, so editing it is never
+reported as substrate drift. Before v3.9.1 the bus was baselined but not
+preserved, so any consumer whose bus had grown saw upgrade refuse on
+"locally modified" drift. Nested session worktrees are skipped by the baseline
+walk and the coverage re-derivation (see
+[agent context governance](07_agent_context_governance.md)).
 
 Render authority reads of the frozen locks refuse the upgrade when a lock is
 present but unreadable or invalid; only a genuinely absent lock yields the

@@ -45,7 +45,7 @@ def plan(mode):
     # interpreter — consistent with manage.sh / release_gate tool resolution.
     subpy=ROOT/'.substrate'/'venv'/'bin'/'python'
     py=str(subpy) if subpy.exists() else sys.executable
-    quick=[[py,'scripts/substrate_doctor.py'],[py,'scripts/update_manifest.py','--check'],[py,'scripts/check_doc_drift.py','--strict'],[py,'scripts/check_agent_harness.py'],[py,'scripts/check_secrets.py'],[py,'scripts/check_history_sha.py']]
+    quick=[[py,'scripts/substrate_doctor.py'],[py,'scripts/update_manifest.py','--check'],[py,'scripts/check_doc_drift.py','--strict'],[py,'scripts/check_agent_harness.py'],[py,'scripts/check_leaks.py'],[py,'scripts/check_history_sha.py']]
     if mode=='quick': return quick
     full=list(quick)
     pt=_subvenv_bin('pytest'); pc=_subvenv_bin('pre-commit')

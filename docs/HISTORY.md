@@ -390,3 +390,10 @@ This file is `merge=union` in `.gitattributes` so concurrent branch entries comb
 **Knowledge:** A file the kit ships is judged by the consumer's gates, not the kit's: the kit linted its tests under its own excludes and never saw the consumer's view. The new test lints exactly the shipped set with --isolated. 29 lessons were confirmed at 3.9.2 after their evidence re-ran green in the full check.
 **Outcome:** shipped-green
 
+## 2026-09-29T01:07:42Z — NO_SESSION — f3db9af
+**Summary:** v3.9.3: HISTORY outcome labels police claims, not silence — a missing label reads as unverified and is reported, not failed; a near-miss label and a second label are drift; shipped-green still needs release-gate proof.
+**Files:** scripts/_doc_common.py,scripts/check_history_sha.py,tests/test_hook_scripts.py,tests/guards.json,docs/lessons.jsonl,docs/REJECTED.md,docs/knowledge/09_deterministic_validators.md,docs/knowledge/10_lessons_recall.md
+**Intent:** The v3.9.0 rule failed every unlabelled entry after the first labelled one; in domain-lookup a union merge put an old-tool entry below a labelled one and nothing appended could clear it. The operator chose option 3 of five (police claims, not silence) after a plain-English comparison.
+**Knowledge:** A rule re-checked over merged append-only history must relate an entry only to what its own author had: the label rule tied entries from different branches together and deadlocked, while reverts/supersedes and Correction-of, which name only what their author already had, survive a union merge. Relaxing a gate opens the near-miss hole the strict rule used to cover — the security-auditor found that a line a human reads as a label but the regex misses would show a success the gate reads as silence; it is now drift. The first release-gate run failed one test when the container's commit-signing service timed out inside a fixture's git commit; the same tree had just passed the full check, and the re-run passed.
+**Outcome:** shipped-green
+

@@ -12172,7 +12172,7 @@ def _run_history_sha(tmp_path, entries):
         for ts, sha in entries
     )
     (repo / "docs" / "HISTORY.md").write_text(body, encoding="utf-8")
-    for name in ("check_history_sha.py", "_doc_common.py"):
+    for name in ("check_history_sha.py", "_doc_common.py", "_text_safety.py"):
         (repo / "scripts" / name).write_text(
             (SCRIPTS / name).read_text(encoding="utf-8"), encoding="utf-8"
         )
@@ -12437,7 +12437,7 @@ def _shallow_clone_of(tmp_path):
     subprocess.run(["git", "init", "-q", str(src)], check=True, capture_output=True)
     run("config", "user.email", "t@example.invalid"); run("config", "user.name", "t")
     (src / "docs").mkdir(); (src / "scripts").mkdir()
-    for name in ("check_history_sha.py", "_doc_common.py"):
+    for name in ("check_history_sha.py", "_doc_common.py", "_text_safety.py"):
         (src / "scripts" / name).write_text((SCRIPTS / name).read_text(encoding="utf-8"), encoding="utf-8")
     shas = []
     for i in range(3):
@@ -13947,11 +13947,11 @@ def test_outcome_refs_and_labels_validated(tmp_path) -> None:
     assert r.returncode == 1 and "its own **Outcome:**" in r.stderr
 
 
-def test_history_gate_outcome_is_monotonic_and_evidence_bound(tmp_path) -> None:
-    """The validator re-applies the write-time rule, so HISTORY cannot be
-    hand-edited around it: after the first labelled entry every entry needs a
-    label, and a hand-written shipped-green without a release-pass is drift.
-    Entries from before the field existed stay valid."""
+def test_history_gate_outcome_claims_are_evidence_bound(tmp_path) -> None:
+    """The validator re-applies the write-time rule to every label, so HISTORY cannot
+    be hand-edited around it: a hand-written shipped-green without a release-pass is
+    drift, and so is a second label. An entry with no label claims nothing: it reads
+    as unverified and is reported, not failed (v3.9.3)."""
     td, g, m, run = _record_repo(tmp_path)
     sha = g("rev-parse", "--short", "HEAD").stdout.strip()
     h = td / "docs" / "HISTORY.md"
@@ -13966,7 +13966,13 @@ def test_history_gate_outcome_is_monotonic_and_evidence_bound(tmp_path) -> None:
     assert r.returncode == 0 and "1 outcome-labelled" in r.stdout, r.stdout + r.stderr
     h.write_text("# H\n\n" + old + labelled + old.replace("01T", "03T"), encoding="utf-8")
     r = run("check_history_sha.py")
-    assert r.returncode == 1 and "needs exactly one" in r.stderr, r.stdout + r.stderr
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "1 entry after the first labelled one carries no **Outcome:**" in r.stdout
+    assert "reads as unverified" in r.stdout
+    twice = labelled.replace("**Outcome:** wip", "**Outcome:** wip\n**Outcome:** shipped-green")
+    h.write_text("# H\n\n" + old + twice, encoding="utf-8")
+    r = run("check_history_sha.py")
+    assert r.returncode == 1 and "at most one outcome claim" in r.stderr, r.stdout + r.stderr
     forged = labelled.replace("**Outcome:** wip", "**Outcome:** shipped-green")
     h.write_text("# H\n\n" + old + forged, encoding="utf-8")
     # No chain in this checkout (as in CI: .substrate/memory/ is gitignored):
@@ -14789,3 +14795,109 @@ def test_nested_worktrees_ignores_an_inherited_git_dir(tmp_path, monkeypatch) ->
     assert ss.nested_worktrees(root) == ()
     monkeypatch.setenv("GIT_DIR", str(other / ".git"))
     assert ss.nested_worktrees(root) == (), "an inherited GIT_DIR chose the skip set"
+
+
+def test_tests_shipped_to_consumers_pass_the_consumers_ruff_rules() -> None:
+    """v3.9.2: bootstrap copies every tests/*.py except the strip list into the consumer's
+    tests/, and a consumer may lint tests/ (domain-lookup does). Three shipped files failed
+    its ruff rules after the upgrade to 3.9.1, so the upgrade landed red. Lint exactly the
+    shipped set with the rules the kit's own pyproject selects, ignoring any local config."""
+    import shutil
+    ruff = shutil.which("ruff") or next(
+        (str(p) for p in (SCRIPTS.parent / ".venv/bin/ruff",
+                          SCRIPTS.parent / ".substrate/venv/bin/ruff") if p.is_file()), None)
+    if ruff is None:
+        pytest.skip("ruff not installed")
+    strip = subprocess.run([sys.executable, "-I", str(SCRIPTS / "_substrate_surfaces.py"),
+                            "--consumer-strip-tests"], capture_output=True, text=True,
+                           timeout=60, check=True).stdout.split()
+    assert strip, "strip list is empty; the shipped set would be the whole suite"
+    shipped = sorted(str(p) for p in (SCRIPTS.parent / "tests").glob("*.py")
+                     if p.name not in strip)
+    assert any(s.endswith("conftest.py") for s in shipped)
+    r = subprocess.run([ruff, "check", "--isolated", "--no-cache", "--line-length", "100",
+                        "--target-version", "py311", "--select", "E,F,I,B,UP,SIM,C4",
+                        *shipped], capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-500:]
+
+
+def test_history_entry_outcome_never_reads_silence_as_success() -> None:
+    """v3.9.3: the one reader of what a HISTORY entry claims. No label is `unverified`,
+    never success; two labels are no answer at all."""
+    from _doc_common import history_entry_outcome
+    assert history_entry_outcome("**Summary:** s\n") == "unverified"
+    assert history_entry_outcome("**Summary:** shipped-green, honest\n") == "unverified"
+    assert history_entry_outcome("**Outcome:** wip\n") == "wip"
+    assert history_entry_outcome("**Outcome:** shipped-green\n") == "shipped-green"
+    assert history_entry_outcome("**Outcome:** wip\n**Outcome:** shipped-green\n") is None
+
+
+def test_history_gate_survives_a_union_merge_of_old_and_new_tool_entries(tmp_path) -> None:
+    """v3.9.3, found in domain-lookup: branch A upgraded and appended a labelled entry;
+    branch B, forked before the upgrade, appended an entry with the old tool (no label)
+    and one that `reverts:` its own earlier entry. After the union merge B's unlabelled
+    entry sits BELOW A's labelled one, which v3.9.0 failed with no way to clear it
+    (entries are never edited). It now passes with a warning. The order-bound rules
+    (reverts/supersedes and Correction-of name only what their author already had)
+    survive the same merge, because a union merge keeps each side's own order."""
+    td, g, m, run = _record_repo(tmp_path)
+    (td / ".gitattributes").write_text("docs/HISTORY.md merge=union\n", encoding="utf-8")
+    h = td / "docs" / "HISTORY.md"
+    h.write_text("# H\n\n", encoding="utf-8")
+    g("add", "-A")
+    g("commit", "-q", "-m", "base")
+    base = g("rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+    sha = g("rev-parse", "--short", "HEAD").stdout.strip()
+
+    def entry(day, outcome=None, of=sha):
+        e = f"## 2099-01-{day:02d}T00:00:00Z — X — {of}\n**Summary:** day {day}\n"
+        return e + (f"**Outcome:** {outcome}\n" if outcome else "") + "\n"
+
+    g("checkout", "-q", "-b", "old-tool")
+    (td / "work.txt").write_text("w\n", encoding="utf-8")
+    g("add", "work.txt")
+    g("commit", "-q", "-m", "old-tool work")
+    work = g("rev-parse", "--short", "HEAD").stdout.strip()
+    # Only this branch documents `work`, so the revert holds only if its target
+    # stays ABOVE it after the merge.
+    h.write_text(h.read_text(encoding="utf-8") + entry(3, of=work)
+                 + entry(4, f"reverts:{work}", of=work), encoding="utf-8")
+    g("commit", "-q", "-am", "old tool")
+    g("checkout", "-q", base)
+    h.write_text(h.read_text(encoding="utf-8") + entry(2, "wip"), encoding="utf-8")
+    g("commit", "-q", "-am", "upgraded")
+    merged = g("merge", "-q", "--no-edit", "old-tool")
+    assert merged.returncode == 0, merged.stdout + merged.stderr
+    text = h.read_text(encoding="utf-8")
+    assert text.index("day 2") < text.index("day 3"), "fixture must interleave: labelled first"
+    r = run("check_history_sha.py")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "carries no **Outcome:**" in r.stdout and "2099-01-03T00:00:00Z" in r.stdout
+
+
+@pytest.mark.parametrize("line", [
+    "**outcome:** shipped-green",
+    "- **Outcome:** shipped-green",
+    "> **Outcome:** shipped-green",
+    " **Outcome:** shipped-green",
+    "**Outcome**: shipped-green",
+    "**Outcome:** shipped-green (ok)",
+    "Outcome: shipped-green",
+    "**\u041eutcome:** shipped-green",
+    "**Outcome\uff1a** shipped-green",
+])
+def test_history_gate_fails_a_near_miss_outcome_label(tmp_path, line) -> None:
+    """v3.9.3 (security-auditor WARN): with a missing label read as `unverified`, a line
+    a human reads as a label but the gate's pattern misses would show a success claim
+    the machine treats as silence. Every such line is drift, in any entry."""
+    from _doc_common import history_malformed_outcome_lines
+    assert history_malformed_outcome_lines(f"**Summary:** s\n{line}\n"), line
+    assert not history_malformed_outcome_lines("**Summary:** the outcome was fine\n"
+                                               "**Outcome:** wip\n")
+    td, g, m, run = _record_repo(tmp_path)
+    sha = g("rev-parse", "--short", "HEAD").stdout.strip()
+    (td / "docs" / "HISTORY.md").write_text(
+        f"# H\n\n## 2099-01-01T00:00:00Z — X — {sha}\n**Summary:** s\n{line}\n\n",
+        encoding="utf-8")
+    r = run("check_history_sha.py")
+    assert r.returncode == 1 and "malformed outcome line" in r.stderr, r.stdout + r.stderr

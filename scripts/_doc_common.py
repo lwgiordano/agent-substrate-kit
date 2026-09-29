@@ -1180,6 +1180,35 @@ HISTORY_OUTCOME_REF_RE = re.compile(r"^(?:reverts|supersedes):([0-9a-f]{7,40})$"
 HISTORY_OUTCOME_LINE_RE = re.compile(r"^\*\*Outcome:\*\*\s*(\S*)\s*$", re.MULTILINE)
 
 
+def history_entry_outcome(body: str) -> str | None:
+    """The outcome a HISTORY entry CLAIMS (v3.9.3). Its one **Outcome:** label, or
+    `unverified` when it has none: an entry written by hand or by a pre-3.9 tool claims
+    nothing, so no reader may take its silence for success. None when it carries more
+    than one label, which is a forgery vector (a second `shipped-green` smuggled past
+    the first), never a choice between them. Every reader of outcomes goes through here."""
+    vals = HISTORY_OUTCOME_LINE_RE.findall(body)
+    if not vals:
+        return "unverified"
+    return vals[0] if len(vals) == 1 else None
+
+
+# A line a human reads as an outcome label. Matched on the confusable-folded line,
+# so case, markup, a Cyrillic `О` or a fullwidth colon cannot hide one.
+_OUTCOME_LIKE_RE = re.compile(r"^\W*outcome\W*:")
+
+
+def history_malformed_outcome_lines(body: str) -> list[str]:
+    """Lines of a HISTORY entry that LOOK like an outcome label but are not one (v3.9.3).
+    A missing label reads as `unverified`, so `**outcome:** shipped-green` or
+    `- **Outcome:** shipped-green` would show a human a success claim that the gate reads
+    as silence. Such a line is drift, never a warning: write exactly
+    `**Outcome:** <label>`."""
+    import _text_safety  # lazy: detection-only fold; ships in every profile
+    return [ln for ln in body.splitlines()
+            if _OUTCOME_LIKE_RE.match(_text_safety.confusables_fold(ln))
+            and not HISTORY_OUTCOME_LINE_RE.fullmatch(ln)]
+
+
 def history_outcome_problem(outcome: str, entry_sha: str, earlier_shas: list[str],
                             root: Path) -> str | None:
     """Why `outcome` is not a valid label for an entry documenting `entry_sha`,

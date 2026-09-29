@@ -35,7 +35,12 @@ def test_session_recovery_skill_exists() -> None:
 
 
 def test_hook_scripts_installed() -> None:
-    for s in ("session_handoff.py", "todo_state_hook.py", "lint_on_write.py", "check_exfil_guard.py"):
+    for s in (
+        "session_handoff.py",
+        "todo_state_hook.py",
+        "lint_on_write.py",
+        "check_exfil_guard.py",
+    ):
         assert Path("scripts", s).exists(), s
 
 
@@ -47,7 +52,12 @@ def test_settings_json_wires_lifecycle_and_guard_hooks() -> None:
     for event in ("PreToolUse", "PreCompact", "SessionEnd", "SessionStart", "PostToolUse"):
         assert event in hooks, f"missing {event} hook"
     flat = json.dumps(hooks)
-    for script in ("session_handoff.py", "todo_state_hook.py", "lint_on_write.py", "check_exfil_guard.py"):
+    for script in (
+        "session_handoff.py",
+        "todo_state_hook.py",
+        "lint_on_write.py",
+        "check_exfil_guard.py",
+    ):
         assert script in flat, f"{script} not wired"
     # Hooks must use absolute paths via $CLAUDE_PROJECT_DIR (Claude hook
     # security guidance) and carry explicit timeouts.

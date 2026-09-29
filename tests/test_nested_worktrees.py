@@ -2,10 +2,11 @@
 at it, and only at it.
 
 Ported in v3.9.1 from the consumer that found and fixed it (domain-lookup a350bd4,
-where three live sessions produced 369 false coverage gaps). The Claude app checks each session out at .claude/worktrees/<name>/, inside the main checkout
-and git-ignored through .git/info/exclude. check-doc-drift and check-agent-harness walk the file
-system, so from the main checkout they read every session's copy of the repository: drift
-reported each copied module as a COVERAGE GAP, the harness scanner blocked on the copied
+where three live sessions produced 369 false coverage gaps). The Claude app checks each
+session out at .claude/worktrees/<name>/, inside the main checkout and git-ignored through
+.git/info/exclude. check-doc-drift and check-agent-harness walk the file system, so from
+the main checkout they read every session's copy of the repository: drift reported each
+copied module as a COVERAGE GAP, the harness scanner blocked on the copied
 scripts/harness_patterns.json, and no commit from the main checkout could pass (2026-09-27).
 
 A nested worktree's files belong to that worktree. Its own hooks check them when it commits, and

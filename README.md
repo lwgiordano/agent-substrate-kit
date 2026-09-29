@@ -42,7 +42,15 @@ bash /path/to/agent_substrate_kit_v3/bootstrap.sh --profile standard --lang auto
 | 4-field bug-fix commit protocol + postmortem-per-bugfix hooks | — | — | yes |
 | Extras (calibration, stale-phrases, license headers) | — | — | yes |
 
-## Current status (v3.9.1)
+## Current status (v3.9.3)
+
+**v3.9.3** — HISTORY outcome labels police claims, not silence. An entry with no
+label reads as `unverified` and is reported, not failed, so merging a branch whose
+entries were written by an older tool can no longer leave HISTORY permanently red.
+`shipped-green` still needs release-gate proof.
+
+**v3.9.2** — the test files the kit copies into a consumer's `tests/` pass the
+consumer's ruff rules.
 
 **v3.9.1 — fixes found in consumer repos.** Every tree walker skips a nested
 session worktree (`.claude/worktrees/<name>`) that git confirms, and skips

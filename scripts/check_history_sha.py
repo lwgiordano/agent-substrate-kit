@@ -77,6 +77,8 @@ except Exception:  # pragma: no cover - stripped install
 # imported, not restated. No fallback: a validator that cannot load the rule must
 # not pass labelled entries unchecked.
 from _doc_common import HISTORY_OUTCOME_LINE_RE as _OUTCOME_LINE_RE  # noqa: E402
+from _doc_common import history_entry_outcome as _entry_outcome  # noqa: E402
+from _doc_common import history_malformed_outcome_lines as _malformed  # noqa: E402
 from _doc_common import history_outcome_problem as _outcome_problem  # noqa: E402
 
 # `## <ts> — <token> — <sha|WORKING|Correction...>` with em-dash
@@ -392,25 +394,43 @@ def main() -> int:
         if args.verbose:
             print(f"  {ts} {sha} ok")
 
-    # OUTCOME LABELS (v3.9.0). Monotonic, so the 61 entries written before the
-    # field existed stay valid and nothing after it can opt out: once ANY entry
-    # carries **Outcome:**, every later entry must carry exactly one, and each
-    # must pass the same rule append_history applied when it was written — so a
-    # hand-appended `shipped-green` with no release-pass behind it is drift.
+    # OUTCOME LABELS (v3.9.0; v3.9.3 polices claims, not silence). Every label an
+    # entry carries must pass the rule append_history applied when it was written,
+    # so a hand-appended `shipped-green` with no release-pass behind it is drift, and
+    # an entry with two labels is drift. An entry with NO label claims nothing and
+    # reads as `unverified` (history_entry_outcome); it is reported, not failed.
+    # v3.9.0 failed it once any earlier entry was labelled, and that rule could not
+    # survive a union merge: a branch forked before the upgrade appends entries
+    # written by the old tool BELOW the first labelled one, HISTORY entries may never
+    # be edited, and nothing appended could clear it (domain-lookup, 2026-09-28).
+    # Leaving a label off gains nothing: only a label can claim success.
+    # append_history still writes one on every entry.
     n_outcome = n_unverifiable = 0
+    unlabelled: list[str] = []
     bodies = [text[m.end():(headers[i + 1].start() if i + 1 < len(headers) else len(text))]
               for i, m in enumerate(headers)]
+    # Every entry, labelled or not, before the first label or after: a near-miss
+    # label shows a reader a claim the gate would otherwise read as silence.
+    for i, b in enumerate(bodies):
+        bad = _malformed(b)
+        if bad:
+            findings.append(
+                f"{headers[i].group('ts')}: malformed outcome line {bad[0].strip()[:80]!r} — "
+                "write exactly `**Outcome:** <label>`")
     first = next((i for i, b in enumerate(bodies) if _OUTCOME_LINE_RE.search(b)), None)
     if first is not None:
         for i in range(first, len(headers)):
             ts = headers[i].group("ts")
-            vals = _OUTCOME_LINE_RE.findall(bodies[i])
-            if len(vals) != 1:
+            claim = _entry_outcome(bodies[i])
+            if claim is None:
                 findings.append(
-                    f"{ts}: {'no' if not vals else len(vals)} **Outcome:** line(s) — every "
-                    "entry after the first labelled one needs exactly one "
-                    "(append_history --outcome ...)")
+                    f"{ts}: {len(_OUTCOME_LINE_RE.findall(bodies[i]))} **Outcome:** lines — "
+                    "an entry makes at most one outcome claim")
                 continue
+            if not _OUTCOME_LINE_RE.search(bodies[i]):
+                unlabelled.append(ts)
+                continue
+            vals = [claim]
             # The chain lives in .substrate/memory/, which is gitignored: a CI
             # checkout or a fresh clone has NONE, so shipped-green evidence can
             # only be judged in the producing clone (append_history already did,
@@ -446,6 +466,13 @@ def main() -> int:
         f"({n_sha} sha-resolved / {n_working} bootstrap / "
         f"{n_correction} correction; {n_outcome} outcome-labelled)."
     )
+    if unlabelled:
+        print(f"check-history-sha: WARNING — {len(unlabelled)} entr"
+              f"{'y' if len(unlabelled) == 1 else 'ies'} after the first labelled one "
+              f"carr{'ies' if len(unlabelled) == 1 else 'y'} no **Outcome:** line and "
+              f"read{'s' if len(unlabelled) == 1 else ''} as unverified "
+              f"({', '.join(unlabelled[:3])}{'…' if len(unlabelled) > 3 else ''}); "
+              "append_history labels every entry it writes.")
     if n_unverifiable:
         print(f"check-history-sha: {n_unverifiable} shipped-green label(s) NOT verifiable in "
               "this checkout — no memory chain here (.substrate/memory/ is gitignored); "

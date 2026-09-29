@@ -365,14 +365,15 @@
       "why": "a field smuggles a second **Outcome:** shipped-green line past the evidence check"
     },
     {
-      "id": "history-gate-outcome-monotonic",
-      "file": "scripts/check_history_sha.py",
-      "find": "if len(vals) != 1:",
-      "replace": "if len(vals) > 1:",
+      "id": "history-gate-one-claim-per-entry",
+      "file": "scripts/_doc_common.py",
+      "find": "    return vals[0] if len(vals) == 1 else None\n",
+      "replace": "    return vals[0]\n",
       "tests": [
-        "tests/test_hook_scripts.py::test_history_gate_outcome_is_monotonic_and_evidence_bound"
+        "tests/test_hook_scripts.py::test_history_gate_outcome_claims_are_evidence_bound",
+        "tests/test_hook_scripts.py::test_history_entry_outcome_never_reads_silence_as_success"
       ],
-      "why": "entries after the first labelled one can silently drop the outcome"
+      "why": "a second **Outcome:** shipped-green line rides past the first label"
     },
     {
       "id": "history-gate-outcome-evidence",
@@ -380,7 +381,7 @@
       "find": "problem = _outcome_problem(vals[0], entry_shas[i], entry_shas[:i], _REPO)",
       "replace": "problem = None",
       "tests": [
-        "tests/test_hook_scripts.py::test_history_gate_outcome_is_monotonic_and_evidence_bound"
+        "tests/test_hook_scripts.py::test_history_gate_outcome_claims_are_evidence_bound"
       ],
       "why": "a hand-edited shipped-green with no release-pass behind it passes the gate"
     },
@@ -390,7 +391,7 @@
       "find": "            if vals[0] == \"shipped-green\" and not os.path.lexists(",
       "replace": "            if vals[0] == \"shipped-green\" or not os.path.lexists(",
       "tests": [
-        "tests/test_hook_scripts.py::test_history_gate_outcome_is_monotonic_and_evidence_bound"
+        "tests/test_hook_scripts.py::test_history_gate_outcome_claims_are_evidence_bound"
       ],
       "why": "a checkout WITH a chain skips the shipped-green evidence check as if it had none"
     },
@@ -861,6 +862,36 @@
         "tests/test_hook_scripts.py::test_tests_shipped_to_consumers_pass_the_consumers_ruff_rules"
       ],
       "why": "a kit test file copied into a consumer that lints tests/ turns its upgrade red"
+    },
+    {
+      "id": "history-silence-is-unverified",
+      "file": "scripts/_doc_common.py",
+      "find": "    if not vals:\n        return \"unverified\"\n",
+      "replace": "    if not vals:\n        return \"shipped-green\"\n",
+      "tests": [
+        "tests/test_hook_scripts.py::test_history_entry_outcome_never_reads_silence_as_success"
+      ],
+      "why": "an entry that states no outcome reads as a success"
+    },
+    {
+      "id": "history-unlabelled-not-drift",
+      "file": "scripts/check_history_sha.py",
+      "find": "            if not _OUTCOME_LINE_RE.search(bodies[i]):\n                unlabelled.append(ts)\n                continue\n",
+      "replace": "            if not _OUTCOME_LINE_RE.search(bodies[i]):\n                findings.append(f\"{ts}: no **Outcome:** line\")\n                continue\n",
+      "tests": [
+        "tests/test_hook_scripts.py::test_history_gate_survives_a_union_merge_of_old_and_new_tool_entries"
+      ],
+      "why": "a union merge of an old-tool branch leaves HISTORY permanently red"
+    },
+    {
+      "id": "history-near-miss-label-is-drift",
+      "file": "scripts/check_history_sha.py",
+      "find": "        bad = _malformed(b)\n",
+      "replace": "        bad = []\n",
+      "tests": [
+        "tests/test_hook_scripts.py::test_history_gate_fails_a_near_miss_outcome_label"
+      ],
+      "why": "`**outcome:** shipped-green` shows a reader a success claim the gate reads as silence"
     }
   ]
 }

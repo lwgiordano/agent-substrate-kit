@@ -1,6 +1,6 @@
 ---
 purpose: Lessons with evidence, the record the chain attests, outcome labels, and recall.
-last_human_reviewed: 2026-09-23
+last_human_reviewed: 2026-09-29
 covers:
   - scripts/check_lessons.py
   - scripts/recall.py
@@ -87,10 +87,22 @@ anchor covers the evidence. `memory_log` re-derives HEAD and refuses if it
 moved during the run. The event says the gates passed on that commit;
 publication of the anchor is reported separately.
 
-`check_history_sha.py` re-applies the write-time rule. Once any entry carries
-an outcome, every later entry needs exactly one, and each must pass the same
-evidence check, so a hand-edited `shipped-green` is drift. Entries written
-before the field existed stay valid. The chain is gitignored, so a CI checkout
+`check_history_sha.py` re-applies the write-time rule to every label an entry
+carries, so a hand-edited `shipped-green` is drift, and so is an entry with two
+labels. It polices claims, not silence (v3.9.3): an entry with no label claims
+nothing and reads as `unverified` through `_doc_common.history_entry_outcome`,
+the one reader of outcomes, and the gate reports it without failing. A line that
+looks like a label but is not one (`**outcome:** shipped-green`, a list marker, a
+Cyrillic `О`, checked on the confusable-folded line) is drift in any entry, since a
+human would read a claim the gate reads as silence. v3.9.0
+failed every unlabelled entry after the first labelled one, and that could not
+survive a union merge: a branch forked before an upgrade appends old-tool entries
+below the first labelled one, entries are never edited, and nothing appended
+could clear it (domain-lookup, 2026-09-28). Leaving a label off gains nothing,
+since only a label can claim success; `append_history` still writes one on every
+entry. The order-bound rules (`reverts:`/`supersedes:` and `Correction-of-`
+name only an entry their author already had) survive the same merge, because a
+union merge keeps each side's own order; a test merges two branches to show it. The chain is gitignored, so a CI checkout
 or fresh clone has none: there `shipped-green` is reported as not verifiable in
 this checkout (the producing clone judged it at write time), never as verified.
 A chain that is present but broken or linked is still judged, and fails.

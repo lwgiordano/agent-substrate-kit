@@ -418,3 +418,10 @@ This file is `merge=union` in `.gitattributes` so concurrent branch entries comb
 **Knowledge:** Unchanged whole committed entries may be reported as imported-unverified, never locally verified. New, modified, or excess duplicate success claims still need local clean-start proof. Check exit 0; evals 57/57 blocked and 0/14 FP; eight guard-removal proofs and fresh consumer tests passed. No release-pass was minted.
 **Outcome:** unverified
 
+## 2026-10-02T22:04:48Z — NO_SESSION — a51c3e7
+**Summary:** Add bounded current task briefs with current Git identity and source-backed project context.
+**Files:** scripts/task_brief.py,scripts/_task_evidence.py,scripts/recall.py,scripts/session_handoff.py,manage.sh,templates/manage.sh.template,tests/test_task_brief.py,tests/guards.json,docs/knowledge/10_lessons_recall.md
+**Intent:** Deliver the first approved task-evidence command without automatic context injection or target command execution.
+**Knowledge:** Structured report boundaries need same-read provenance and explicit missing-source diagnostics. Context sanitization is not terminal sanitization; normalize and suppress recognized secret fields before selector clipping. Permission bits can change check behavior without changing bytes. Full check exited 0, evals 57/57 blocked and 0/14 FP, 13 guard-removal probes discriminating. This entry remains unverified because no packaged release-pass was created.
+**Outcome:** unverified
+

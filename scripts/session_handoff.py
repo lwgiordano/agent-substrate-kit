@@ -278,12 +278,16 @@ _ROLE_PREFIX = re.compile(
 _STRIPPED_HISTORY = "[history line stripped: instruction-like or command-like directive]"
 
 
-def _safe_history_line(text: str, cap: int = _HISTORY_LINE_CHARS) -> str:
+def _safe_history_line(text: str, cap: int = _HISTORY_LINE_CHARS,
+                       *, discard_secrets: bool = False) -> str:
     text = _INVISIBLE_CHARS.sub("", str(text))
     text = _HTMLISH.sub(" ", text)
     text = " ".join(text.split())
     text = _INSTRUCTION_PREFIX.sub("[instruction-line stripped]", text)
-    text = _clip_words(_redact(text), cap)
+    text = _redact(text)
+    if discard_secrets and "[REDACTED-SECRET]" in text:
+        text = "[REDACTED-SECRET]"
+    text = _clip_words(text, cap)
     variants = _scan_variants(text)
     if any(p.search(v) for v in variants
            for p in (_TODO_INJECTION, _TODO_SHELLISH, _ROLE_PREFIX)):
@@ -418,9 +422,14 @@ def _intent_goals() -> list[str]:
     raw = _safe_read_text(INTENT_MD, ROOT, max_bytes=_HISTORY_TAIL_BYTES)
     if raw is None:
         return []
-    items: list[str] = []
+    return [f"{i}. {item['body']}" for i, item in enumerate(select_objectives(raw), 1)]
+
+
+def select_objectives(raw: str) -> list[dict]:
+    """Structured beneath the old renderer, with original source line identity."""
+    items = []
     in_obj = False
-    for line in raw.splitlines():
+    for number, line in enumerate(raw.splitlines(), 1):
         if line.startswith("## "):
             in_obj = line[3:].strip().lower().startswith("objectives")
             continue
@@ -428,15 +437,16 @@ def _intent_goals() -> list[str]:
             continue
         m = _OBJECTIVE_ITEM.match(line)
         if m:
-            items.append(m.group(1).strip())
+            items.append({"body": m.group(1).strip(), "line": number})
         elif items and line.startswith((" ", "\t")) and line.strip():
-            items[-1] += " " + line.strip()          # wrapped continuation
+            items[-1]["body"] += " " + line.strip()
     out = []
-    for i, item in enumerate(items, 1):
-        lead = _SENTENCE_END.split(item, maxsplit=1)[0]
-        safe = _safe_history_line(lead)
+    for item in items:
+        whole = _safe_history_line(item["body"], len(item["body"]) + 1, discard_secrets=True)
+        lead = _SENTENCE_END.split(whole, maxsplit=1)[0]
+        safe = _clip_words(lead, _HISTORY_LINE_CHARS)
         if not _was_stripped(safe):
-            out.append(f"{i}. {safe}")
+            out.append({"line": item["line"], "body": safe})
     return out
 
 
@@ -480,24 +490,42 @@ def _matched_lessons() -> list[str]:
     paths = _changed_paths()
     if not paths:
         return []
+    items, _ = select_lessons(ROOT, raw, paths)
+    return [f"- ({_safe_history_line(item['id'], 8)}) {item['body']}" for item in items]
+
+
+def select_lessons(root: Path, raw: str, paths: list[str]) -> tuple[list[dict], list[dict]]:
+    """Filter already-committed lesson bytes; evidence existence is not relevance."""
     try:
         from check_lessons import evidence_exists  # type: ignore
     except Exception:
-        return []
+        return [], [{"code": "lesson-evidence-reader-unavailable", "path": "docs/lessons.jsonl"}]
     scored = []
-    for ln in raw.splitlines():
+    diagnostics = []
+    for number, ln in enumerate(raw.splitlines(), 1):
+        if not ln.strip():
+            continue
         try:
             d = json.loads(ln)
         except ValueError:
+            diagnostics.append({"code": "malformed-lesson", "line": number, "path": "docs/lessons.jsonl"})
             continue
-        if not isinstance(d, dict) or d.get("status") not in ("test", "gate") \
-                or d.get("superseded_by") is not None:
+        if not isinstance(d, dict):
+            diagnostics.append({"code": "malformed-lesson", "line": number, "path": "docs/lessons.jsonl"})
+            continue
+        if d.get("status") not in ("test", "gate") or d.get("superseded_by") is not None:
             continue
         lid, rule, trig = d.get("id"), d.get("rule"), d.get("triggers")
         ev = d.get("evidence") if isinstance(d.get("evidence"), dict) else {}
-        if not (isinstance(lid, str) and isinstance(rule, str) and isinstance(trig, list)):
+        if not (isinstance(lid, str) and re.fullmatch(r"L[0-9]{1,8}", lid)
+                and isinstance(rule, str) and isinstance(trig, list)
+                and set(ev) <= {"sha", "test"}
+                and (ev.get("sha") is None or isinstance(ev["sha"], str)
+                     and re.fullmatch(r"[0-9a-f]{7,64}", ev["sha"]))):
+            diagnostics.append({"code": "malformed-lesson", "line": number, "path": "docs/lessons.jsonl"})
             continue
-        if not isinstance(ev.get("test"), str) or not evidence_exists(ROOT, ev["test"]):
+        if not isinstance(ev.get("test"), str) or not evidence_exists(root, ev["test"]):
+            diagnostics.append({"code": "lesson-evidence-missing", "line": number, "path": "docs/lessons.jsonl"})
             continue
         # An exact-path trigger outweighs a glob: `scripts/*.py` matches nearly
         # every change, and ranking by raw count let the vaguest lesson win.
@@ -507,13 +535,15 @@ def _matched_lessons() -> list[str]:
                    if any(isinstance(t, str) and fnmatch.fnmatch(p, t) for t in trig))
         if not hits:
             continue
-        safe = _safe_history_line(rule, 220)
+        safe = _safe_history_line(rule, 220, discard_secrets=True)
         if _was_stripped(safe):
             continue
         num = int(lid[1:]) if lid[1:].isdigit() else 0
-        scored.append((-hits, -num, f"- ({_safe_history_line(lid, 8)}) {safe}"))
-    scored.sort()
-    return [line for _h, _n, line in scored]
+        scored.append((-hits, -num, {"id": lid, "body": safe, "line": number,
+                                    "reason": "committed trigger match; evidence exists, not proof of relevance",
+                                    "status": d["status"], "evidence": ev}))
+    scored.sort(key=lambda x: (x[0], x[1], x[2]["id"]))
+    return [item for _h, _n, item in scored], diagnostics
 
 
 def _lessons_block() -> str:

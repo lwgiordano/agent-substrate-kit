@@ -18,7 +18,7 @@
         "manage.sh",
         "package_release.sh"
       ],
-      "last_human_reviewed": "2026-09-28",
+      "last_human_reviewed": "2026-10-02",
       "path": "docs/knowledge/00_substrate.md",
       "purpose": "Entry point for current substrate contracts and functional knowledge."
     },
@@ -37,7 +37,7 @@
         "scripts/update_manifest.py",
         "scripts/write_install_json.py"
       ],
-      "last_human_reviewed": "2026-09-28",
+      "last_human_reviewed": "2026-10-02",
       "path": "docs/knowledge/01_install_adoption.md",
       "purpose": "Installation and adoption across new and existing repositories."
     },
@@ -55,7 +55,7 @@
         "scripts/verify_release.py",
         "scripts/write_install_json.py"
       ],
-      "last_human_reviewed": "2026-09-28",
+      "last_human_reviewed": "2026-10-02",
       "path": "docs/knowledge/02_upgrade_integrity.md",
       "purpose": "Upgrade provenance, authority floors, transactions, and postconditions."
     },
@@ -118,7 +118,7 @@
         "scripts/prove_guards.py",
         "scripts/substrate_audit.py"
       ],
-      "last_human_reviewed": "2026-09-28",
+      "last_human_reviewed": "2026-10-02",
       "path": "docs/knowledge/05_evals_assurance.md",
       "purpose": "Behavioral evals, the malicious and benign corpus, and assurance limits."
     },
@@ -135,7 +135,7 @@
         "scripts/verify_release.py",
         "scripts/write_install_json.py"
       ],
-      "last_human_reviewed": "2026-09-28",
+      "last_human_reviewed": "2026-10-02",
       "path": "docs/knowledge/06_release_distribution.md",
       "purpose": "Release packaging, signing, manifests, and artifact verification."
     },
@@ -195,6 +195,8 @@
       "covers": [
         "scripts/check_lessons.py",
         "scripts/recall.py",
+        "scripts/task_brief.py",
+        "scripts/_task_evidence.py",
         "scripts/check_knowledge_narrative.py",
         "scripts/memory_log.py",
         "scripts/append_history.py",

@@ -4,6 +4,8 @@ last_human_reviewed: 2026-10-02
 covers:
   - scripts/check_lessons.py
   - scripts/recall.py
+  - scripts/task_brief.py
+  - scripts/_task_evidence.py
   - scripts/check_knowledge_narrative.py
   - scripts/memory_log.py
   - scripts/append_history.py
@@ -15,6 +17,8 @@ asserts:
   - scripts/_doc_common.py::history_outcome_problem
   - scripts/_doc_common.py::release_evidence_status
   - scripts/check_lessons.py::evidence_exists
+  - scripts/task_brief.py::build
+  - scripts/_task_evidence.py::git_facts
 ---
 
 # Lessons, records, and recall
@@ -127,6 +131,42 @@ trimmed to a token budget. The index is built in memory on every call and
 discarded, so no stale or planted index can answer for the markdown. Query
 terms are quoted before they reach FTS5. Without FTS5 a term-count fallback
 runs and says so.
+
+## Current task briefs
+
+`./manage.sh brief "<task>" [--path PATH ...] [--budget N] [--json]`
+assembles current repository identity, objectives, applicable committed lessons,
+ranked ADR/knowledge sections, parsed bus leases, and recent reported findings.
+Without explicit paths it discloses scope inferred from raw working changes and
+the last five commits. An empty scope is not a repository-wide review. Findings
+are reported prose, never an inferred count of unresolved defects.
+
+The structured collectors sit below the existing recall and session renderers.
+Each item carries a path and line or stable ID, same-read content hash, source
+revision/state, selection reason, and collection time. Missing, unsafe,
+undecodable, and unparsed sources produce diagnostics rather than silent gaps.
+Existence of lesson evidence is still not proof of relevance. Legacy recall
+does not collect Git provenance it will not display; session budgets are unchanged.
+
+The default brief is 800 estimated tokens (UTF-8 bytes divided by four), with
+an accepted range of 200–6000. Identity and omission notices take priority over
+whole evidence items. JSON is separately capped at 64 KiB with omission counts.
+All displayed string fields use known-pattern sanitization, not universal secret
+detection. A recognized private-key header causes the whole display field to
+be discarded before truncation, not just the header. Retrieved prose is labelled
+data; the command never executes it or
+runs the suggested checks. Invalid arguments or essential repository lookup
+failure return 2; missing optional evidence remains an explicit partial report.
+
+Read-only Git observations use bounded index/tree inventories and guarded raw
+regular-file bytes and permission bits, not status, filters, textconv, staging,
+or object writes. Git dirtiness uses the owner-execute bit; raw fingerprints
+also distinguish permission changes Git does not track.
+Inherited Git routing and user/system configuration are isolated; fsmonitor,
+lazy object fetches, and transports are disabled. Per-call timeout is 10 seconds.
+Unsupported, linked, unreadable, or oversized inputs report unknown, not clean;
+converted worktree text may conservatively report dirty. This is an observation,
+not protection against concurrent same-user rewriting (ADR 0002).
 
 `check_knowledge_narrative.py` warns (it never blocks) when a knowledge doc
 narrates release history — past-tense change verbs, version stamps, audit-round

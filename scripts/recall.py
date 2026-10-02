@@ -34,13 +34,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sqlite3
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _doc_common import repo_root, safe_read_text  # noqa: E402
+from _doc_common import open_dir_chain, repo_root  # noqa: E402
 
 _SECTION_DIRS = ("docs/knowledge", "docs/decisions", "docs/postmortems",
                  "docs/blind-spot-checklists")
@@ -105,31 +106,63 @@ def _units_lessons(rel: str, text: str) -> list[tuple[str, int, str, str]]:
         except Exception:
             continue
         if isinstance(d, dict) and isinstance(d.get("rule"), str):
-            trig = " ".join(str(t) for t in d.get("triggers", []) if isinstance(t, str))
+            triggers = d.get("triggers", [])
+            if not isinstance(triggers, list) or not all(isinstance(t, str) for t in triggers):
+                raise ValueError("invalid lesson triggers")
+            trig = " ".join(triggers)
             out.append((rel, i, f"lesson {d.get('id', '?')} [{d.get('status', '?')}]",
                         f"{d['rule']}\ntriggers: {trig}"))
     return out
 
 
 def collect(root: Path) -> list[tuple[str, int, str, str]]:
-    units: list[tuple[str, int, str, str]] = []
+    items, _ = _collect(root, provenance=False)
+    return [(d["path"], d["line"], d["title"], d["body"]) for d in items]
+
+
+def collect_with_diagnostics(root: Path) -> tuple[list[dict], list[dict]]:
+    """Same corpus, structured below renderers; parse and hash one read."""
+    return _collect(root, provenance=True)
+
+
+def _collect(root: Path, provenance: bool) -> tuple[list[dict], list[dict]]:
+    from _task_evidence import read_source
+    items, diagnostics = [], []
+
+    def add(rel, parser):
+        source, problem = read_source(root, rel, provenance=provenance)
+        if problem:
+            diagnostics.append(problem)
+        if source is not None:
+            text = source.pop("text")
+            try:
+                units = parser(rel, text)
+            except (TypeError, ValueError):
+                diagnostics.append({"code": "malformed-source", "path": rel})
+                return
+            for path, line, title, body in units:
+                items.append(dict(source, line=line, title=title, body=body))
+
     for d in _SECTION_DIRS:
         base = root / d
-        if not base.is_dir() or base.is_symlink():
+        try:
+            fd = open_dir_chain(root, base)
+            try:
+                names = os.listdir(fd)
+            finally:
+                os.close(fd)
+        except OSError:
+            diagnostics.append({"code": "missing-or-unsafe-source-directory", "path": d})
             continue
-        for p in sorted(base.glob("*.md")):
-            if p.name.startswith("_"):
+        for name in sorted(names):
+            if name.startswith("_") or not name.endswith(".md"):
                 continue
-            text = safe_read_text(p, root, max_bytes=_MAX_FILE)
-            if text is not None:
-                units += _units_markdown(f"{d}/{p.name}", text)
+            add(f"{d}/{name}", _units_markdown)
     for rel, fn in (("docs/HISTORY.md", _units_history),
                     ("docs/REJECTED.md", _units_rejected),
                     ("docs/lessons.jsonl", _units_lessons)):
-        text = safe_read_text(root / rel, root, max_bytes=_MAX_FILE)
-        if text is not None:
-            units += fn(rel, text)
-    return units
+        add(rel, fn)
+    return items, diagnostics
 
 
 def _fts_query(q: str) -> str:

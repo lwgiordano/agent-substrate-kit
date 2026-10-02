@@ -56,6 +56,11 @@ that can continuously rewrite the repository.
 
 ## Session capture and restore
 
+Objective and lesson selection is shared with the opt-in task brief through
+structured selectors. The existing session renderer retains its original
+injection budgets and committed-lesson restriction; brief output is not injected
+automatically. See [task briefs](10_lessons_recall.md#current-task-briefs).
+
 `.substrate/memory/tasks/current.json` is the structured session source of
 truth. `docs/CURRENT_SESSION.md` is a derived human view and never restore input.
 Session start also records a Git baseline for completion checks. The state file
@@ -68,7 +73,9 @@ Objectives (numbered items, lead sentence each — the operator's goals survive
 compaction); the last five HISTORY summaries; the lead sentence of each recent
 entry's **Knowledge:** field, tagged with its sha (the lesson, not the
 narrative); and the newest rejected approaches. `_safe_history_line` strips
-control, markup, and role-like prefixes and cuts at a word boundary; the new
+selected control characters, markup, and role-like prefixes and cuts at a word
+boundary; it is not a terminal-control filter. Task reports additionally use
+the bus display sanitizer for terminal controls. The new
 blocks drop a stripped line rather than spend budget on a marker. Every block
 fits newest-first — a blind slice cut the newest entry, the one most needed.
 

@@ -14334,7 +14334,7 @@ def _recall_repo(tmp_path):
     td = tmp_path / "recallrepo"
     (td / "scripts").mkdir(parents=True)
     (td / "docs" / "knowledge").mkdir(parents=True)
-    for name in ("recall.py", "check_knowledge_narrative.py", "_doc_common.py"):
+    for name in ("recall.py", "check_knowledge_narrative.py", "_doc_common.py", "_task_evidence.py"):
         (td / "scripts" / name).write_text((SCRIPTS / name).read_text(encoding="utf-8"),
                                            encoding="utf-8")
     subprocess.run(["git", "init", "-q"], cwd=td, check=True)
@@ -14385,6 +14385,7 @@ def test_recall_does_not_read_a_linked_doc(tmp_path) -> None:
     outside.write_text("# S\n\n## Outside\n\nzebra canary phrase\n", encoding="utf-8")
     (td / "docs" / "knowledge" / "02_link.md").symlink_to(outside)
     r = run("recall.py", "zebra", "canary")
+    assert r.returncode == 0, r.stderr
     assert "zebra" not in r.stdout
 
 

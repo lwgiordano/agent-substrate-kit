@@ -118,6 +118,10 @@ Budgets guide document shape. They do not prove relevance or accuracy. The
 source map uses one current-contract document per function, while release
 chronology remains in CHANGES and HISTORY.
 
+The opt-in `brief` command reads this context on demand with source provenance
+and omission counts. It adds no always-loaded prompt or startup block; see
+[current task briefs](10_lessons_recall.md#current-task-briefs).
+
 Bus claims are leases: `scripts/bus_claims.py` derives ACTIVE/EXPIRED/RELEASED
 deterministically from AGENT_BUS.md entries (default TTL 72h; HEARTBEAT and
 CLAIM EXPANSION refresh; an expired lease is reclaimable by any agent, and ONLY

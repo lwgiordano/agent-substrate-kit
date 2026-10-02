@@ -2,6 +2,86 @@
   "_comment": "Guard registry for scripts/prove_guards.py (`./manage.sh prove`). Each guard is neutralized in a private copy of the tree and its tests must then FAIL. Add an entry with every security guard and regression you ship; a guard whose snippet moves makes prove fail until the entry is updated.",
   "guards": [
     {
+      "id": "task-evidence-permission-bits",
+      "file": "scripts/_task_evidence.py",
+      "find": "field(stat.S_IMODE(mode).to_bytes(4, \"big\"))",
+      "replace": "pass",
+      "tests": ["tests/test_task_brief.py::test_git_facts_fingerprint_covers_raw_permission_bits"],
+      "why": "permissions can change check behavior without changing regular-file bytes"
+    },
+    {
+      "id": "task-evidence-owner-execute",
+      "file": "scripts/_task_evidence.py",
+      "find": "observed_mode = \"100755\" if mode & stat.S_IXUSR else \"100644\"",
+      "replace": "observed_mode = \"100755\" if mode & 0o111 else \"100644\"",
+      "tests": ["tests/test_task_brief.py::test_git_facts_owner_execute_change_is_dirty"],
+      "why": "group execution must not hide the loss of owner execution from dirty status"
+    },
+    {
+      "id": "task-evidence-pem-body",
+      "file": "scripts/session_handoff.py",
+      "find": "text = \"[REDACTED-SECRET]\"",
+      "replace": "pass",
+      "tests": ["tests/test_task_brief.py::test_report_sanitizer_discards_pem_body_before_truncating", "tests/test_task_brief.py::test_brief_discards_already_redacted_objective_body", "tests/test_task_brief.py::test_lesson_selector_discards_secret_before_clipping"],
+      "why": "header-only PEM redaction preserves private material in report fields"
+    },
+    {
+      "id": "task-evidence-terminal-controls",
+      "file": "scripts/_task_evidence.py",
+      "find": "return _shown(_safe_history_line(value, limit, discard_secrets=True))",
+      "replace": "return _safe_history_line(value, limit, discard_secrets=True)",
+      "tests": ["tests/test_task_brief.py::test_report_sanitizer_removes_terminal_controls"],
+      "why": "context sanitization alone preserves terminal escape controls"
+    },
+    {
+      "id": "task-brief-lesson-sha-shape",
+      "file": "scripts/session_handoff.py",
+      "find": "and re.fullmatch(r\"[0-9a-f]{7,64}\", ev[\"sha\"])",
+      "replace": "and True",
+      "tests": ["tests/test_task_brief.py::test_lesson_metadata_validated_independently"],
+      "why": "invalid evidence SHA must be tested independently of forbidden extra metadata"
+    },
+    {
+      "id": "task-brief-lesson-id-shape",
+      "file": "scripts/session_handoff.py",
+      "find": "and re.fullmatch(r\"L[0-9]{1,8}\", lid)",
+      "replace": "and True",
+      "tests": ["tests/test_task_brief.py::test_lesson_metadata_validated_independently"],
+      "why": "malformed stable IDs must not silently enter task evidence"
+    },
+    {
+      "id": "task-evidence-no-lazy-network",
+      "file": "scripts/_task_evidence.py",
+      "find": "GIT_NO_LAZY_FETCH=\"1\", GIT_ALLOW_PROTOCOL=\"\"",
+      "replace": "GIT_NO_LAZY_FETCH=\"0\", GIT_ALLOW_PROTOCOL=\"ext\"",
+      "tests": ["tests/test_task_brief.py::test_read_only_git_never_fetches_missing_promisor_objects"],
+      "why": "read-only inspection must not invoke a remote helper when a promisor blob is absent"
+    },
+    {
+      "id": "task-evidence-routing-isolation",
+      "file": "scripts/_task_evidence.py",
+      "find": "env = {k: v for k, v in os.environ.items() if not k.startswith(\"GIT_\")}",
+      "replace": "env = dict(os.environ)",
+      "tests": ["tests/test_task_brief.py::test_git_facts_ignores_inherited_routing"],
+      "why": "a report must inspect its explicit root, not an inherited alternate repository"
+    },
+    {
+      "id": "task-brief-all-metadata-sanitized",
+      "file": "scripts/task_brief.py",
+      "find": "report, changed = sanitize_report(report)",
+      "replace": "changed = 0",
+      "tests": ["tests/test_task_brief.py::test_brief_json_sanitizes_all_exported_metadata"],
+      "why": "JSON metadata must not bypass the display sanitizer through branch or path fields"
+    },
+    {
+      "id": "task-brief-committed-lessons",
+      "file": "scripts/task_brief.py",
+      "find": "source, issue = committed_source(root, \"docs/lessons.jsonl\", head)",
+      "replace": "source, issue = read_source(root, \"docs/lessons.jsonl\", head)",
+      "tests": ["tests/test_task_brief.py::test_brief_reads_current_docs_but_only_committed_lessons"],
+      "why": "uncommitted lesson edits must not replace the committed source used for task context"
+    },
+    {
       "id": "anchor-membership",
       "file": "scripts/memory_log.py",
       "find": "        if anchored not in seen:\n            print(f\"memory-log: ANCHOR MISMATCH",
@@ -579,7 +659,7 @@
     {
       "id": "lessons-inject-evidence-present",
       "file": "scripts/session_handoff.py",
-      "find": "if not isinstance(ev.get(\"test\"), str) or not evidence_exists(ROOT, ev[\"test\"]):",
+      "find": "if not isinstance(ev.get(\"test\"), str) or not evidence_exists(root, ev[\"test\"]):",
       "replace": "if False:",
       "tests": [
         "tests/test_hook_scripts.py::test_lessons_injected_only_when_matched_recorded_and_evidenced"
@@ -589,8 +669,8 @@
     {
       "id": "lessons-inject-status-and-superseded",
       "file": "scripts/session_handoff.py",
-      "find": "        if not isinstance(d, dict) or d.get(\"status\") not in (\"test\", \"gate\") \\\n                or d.get(\"superseded_by\") is not None:",
-      "replace": "        if not isinstance(d, dict):",
+      "find": "        if d.get(\"status\") not in (\"test\", \"gate\") or d.get(\"superseded_by\") is not None:",
+      "replace": "        if False:",
       "tests": [
         "tests/test_hook_scripts.py::test_lessons_injected_only_when_matched_recorded_and_evidenced"
       ],
@@ -618,9 +698,9 @@
     },
     {
       "id": "recall-guarded-read",
-      "file": "scripts/recall.py",
-      "find": "            text = safe_read_text(p, root, max_bytes=_MAX_FILE)",
-      "replace": "            text = p.read_text()",
+      "file": "scripts/_task_evidence.py",
+      "find": "    raw = safe_read_bytes(root / rel, root, max_bytes=4 << 20)",
+      "replace": "    raw = (root / rel).read_bytes() if (root / rel).is_file() else None",
       "tests": [
         "tests/test_hook_scripts.py::test_recall_does_not_read_a_linked_doc"
       ],

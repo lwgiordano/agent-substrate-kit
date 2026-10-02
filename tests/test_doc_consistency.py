@@ -45,6 +45,8 @@ KNOWLEDGE_ASSERTS = {
     "bootstrap.sh::_safe_mkdir_p",
     "scripts/_doc_common.py::history_outcome_problem",
     "scripts/_doc_common.py::release_evidence_status",
+    "scripts/task_brief.py::build",
+    "scripts/_task_evidence.py::git_facts",
     "scripts/check_lessons.py::evidence_exists",
     "scripts/memory_log.py::record_units",
     "scripts/memory_log.py::release_pass",

@@ -411,3 +411,10 @@ This file is `merge=union` in `.gitattributes` so concurrent branch entries comb
 **Knowledge:** Automatic copying and manual classification must stay aligned; discover all shipped test files rather than maintaining a second test list.
 **Outcome:** unverified
 
+## 2026-10-02T16:03:30Z — NO_SESSION — a60fc1e
+**Summary:** Repair HISTORY evidence portability without certifying imported release claims.
+**Files:** scripts/_doc_common.py,scripts/check_history_sha.py,scripts/_substrate_surfaces.py,scripts/code_shape.py,tests/test_history_evidence_portability.py,tests/test_hook_scripts.py,tests/test_doc_consistency.py,tests/guards.json,docs/knowledge,docs/postmortems/2026-10-02-history-evidence-portability.md
+**Intent:** Unblock receiving clones while retaining strict creation-time proof and fail-closed damaged-evidence handling.
+**Knowledge:** Unchanged whole committed entries may be reported as imported-unverified, never locally verified. New, modified, or excess duplicate success claims still need local clean-start proof. Check exit 0; evals 57/57 blocked and 0/14 FP; eight guard-removal proofs and fresh consumer tests passed. No release-pass was minted.
+**Outcome:** unverified
+

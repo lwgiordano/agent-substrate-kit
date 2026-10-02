@@ -238,6 +238,7 @@ COVERAGE_SKIP_PARTS = {"__pycache__", "venv", "node_modules", ".pytest_cache", "
 # FILENAMES — named here as the single source of truth.
 KIT_TEST_FILES = {
     "tests/conftest.py", "tests/test_doc_consistency.py", "tests/test_hook_scripts.py",
+    "tests/test_history_evidence_portability.py", "tests/test_nested_worktrees.py",
     "tests/test_smoke.py", "tests/test_substrate_files.py",
 }
 # Heavy behavioral self-tests STRIPPED from a consumer install (bootstrap): on

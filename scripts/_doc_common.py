@@ -1209,6 +1209,43 @@ def history_malformed_outcome_lines(body: str) -> list[str]:
             and not HISTORY_OUTCOME_LINE_RE.fullmatch(ln)]
 
 
+def release_evidence_status(root: Path, commit: str) -> tuple[str, str]:
+    """Observe local release proof: verified, unavailable, or invalid.
+
+    Unavailable is not success. Readers may describe unchanged imported claims;
+    writers must still refuse to create a success claim without verified proof.
+    """
+    full = _git(["rev-parse", "--verify", f"{commit}^{{commit}}"], cwd=root)
+    if not full:
+        return "invalid", f"shipped-green: {commit!r} does not resolve to a commit"
+    path = root / ".substrate" / "memory" / "events.jsonl"
+    fd = None
+    try:
+        fd = open_dir_chain(root, path.parent)
+        os.stat(path.name, dir_fd=fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return "unavailable", "shipped-green needs release-gate evidence, but no memory chain here"
+    except OSError:
+        return "invalid", "shipped-green: memory chain has an unsafe or unreadable parent"
+    finally:
+        if fd is not None:
+            os.close(fd)
+    import memory_log as _ml  # lazy: memory_log imports this module
+    passes, why = _ml.verified_release_passes(root)
+    if passes is None:
+        return "invalid", f"shipped-green needs release-gate evidence, but {why}"
+    hits = [d for d in passes if d.get("commit") == full]
+    if not hits:
+        return ("unavailable",
+                f"shipped-green: no release-pass event for {full[:12]} in the memory chain — "
+                "run `./manage.sh release` on that commit, or label it `unverified`")
+    if not any(d.get("clean_start") is True for d in hits):
+        return ("invalid",
+                f"shipped-green: every release-pass for {full[:12]} started on a DIRTY tree, "
+                "so its tests ran on uncommitted edits, not on the commit")
+    return "verified", "matching clean-start release-pass in the local verifying chain"
+
+
 def history_outcome_problem(outcome: str, entry_sha: str, earlier_shas: list[str],
                             root: Path) -> str | None:
     """Why `outcome` is not a valid label for an entry documenting `entry_sha`,
@@ -1227,21 +1264,8 @@ def history_outcome_problem(outcome: str, entry_sha: str, earlier_shas: list[str
                 "reverts:<sha>, supersedes:<sha>")
     if outcome != "shipped-green":
         return None
-    full = _git(["rev-parse", "--verify", f"{entry_sha}^{{commit}}"], cwd=root)
-    if not full:
-        return f"shipped-green: {entry_sha!r} does not resolve to a commit"
-    import memory_log as _ml  # lazy: memory_log imports this module
-    passes, why = _ml.verified_release_passes(root)
-    if passes is None:
-        return f"shipped-green needs release-gate evidence, but {why}"
-    hits = [d for d in passes if d.get("commit") == full]
-    if not hits:
-        return (f"shipped-green: no release-pass event for {full[:12]} in the memory chain — "
-                "run `./manage.sh release` on that commit, or label it `unverified`")
-    if not any(d.get("clean_start") is True for d in hits):
-        return (f"shipped-green: every release-pass for {full[:12]} started on a DIRTY tree, "
-                "so its tests ran on uncommitted edits, not on the commit")
-    return None
+    state, reason = release_evidence_status(root, entry_sha)
+    return None if state == "verified" else reason
 
 
 def record_in_chain(root: Path, relpath: str) -> tuple[int, str]:

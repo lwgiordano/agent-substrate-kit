@@ -397,3 +397,17 @@ This file is `merge=union` in `.gitattributes` so concurrent branch entries comb
 **Knowledge:** A rule re-checked over merged append-only history must relate an entry only to what its own author had: the label rule tied entries from different branches together and deadlocked, while reverts/supersedes and Correction-of, which name only what their author already had, survive a union merge. Relaxing a gate opens the near-miss hole the strict rule used to cover — the security-auditor found that a line a human reads as a label but the regex misses would show a success the gate reads as silence; it is now drift. The first release-gate run failed one test when the container's commit-signing service timed out inside a fixture's git commit; the same tree had just passed the full check, and the re-run passed.
 **Outcome:** shipped-green
 
+## 2026-10-02T14:37:44Z — NO_SESSION — 741ceb8
+**Summary:** Approved and published the task evidence and project status design and implementation claim.
+**Files:** AGENT_BUS.md,docs/superpowers/specs/2026-10-02-task-evidence-and-project-status-design.md,docs/superpowers/plans/2026-10-02-task-evidence-and-project-status.md
+**Intent:** Publish the agreed scope and ownership before changing product implementation.
+**Knowledge:** An unrelated valid local memory chain exposes an imported HISTORY evidence portability bug; preserve both chain and history during the repair.
+**Outcome:** unverified
+
+## 2026-10-02T15:25:58Z — NO_SESSION — c5b2d2d
+**Summary:** Expanded the published task evidence claim to repair shipped-test classification.
+**Files:** AGENT_BUS.md
+**Intent:** Publish ownership of the canonical test inventory and its code-shape fallback before editing either file.
+**Knowledge:** Automatic copying and manual classification must stay aligned; discover all shipped test files rather than maintaining a second test list.
+**Outcome:** unverified
+

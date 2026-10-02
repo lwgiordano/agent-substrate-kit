@@ -93,6 +93,7 @@ except Exception:
                     "docs/knowledge/00_substrate.md", "docs/knowledge/_template.md"}
     _GOVERNED_DIRS = ("docs/knowledge/", "docs/superpowers/")
     KIT_TEST_FILES = {"tests/conftest.py", "tests/test_doc_consistency.py", "tests/test_hook_scripts.py",
+                      "tests/test_history_evidence_portability.py", "tests/test_nested_worktrees.py",
                       "tests/test_smoke.py", "tests/test_substrate_files.py"}
 # kit-source-only files + the kit's own test files (shipped into user repos by name).
 _OWNED_FILES |= {"bootstrap.sh", "agentsync.sh", "package_release.sh", "BENCHMARK.md", "CHANGES_V3.md"}

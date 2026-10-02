@@ -44,6 +44,7 @@ KNOWLEDGE_DOCS = {
 KNOWLEDGE_ASSERTS = {
     "bootstrap.sh::_safe_mkdir_p",
     "scripts/_doc_common.py::history_outcome_problem",
+    "scripts/_doc_common.py::release_evidence_status",
     "scripts/check_lessons.py::evidence_exists",
     "scripts/memory_log.py::record_units",
     "scripts/memory_log.py::release_pass",
@@ -163,8 +164,12 @@ def test_source_knowledge_is_functionally_partitioned() -> None:
             assert "](00_substrate.md)" in path.read_text(encoding="utf-8")
 
 
-def test_source_knowledge_covers_every_discovered_module() -> None:
+def test_source_knowledge_covers_every_discovered_module(monkeypatch) -> None:
     import importlib.util
+
+    # Do not depend on test_hook_scripts being collected first to expose the
+    # helper's sibling imports when this module is run on its own.
+    monkeypatch.syspath_prepend(str(KIT / "scripts"))
 
     spec = importlib.util.spec_from_file_location(
         "_knowledge_doc_common", KIT / "scripts" / "_doc_common.py"

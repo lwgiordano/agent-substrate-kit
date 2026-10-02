@@ -1,6 +1,6 @@
 ---
 purpose: Lessons with evidence, the record the chain attests, outcome labels, and recall.
-last_human_reviewed: 2026-09-29
+last_human_reviewed: 2026-10-02
 covers:
   - scripts/check_lessons.py
   - scripts/recall.py
@@ -13,6 +13,7 @@ asserts:
   - scripts/memory_log.py::record_units
   - scripts/memory_log.py::release_pass
   - scripts/_doc_common.py::history_outcome_problem
+  - scripts/_doc_common.py::release_evidence_status
   - scripts/check_lessons.py::evidence_exists
 ---
 
@@ -87,9 +88,11 @@ anchor covers the evidence. `memory_log` re-derives HEAD and refuses if it
 moved during the run. The event says the gates passed on that commit;
 publication of the anchor is reported separately.
 
-`check_history_sha.py` re-applies the write-time rule to every label an entry
-carries, so a hand-edited `shipped-green` is drift, and so is an entry with two
-labels. It polices claims, not silence (v3.9.3): an entry with no label claims
+`append_history` requires verified local proof before writing `shipped-green`.
+`check_history_sha.py` distinguishes verified proof, unavailable proof, and
+invalid proof through `_doc_common.release_evidence_status`. A new or changed
+success entry without proof is drift, and so is an entry with two labels.
+It polices claims, not silence: an entry with no label claims
 nothing and reads as `unverified` through `_doc_common.history_entry_outcome`,
 the one reader of outcomes, and the gate reports it without failing. A line that
 looks like a label but is not one (`**outcome:** shipped-green`, a list marker, a
@@ -102,10 +105,18 @@ could clear it (domain-lookup, 2026-09-28). Leaving a label off gains nothing,
 since only a label can claim success; `append_history` still writes one on every
 entry. The order-bound rules (`reverts:`/`supersedes:` and `Correction-of-`
 name only an entry their author already had) survive the same merge, because a
-union merge keeps each side's own order; a test merges two branches to show it. The chain is gitignored, so a CI checkout
-or fresh clone has none: there `shipped-green` is reported as not verifiable in
-this checkout (the producing clone judged it at write time), never as verified.
-A chain that is present but broken or linked is still judged, and fails.
+union merge keeps each side's own order; a test merges two branches to show it.
+The chain is gitignored: a receiving clone may have no chain, or a healthy
+unrelated chain without the producing clone's release-pass. An unchanged
+committed entry then reports **NOT verifiable in this checkout**, never verified.
+The comparison covers the whole entry and its multiplicity, ignoring only
+separator newlines. It uses HEAD and, during a merge, resolved MERGE_HEAD
+parents; shared entries cannot authorize extra duplicates. Git failures refuse
+the comparison. This is provenance for a reported historical claim, not proof
+that the claim was true or reviewed. New/edited success entries require local
+proof even in a fresh clone. Broken, linked, or unreadable chains and matching
+dirty-start-only passes remain invalid. Reader output separates imported
+unverified, locally verified, and invalid outcomes.
 
 ## Recall and the narrative lint
 

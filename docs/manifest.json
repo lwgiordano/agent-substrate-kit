@@ -71,7 +71,7 @@
         "scripts/session_handoff.py",
         "scripts/todo_state_hook.py"
       ],
-      "last_human_reviewed": "2026-09-29",
+      "last_human_reviewed": "2026-10-02",
       "path": "docs/knowledge/03_memory_sessions.md",
       "purpose": "Tamper-evident memory, session restore, completion, and append-only logs."
     },
@@ -97,7 +97,7 @@
         "scripts/setup_branch_protection.sh",
         "scripts/substrate_profile.py"
       ],
-      "last_human_reviewed": "2026-09-28",
+      "last_human_reviewed": "2026-10-02",
       "path": "docs/knowledge/04_policy_governance.md",
       "purpose": "Command policy, hooks, sandboxing, and local or remote governance."
     },
@@ -157,7 +157,7 @@
         "scripts/session_handoff.py",
         "scripts/todo_state_hook.py"
       ],
-      "last_human_reviewed": "2026-09-29",
+      "last_human_reviewed": "2026-10-02",
       "path": "docs/knowledge/07_agent_context_governance.md",
       "purpose": "Agent context inventory, harness scanning, budgets, and doc drift."
     },
@@ -187,7 +187,7 @@
         "scripts/code_shape.py",
         "scripts/run_security_scanners.py"
       ],
-      "last_human_reviewed": "2026-09-29",
+      "last_human_reviewed": "2026-10-02",
       "path": "docs/knowledge/09_deterministic_validators.md",
       "purpose": "Deterministic validator layers, pinned copies, and append-only gates."
     },
@@ -201,7 +201,7 @@
         "scripts/check_history_sha.py",
         "scripts/session_handoff.py"
       ],
-      "last_human_reviewed": "2026-09-29",
+      "last_human_reviewed": "2026-10-02",
       "path": "docs/knowledge/10_lessons_recall.md",
       "purpose": "Lessons with evidence, the record the chain attests, outcome labels, and recall."
     }

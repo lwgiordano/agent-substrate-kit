@@ -378,22 +378,73 @@
     {
       "id": "history-gate-outcome-evidence",
       "file": "scripts/check_history_sha.py",
-      "find": "problem = _outcome_problem(vals[0], entry_shas[i], entry_shas[:i], _REPO)",
-      "replace": "problem = None",
+      "find": "                    if imported[units[i]] > 0:",
+      "replace": "                    if True:",
       "tests": [
-        "tests/test_hook_scripts.py::test_history_gate_outcome_claims_are_evidence_bound"
+        "tests/test_history_evidence_portability.py::test_new_or_changed_claim_cannot_borrow_imported_provenance"
       ],
       "why": "a hand-edited shipped-green with no release-pass behind it passes the gate"
     },
     {
-      "id": "history-gate-absent-chain-only",
+      "id": "history-gate-invalid-evidence",
       "file": "scripts/check_history_sha.py",
-      "find": "            if vals[0] == \"shipped-green\" and not os.path.lexists(",
-      "replace": "            if vals[0] == \"shipped-green\" or not os.path.lexists(",
+      "find": "                if state == \"unavailable\":",
+      "replace": "                if state != \"verified\":",
       "tests": [
-        "tests/test_hook_scripts.py::test_history_gate_outcome_claims_are_evidence_bound"
+        "tests/test_history_evidence_portability.py::test_imported_claim_does_not_hide_invalid_chain",
+        "tests/test_history_evidence_portability.py::test_matching_release_pass_remains_authoritative"
       ],
-      "why": "a checkout WITH a chain skips the shipped-green evidence check as if it had none"
+      "why": "invalid evidence gets the imported unavailable-evidence exception"
+    },
+    {
+      "id": "history-imported-chain-portability",
+      "file": "scripts/check_history_sha.py",
+      "find": "                if state == \"unavailable\":",
+      "replace": "                if False:",
+      "tests": [
+        "tests/test_history_evidence_portability.py::test_imported_history_survives_an_unrelated_local_chain"
+      ],
+      "why": "starting a healthy unrelated local chain rejects unchanged imported history"
+    },
+    {
+      "id": "history-import-multiplicity",
+      "file": "scripts/check_history_sha.py",
+      "find": "                        imported[units[i]] -= 1",
+      "replace": "                        pass",
+      "tests": [
+        "tests/test_history_evidence_portability.py::test_new_or_changed_claim_cannot_borrow_imported_provenance"
+      ],
+      "why": "one imported success entry authorizes arbitrary extra copies"
+    },
+    {
+      "id": "history-merge-shared-provenance",
+      "file": "scripts/check_history_sha.py",
+      "find": "        entries |= Counter(_entry_units(git(\"cat-file\", \"blob\", oid)))",
+      "replace": "        entries += Counter(_entry_units(git(\"cat-file\", \"blob\", oid)))",
+      "tests": [
+        "tests/test_history_evidence_portability.py::test_union_merge_uses_both_parents_without_double_counting"
+      ],
+      "why": "shared entries counted once per merge parent authorize duplicate success entries"
+    },
+    {
+      "id": "history-proof-commit-match",
+      "file": "scripts/_doc_common.py",
+      "find": "    hits = [d for d in passes if d.get(\"commit\") == full]",
+      "replace": "    hits = list(passes)",
+      "tests": [
+        "tests/test_history_evidence_portability.py::test_other_commits_clean_pass_cannot_verify_this_claim"
+      ],
+      "why": "proof for another commit falsely certifies an imported claim and authorizes writing it"
+    },
+    {
+      "id": "history-writer-local-proof",
+      "file": "scripts/_doc_common.py",
+      "find": "    return None if state == \"verified\" else reason",
+      "replace": "    return None",
+      "tests": [
+        "tests/test_history_evidence_portability.py::test_missing_evidence_is_still_refused_by_writer"
+      ],
+      "why": "the reader's portability rule silently weakens the strict write-time proof requirement"
     },
     {
       "id": "record-root-pinned",

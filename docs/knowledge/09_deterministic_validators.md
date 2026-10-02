@@ -1,6 +1,6 @@
 ---
 purpose: Deterministic validator layers, pinned copies, and append-only gates.
-last_human_reviewed: 2026-09-29
+last_human_reviewed: 2026-10-02
 covers:
   - extras/check_license_headers.py
   - extras/check_stale_phrases.py
@@ -62,8 +62,10 @@ so those fallbacks were dead code in every profile; a fallback that runs an OLDE
 guard is the fail-open shape a dropped guard has, only slower to notice.
 
 A gate over an APPEND-ONLY record needs an additive remedy that the gate
-actually implements. `check_history_sha.py` also re-applies the `shipped-green`
-evidence rule to every HISTORY outcome label and reads a missing label as
+actually implements. `check_history_sha.py` requires local proof for new or
+modified `shipped-green` claims, reports unchanged committed imports with
+unavailable proof as unverified-here, and still refuses invalid local evidence.
+It reads a missing label as
 `unverified` (v3.9.3: requiring one was not clearable after a union merge), and
 `check_lessons.py` requires every test or gate lesson's evidence to exist
 ([lessons, records, and recall](10_lessons_recall.md)). `check_history_sha.py` validates `docs/HISTORY.md`, which

@@ -1,6 +1,6 @@
 ---
 purpose: Agent context inventory, harness scanning, budgets, and doc drift.
-last_human_reviewed: 2026-09-29
+last_human_reviewed: 2026-10-02
 covers:
   - agentsync.sh
   - manage.sh
@@ -54,6 +54,12 @@ knowledge siblings and Superpowers plans require scanning, CODEOWNERS coverage,
 and CI audit triggers without entering provenance or upgrade drift. Only the
 generated consumer knowledge entry point and installed knowledge template are
 substrate-owned.
+
+`KIT_TEST_FILES` classifies the kit's copied tests by exact filename so a fresh
+install is not counted as new project-code sprawl. A discovery test compares
+the inventory with the source tree's actual top-level test modules; the
+`code_shape.py` fallback must match. Arbitrary consumer tests remain project
+code, and classification does not change which heavy tests bootstrap strips.
 
 The behavioral smoke runs the real scanner independently for root instructions,
 HISTORY, the stable knowledge entry point, a randomized knowledge sibling, and a

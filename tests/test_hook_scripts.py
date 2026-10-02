@@ -10496,6 +10496,19 @@ def test_code_shape_json_contract() -> None:
     assert "largest_files" in d["repo"] and "long_functions" in d["repo"] and "files_over_threshold" in d["repo"]
 
 
+def test_every_shipped_test_is_classified_as_kit_code() -> None:
+    """Adding a copied test must not turn a kit install into project sprawl."""
+    if not (ROOT / "bootstrap.sh").exists():
+        pytest.skip("kit-source inventory check")
+    import _substrate_surfaces as surfaces
+    import code_shape
+    shipped = {f"tests/{p.name}" for p in (ROOT / "tests").glob("*.py")
+               if p.name != "conftest_project.py"}
+    assert shipped == surfaces.KIT_TEST_FILES
+    assert all(code_shape._is_substrate_owned(path) for path in shipped)
+    assert not code_shape._is_substrate_owned("tests/test_project_feature.py")
+
+
 def test_code_shape_flags_sprawl(tmp_path) -> None:
     """A file over the line threshold and a function over the function threshold are flagged."""
     cs = SCRIPTS / "code_shape.py"
@@ -13975,15 +13988,20 @@ def test_history_gate_outcome_claims_are_evidence_bound(tmp_path) -> None:
     assert r.returncode == 1 and "at most one outcome claim" in r.stderr, r.stdout + r.stderr
     forged = labelled.replace("**Outcome:** wip", "**Outcome:** shipped-green")
     h.write_text("# H\n\n" + old + forged, encoding="utf-8")
-    # No chain in this checkout (as in CI: .substrate/memory/ is gitignored):
-    # unverifiable HERE, said so — neither drift nor verified.
+    # New claims need proof even before this clone has a chain.
+    r = run("check_history_sha.py")
+    assert r.returncode == 1 and "new or modified" in r.stderr, r.stdout + r.stderr
+    # Unchanged imported entries can only be reported as unverified, including
+    # after this receiving clone starts its own unrelated healthy local chain.
+    assert g("add", "docs/HISTORY.md").returncode == 0
+    assert g("commit", "-qm", "import historical claim").returncode == 0
     r = run("check_history_sha.py")
     assert r.returncode == 0 and "NOT verifiable in this checkout" in r.stdout, \
         r.stdout + r.stderr
-    # With a chain present, the hand-written label has no release-pass: drift.
     m("append", "--type", "note", "--message", "chain exists")
     r = run("check_history_sha.py")
-    assert r.returncode == 1 and "no release-pass event" in r.stderr, r.stdout + r.stderr
+    assert r.returncode == 0 and "NOT verifiable in this checkout" in r.stdout, \
+        r.stdout + r.stderr
 
 
 def test_release_gate_records_release_pass_before_the_anchor(tmp_path) -> None:

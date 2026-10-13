@@ -36,6 +36,18 @@ from pathlib import Path
 import yaml
 
 REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+# v3.8.44 (round-27, surfaced by the gate's new interprocedural pass): a
+# postmortem gate is satisfied by finding a symbol in a TEST FILE, so reading
+# that file through a planted link would let outside bytes vouch for a gate
+# that the repo's own tests do not implement. The fallback fails closed —
+# no content means the symbol is absent means the gate is unresolved.
+try:
+    from _doc_common import safe_read_text as _safe_read_text
+except Exception:  # pragma: no cover - stripped install
+    def _safe_read_text(path, root=None, max_bytes=None, tail_bytes=None):
+        return None
 POSTMORTEMS_DIR = REPO / "docs" / "postmortems"
 
 
@@ -117,7 +129,7 @@ def _file_has_symbol(test_file: Path, symbol: str) -> bool:
     contract — they're load-bearing data, not just helpers."""
     if not test_file.is_file():
         return False
-    text = test_file.read_text(encoding="utf-8")
+    text = _safe_read_text(test_file, REPO, max_bytes=64 << 20) or ""
     # Function or constant assignment at module level.
     return bool(
         re.search(rf"^def\s+{re.escape(symbol)}\s*\(", text, re.MULTILINE)

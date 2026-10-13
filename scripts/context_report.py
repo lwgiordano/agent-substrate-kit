@@ -35,12 +35,31 @@ Usage: context_report.py [--root PATH] [--json]
 Exit: 0 always (informational).
 """
 from __future__ import annotations
-import argparse, hashlib, json, sys
+import argparse, hashlib, json, os, sys
 # READ-ONLY contract: importing a sibling (_substrate_root) would otherwise write
 # scripts/__pycache__/*.pyc. Disable bytecode BEFORE the local import. (v3.6.3)
 sys.dont_write_bytecode = True
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+def _repo_root():
+    """Repo root for containment checks in functions that take no root param."""
+    try:
+        from _substrate_root import substrate_root as _sr2
+        return _sr2()
+    except Exception:
+        return Path.cwd()
+
+
+# v3.8.43 (round-26): shared guarded file-IO helpers. Fallbacks fail CLOSED —
+# a reader yields None (no usable content) and a writer RAISES; neither
+# degrades to an unguarded operation.
+
+try:
+    from _doc_common import safe_read_text as _safe_read_text
+except Exception:  # pragma: no cover - stripped install
+    def _safe_read_text(path, root=None, max_bytes=None, tail_bytes=None):
+        return None
 try:
     from _substrate_root import substrate_root as _sr
     _DEFAULT_ROOT = _sr()
@@ -176,7 +195,7 @@ def build(root: Path) -> dict:
     for rel in ("CLAUDE.md", "AGENTS.md"):
         p = root / rel
         if p.is_file():
-            data = p.read_bytes()
+            data = (_safe_read_text(p, root, max_bytes=64 << 20) or '').encode('utf-8', 'replace')
             h.update(data)
             prefix_bytes += len(data)
     keystone = h.hexdigest()
@@ -265,11 +284,18 @@ def _print(d: dict) -> None:
 
 
 # Warn-only token budgets (v3.7.8) — defaults; surfaced by `--budget`, never a gate.
+# knowledge_doc (v3.8.30) is PER-DOC, not an aggregate: the kit's own
+# 00_substrate.md reached ~17.8k tok — 75% of all on-demand context and the #1
+# contributor by 15x — because context-report MEASURED but nothing flagged it.
+# The knowledge-doc template prescribes "one doc per coherent subsystem"
+# (contract/organization/scope); a doc many times this budget has usually become
+# a changelog, which is what docs/HISTORY.md is for. Env-overridable.
 _BUDGETS = {"always_loaded_prompt": 2500, "AGENTS.md": 1500,
-            "skill_index": 1500, "session_current_json": 2000}
+            "skill_index": 1500, "session_current_json": 2000,
+            "knowledge_doc": int(os.environ.get("SUBSTRATE_KNOWLEDGE_DOC_TOKENS") or 3000)}
 
 
-def _budget(d: dict) -> list:
+def _budget(d: dict, root: Path) -> list:
     files = d["always_loaded"]["files"]
     agents = next((v for k, v in files.items() if k == "AGENTS.md"), 0)
     skill = next((v for k, v in files.items() if k.startswith("skill index")), 0)
@@ -277,8 +303,25 @@ def _budget(d: dict) -> list:
     rows = [("always_loaded_prompt", d["always_loaded"]["est_tokens"]),
             ("AGENTS.md", _tok(agents)), ("skill_index", _tok(skill)),
             ("session_current_json", _tok(cur))]
-    return [{"item": item, "est_tokens": tok, "budget": _BUDGETS[item],
-             "status": "warn" if tok > _BUDGETS[item] else "pass"} for item, tok in rows]
+    out = [{"item": item, "est_tokens": tok, "budget": _BUDGETS[item],
+            "status": "warn" if tok > _BUDGETS[item] else "pass"} for item, tok in rows]
+    # One row per OVER-budget knowledge doc, named, so the warning is actionable
+    # rather than an aggregate nobody can act on. Enumerate the source directory
+    # directly: largest_contributors is intentionally a top-ten display and must
+    # never become an accidental completeness boundary for budget enforcement.
+    kb = _BUDGETS["knowledge_doc"]
+    knowledge = root / "docs" / "knowledge"
+    docs = []
+    if knowledge.is_dir():
+        for path in knowledge.glob("*.md"):
+            if path.is_file() and not path.name.startswith("_"):
+                rel = path.relative_to(root).as_posix()
+                docs.append((_tok(_size(path)), rel))
+    for tok, rel in sorted(docs, key=lambda row: (-row[0], row[1])):
+        if tok > kb:
+            out.append({"item": f"knowledge_doc:{rel}", "est_tokens": tok,
+                        "budget": kb, "status": "warn"})
+    return out
 
 
 def main() -> int:
@@ -287,9 +330,10 @@ def main() -> int:
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--budget", action="store_true", help="evaluate warn-only token budgets")
     a = ap.parse_args()
-    d = build(Path(a.root))
+    root = Path(a.root).resolve()
+    d = build(root)
     if a.budget:
-        d["budget"] = _budget(d)
+        d["budget"] = _budget(d, root)
     if a.json:
         print(json.dumps(d, indent=2))
     else:

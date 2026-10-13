@@ -27,7 +27,8 @@ bash /path/to/agent_substrate_kit_v3/bootstrap.sh --profile standard --lang auto
 --profile starter|standard|strict
 --lang auto|python|node|go|none
 --force                    Overwrite existing substrate-owned files
---install-tools            Best-effort install of dev tooling
+--install-tools            Install dev tooling (runs `manage.sh setup`; bootstrap
+                           FAILS if that setup does not complete — v3.8.23)
 --no-doctor                Skip final doctor check
 ```
 
@@ -41,7 +42,37 @@ bash /path/to/agent_substrate_kit_v3/bootstrap.sh --profile standard --lang auto
 | 4-field bug-fix commit protocol + postmortem-per-bugfix hooks | — | — | yes |
 | Extras (calibration, stale-phrases, license headers) | — | — | yes |
 
-## Current status (v3.7.24)
+## Current status (v3.9.3)
+
+**v3.9.3** — HISTORY outcome labels police claims, not silence. An entry with no
+label reads as `unverified` and is reported, not failed, so merging a branch whose
+entries were written by an older tool can no longer leave HISTORY permanently red.
+`shipped-green` still needs release-gate proof.
+
+**v3.9.2** — the test files the kit copies into a consumer's `tests/` pass the
+consumer's ruff rules.
+
+**v3.9.1 — fixes found in consumer repos.** Every tree walker skips a nested
+session worktree (`.claude/worktrees/<name>`) that git confirms, and skips
+nothing when git cannot answer. The leak scanner is now `check_leaks.py`: its
+old name matched the kit's own read deny rule. The bus reader lists claims it
+cannot parse instead of reporting none open, `./manage.sh bus --digest` shows
+open claims and recent entries, and bootstrap seeds a bus with a union merge
+rule. Upgrades keep a grown bus and a project's `tests/conftest_project.py`.
+The pytest watchdog dumps to `.pytest_cache/watchdog-dump.txt`. Eleven lessons
+from those repos are in `docs/lessons.jsonl`, each with a test.
+
+**Memory that is delivered, not just kept.** A fresh session is told the
+operator's goals (`docs/INTENT.md` objectives), the lesson from each recent
+HISTORY entry, and the rules in `docs/lessons.jsonl` whose triggers match what
+just changed. Each lesson is bound to a test or gate that must still exist.
+HISTORY entries carry outcome labels; `shipped-green` needs release-gate
+evidence. The memory chain attests HISTORY, REJECTED and lessons entry by
+entry. `./manage.sh recall "<question>"` returns ranked doc sections under a
+token budget, and `./manage.sh prove` removes each registered guard in a copy of
+the tree and requires its tests to fail, in the release gate too. Commits stay
+fast: the full suite runs at push, in `check`, CI and release. CI measures
+sandbox containment instead of skipping it.
 
 **Local-first, remote-expandable.** The base is offline-complete (memory,
 hooks, validators, evals, sandbox, release bundle) — no GitHub/CI/token/remote
@@ -163,6 +194,26 @@ Known limitations, by design:
 See `CHANGES_V3.md` for the full per-version remediation history (v3.2.0–v3.5.10).
 See `BENCHMARK.md` for the reproducible block-rate / false-positive-rate result
 (regenerate with `./manage.sh evals --report`).
+
+### One-time v3.8.32 knowledge-boundary migration
+
+Upgrading a pre-v3.8.32 consumer across this boundary must run the **verified new
+kit's** engine against the old repository. The old consumer's `./manage.sh
+upgrade` dispatches its already-installed engine, which cannot know the future
+ownership rule and may falsely report an edited project knowledge sibling as
+machinery drift. From a trusted checkout or an extracted release that you have
+already verified, run:
+
+```bash
+cd /path/to/verified-agent-substrate-kit-v3.8.32
+./manage.sh upgrade --root /path/to/consumer --from . --allow-unverified --write
+```
+
+Here `--allow-unverified` applies only to the already-verified extracted
+directory source; do not use it as a substitute for release verification. After
+this one-time crossing, the consumer's installed v3.8.32 engine handles normal
+future upgrades. A scheduled auto-upgrade installed before v3.8.32 likewise
+needs this manual crossing once.
 
 ## What is new in v3.2 / v3.2.1
 

@@ -148,9 +148,13 @@ v3's position is that any discipline a hook can enforce, a hook MUST
 enforce (see Principle 14).
 
 **Recovery protocol:**
-1. Read `docs/CURRENT_SESSION.md` first.
-2. Cross-reference with `git log -5 --oneline` and last 5 HISTORY
-   entries.
+1. Trust the STRUCTURED handoff that SessionStart re-injects (from
+   `.substrate/memory/tasks/current.json`) plus the sanitized HISTORY
+   summaries it now injects. `docs/CURRENT_SESSION.md` is a DERIVED,
+   human-only view — never re-injected, never trusted as input (a stale
+   or attacker-planted copy must not become durable context).
+2. Cross-reference with `git log -5 --oneline` and the injected HISTORY
+   entries before trusting the snapshot.
 3. Resume from the recorded TODO state.
 
 `scripts/session_handoff.py` (hook-fired) writes from `docs/.todo_state.json`
@@ -416,5 +420,8 @@ Two design rules for substrate hooks:
    needs `uv sync` to have happened is a hook that silently never ran.
 
 What remains honor-system after v3: date-bumps on knowledge docs
-(reading the diff cannot be mechanically verified) and the startup
-protocol itself. Everything else moved to mechanism.
+(reading the diff cannot be mechanically verified). The startup
+protocol's "read the changelog" step was itself mechanized in v3.8.0 —
+SessionStart injects the last HISTORY summaries via the hook — so what
+is left is mostly the human review-date judgement. Everything else
+moved to mechanism.

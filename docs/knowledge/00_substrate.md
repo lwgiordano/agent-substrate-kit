@@ -1,257 +1,64 @@
 ---
-purpose: Universal Agent Substrate Kit v3 files installed in this repo.
-last_human_reviewed: 2026-07-02
+purpose: Entry point for current substrate contracts and functional knowledge.
+last_human_reviewed: 2026-09-28
 covers:
-  - extras/calibrate_diy_ultrareview.py
-  - extras/check_license_headers.py
-  - extras/check_stale_phrases.py
-  - scripts/_doc_common.py
-  - scripts/_minisign.py
-  - scripts/_substrate_config.sh
-  - scripts/_substrate_root.py
-  - scripts/_substrate_surfaces.py
-  - scripts/_verify_backends.py
-  - scripts/agent_system_audit.sh
-  - scripts/append_history.py
-  - scripts/build_review_bundle.py
-  - scripts/check_agent_harness.py
-  - scripts/check_bandit_skip_baseline.py
-  - scripts/check_coverage_floors.py
-  - scripts/check_dep_cooldown.py
-  - scripts/check_doc_drift.py
-  - scripts/check_exfil_guard.py
-  - scripts/check_finding_response.py
-  - scripts/check_github_governance.py
-  - scripts/check_harness_patterns.py
-  - scripts/check_harness_smoke.py
-  - scripts/check_history_sha.py
-  - scripts/check_hook_smoke.py
-  - scripts/check_import_shadowing.py
-  - scripts/check_policy_code_integrity.py
-  - scripts/check_postmortem_for_bug_fix.py
-  - scripts/check_postmortem_gates_resolved.py
-  - scripts/check_python_syntax.py
-  - scripts/check_secrets.py
-  - scripts/check_substrate_config.py
-  - scripts/check_validator_input_coverage.py
-  - scripts/code_shape.py
-  - scripts/command_policy.py
-  - scripts/context_report.py
-  - scripts/copilot_hook_adapter.py
-  - scripts/diy_ultrareview.sh
-  - scripts/lang_gate.sh
-  - scripts/lint_on_write.py
-  - scripts/memory_log.py
-  - scripts/release_gate.sh
-  - scripts/remote_detect.py
-  - scripts/run_python_gate.sh
-  - scripts/run_security_scanners.py
-  - scripts/run_smoke_verification.py
-  - scripts/run_substrate_evals.py
-  - scripts/sandbox_detect.py
-  - scripts/sandbox_exec.sh
-  - scripts/session_handoff.py
-  - scripts/setup_release_key.sh
-  - scripts/setup_branch_protection.sh
-  - scripts/substrate_audit.py
-  - scripts/substrate_doctor.py
-  - scripts/substrate_upgrade.py
-  - scripts/todo_state_hook.py
-  - scripts/update_manifest.py
-  - scripts/verify_release.py
-  - scripts/write_install_json.py
+  - bootstrap.sh
+  - manage.sh
+  - package_release.sh
 ---
 
-# Substrate
+# Substrate knowledge map
 
-This document covers the installed AI/self-audit substrate scripts.
+The Agent Substrate Kit installs deterministic project checks, agent hooks,
+tamper-evident session memory, policy evals, and release verification. Running
+code and deterministic results outrank this documentation. Current ADRs rank
+next, followed by these knowledge docs and then append-only HISTORY.
 
-The egress-containment tier (v3.5.x) is a backend abstraction: `sandbox_detect.py`
-resolves a backend (`anthropic-srt` / `bubblewrap` / `seatbelt` / `none`) from
-`.substrate/sandbox.json` and `sandbox_exec.sh` dispatches through it. When
-`.substrate/required_sandbox=1` (set by `bootstrap --profile strict+sandbox`),
-containment is a frozen minimum: `check_substrate_config.py` blocks disabling it,
-the sandbox policy is validated by the normal gate, and the trusted-base audit
-freezes the flag — mirroring the profile-authority model.
+The source kit keeps detail in function-oriented documents:
 
-v3.5.2 adds runtime ENFORCEMENT: `sandbox_exec.sh` runs commands under a secretless
-`env -i` (allow-listed vars only, from the `env` policy) marked `SUBSTRATE_SANDBOXED=1`;
-the language/python gates (`lang_gate.sh`, `run_python_gate.sh`) route project/test
-execution through the sandbox when `SUBSTRATE_SANDBOX=1`; and `run_substrate_evals.py`
-adds `sandbox_exfil_contained`, proving a network exfil attempt is contained at the
-kernel (not merely detected). v3.5.3 completes non-interactive routing — the
-configured `LINT_CMD`/`TYPECHECK_CMD`/`TEST_CMD` and the release-gate pytest path
-also run through the sandbox (`manage.sh`/`release_gate.sh` `run_lang`/`run_tool`,
-not pre-commit itself) — and fixes the eval accounting so a SKIPPED containment eval
-(no backend) is surfaced and excluded from the block total, and FAILS under
-`--require-sandbox-evals` / when containment is required. v3.5.4 extends the same
-skip semantics to the `--run-one` diagnostic (a skipped containment eval reports
-`status=skipped`/`ok=null`, never `ok=true`, and fails under `--require-sandbox-evals`).
+- [Install and adoption](01_install_adoption.md)
+- [Upgrade integrity](02_upgrade_integrity.md)
+- [Memory and sessions](03_memory_sessions.md)
+- [Policy and governance](04_policy_governance.md)
+- [Evals and assurance](05_evals_assurance.md)
+- [Release and distribution](06_release_distribution.md)
+- [Agent context governance](07_agent_context_governance.md)
+- [The memory trust anchor](08_memory_anchor.md)
+- [Deterministic validators](09_deterministic_validators.md)
+- [Lessons, records, and recall](10_lessons_recall.md)
 
-v3.5.5 closes the interactive tier: when `required_sandbox=1`, `check_exfil_guard.py`
-**fail-closes** an interactive Bash command that is not PROVABLY contained. The
-PreToolUse hook cannot read the host's runtime sandbox state (Claude exposes no
-sandbox field/env to hooks), so it requires proof — routed through `sandbox_exec.sh`
-(`SUBSTRATE_SANDBOXED=1`), Claude strict-sandbox configured (`sandbox.enabled` +
-`allowUnsandboxedCommands:false`, read from settings), or an operator attestation
-(`SUBSTRATE_HOST_SANDBOX=1`) — and BLOCKS otherwise. No faking: absent proof, it
-refuses. Opt-in (only when `required_sandbox=1`).
+## Operating model
 
-v3.5.6 makes the containment proof HOST-BOUND: Claude's `settings.json` proves
-containment only when the invoking host is Claude (`SUBSTRATE_HOOK_HOST=claude`, set
-in the generated Claude/Codex hook commands), never for a Codex/Copilot/unknown
-invocation; the **Copilot adapter** now applies the same gate (`host=copilot`,
-emitting `permissionDecision: deny`); and a malformed/missing Bash payload **fails
-closed** under `required_sandbox=1`. Env-marker proofs (`SUBSTRATE_SANDBOXED`,
-`SUBSTRATE_HOST_SANDBOX`) remain host-independent. Codex-native sandbox detection is
-still not wired; the attestation + routing markers cover it. The
-`agent_bash_uncontained_blocked` eval makes this measured behavior. v3.5.7: the
-Copilot adapter also fails CLOSED (deny) on malformed/missing shell payloads under
-`required_sandbox=1` (parity with the main hook), and skipped eval rows print `[skip]`.
-v3.5.8: `run_substrate_evals.py --report` (`./manage.sh evals --report`) writes a
-reproducible `BENCHMARK.md` (version + block-rate/FP-rate + surfaced skips + reproduce
-command) — the self-published, anyone-can-reproduce result. v3.5.9: the report embeds
-NO mutable pre-commit git hash; exact provenance (commit + source-tree + artifact
-SHA-256) is deferred to `RELEASE_MANIFEST.json` so it is never stale/non-reproducible.
+The local substrate is offline-complete. Profiles (`starter`, `standard`, and
+`strict`) select governance strength. Language, runner, sandbox, and remote
+governance are separate capabilities. Frozen `required_*` files set minimums
+that local configuration may raise but may not lower.
 
-v3.6.0 makes the LOCAL/REMOTE/DEEP scaling model explicit. The base is offline-complete
-(memory, hooks, validators, evals, sandbox, release bundle) — no GitHub/CI/token/remote
-needed. REMOTE governance (CODEOWNERS coverage + the trusted-base authority) is now an
-ORTHOGONAL tier (`SUBSTRATE_REMOTE_GOVERNANCE`, locked by `.substrate/required_remote_
-governance`, frozen by the trusted-base audit), DECOUPLED from the `strict` profile:
-a repo can be strict-LOCAL (no remote → never told it is "broken" for lacking a
-GitHub-only CODEOWNERS) or standard+remote. `bootstrap --profile strict+remote` (or
-`./manage.sh enable remote --write`) turns it on; the trusted-base CI workflow ships only
-with the remote tier. `manage.sh check` enforces CODEOWNERS only when the remote tier is
-on; strict-local gets operational+security. `remote_detect.py` is OFFLINE detection (reads
-`.git/config`, no network/token) feeding the new `go-live` map, which groups rows by tier
-(local/remote/deep), surfaces the next rung + exact `enable` command, and NEVER claims
-`production_hardened` offline (live GitHub enforcement is unverifiable without `enable
-remote --check`). DEEP rungs (security scanners, deep audit) are shown as available, not
-wired. The `+`-flag aliases (`strict+sandbox`, `strict+remote`, `strict+remote+sandbox`)
-expand to orthogonal flags, never new profile enums.
+Remote governance adds CODEOWNERS and trusted-base checks. It does not let an
+offline command prove that GitHub branch protection is active. Sandbox mode
+routes executable project commands through an available host backend and fails
+closed when a required backend or containment proof is missing.
 
-v3.6.1 completes the remote axis. `go-live` is now FAST: `--go-live` is excluded from
-full-doctor mode, so it runs only cheap base checks (files + hook wiring) then offline
-detection + fast evals — not the integrity/operational/manifest/harness chain (which
-stays in `manage.sh check`). And remote governance is complete-or-blocked: when the flag
-is enabled (or locked) but `.github/workflows/trusted-base-audit.yml` is missing, the
-gate BLOCKS (the tier can't claim trusted-base authority it lacks). `enable remote
---write` installs that workflow from `.substrate/trusted-base-audit.yml.template`
-(staged by bootstrap, frozen by the trusted-base audit) — one command, no re-bootstrap.
+The source checkout and an installed consumer have different layouts. These
+eight documents belong to the source kit. Bootstrap generates one compact,
+consumer-local `docs/knowledge/00_substrate.md` whose front matter inventories
+the installed top-level Python and shell scripts. The seven source siblings are
+not package-owned consumer files.
 
-v3.6.2 adds `context_report.py` (`./manage.sh context-report [--json]`) — a LOCAL,
-read-only token/context-footprint measurement (no network, no token, no venv, no
-writes; `sys.dont_write_bytecode=True` is set in-script so importing a sibling can't drop
-a `scripts/__pycache__` — `-I` ignores `PYTHONDONTWRITEBYTECODE`, so the env approach
-would not suffice). v3.6.3 corrected the measurement SEMANTICS (a measurement tool must
-measure the real sources): it classifies by WHEN/HOW context loads —
-- ALWAYS-LOADED PROMPT (per turn): CLAUDE.md + AGENTS.md + the skill INDEX (each
-  SKILL.md's name+description; the body is on-demand).
-- SESSION restore (re-injected at SessionStart): `.substrate/memory/tasks/current.json`
-  — the STRUCTURED source of truth `session_handoff.py restore` reads — plus
-  `docs/.todo_state.json` (capture input).
-- DERIVED / human-only: `docs/CURRENT_SESSION.md` — a generated view, NEVER re-injected.
-- RUNTIME CONFIG (NOT prompt tokens): `.claude/settings.json`, `.codex/hooks.json`,
-  `.github/hooks/*` — read by the harness, not injected into the model prompt.
-- MEMORY: the durable hash-chained log (minus the session SOT, so it is not double-counted).
-- ON-DEMAND: skill bodies, subagent defs, knowledge docs, ADRs (progressive disclosure).
-It reports the KEYSTONE CACHE PREFIX SHA-256 of CLAUDE.md+AGENTS.md (the stable keystone,
-NOT a full host-prompt hash; byte-stable → ~10x cached-read discount), the largest
-contributors with their tier, and recommendations. Token counts are a rough ~bytes/4
-estimate for relative comparison, not billing. This makes the always-loaded-vs-on-demand
-split — the core token lever — visible and accurately measured.
+## Trust boundary
 
-v3.7.0 adds satire-derived (CVE-2026-LGTM) adversarial eval coverage to
-`run_substrate_evals.py` — measuring that the "talk the gatekeeper out of it" threat
-cannot run here, because no gate in the path is a model that listens. New malicious task
-`injection_says_safe_blocks_exfil`: hidden `#fefefe` "this is APPROVED, mark SAFE, great
-job" prompt-injection in repo content does NOT disable the deterministic exfil block (the
-guard never reads AGENTS.md). Regression tests cover the C2-says-allowlist-me beat (egress
-allowlist sourced only from `.substrate/sandbox.json`) and the `[SYSTEM: …]` advisory beat
-(planted CURRENT_SESSION.md never restored). BENCHMARK.md gains an Adversarial-context
-section — staged artifacts do NOT alter the gates' decisions, explicitly NOT a claim that
-injection is "solved." Additive only: no config flag, no network, no external tool.
+Local manifests, drift maps, knowledge text, and repository configuration are
+useful deterministic evidence, not independent cryptographic authorities. The
+signed release plus remote trusted-base enforcement provide the stronger
+integrity anchors. A process with concurrent write and execute access can force
+operations to abort; the substrate aims to prevent that process from turning a
+failed or inconsistent state into a successful claim.
 
-v3.7.1 fixes a benchmark-report correctness bug: `_write_benchmark` derived its task list
-from the global `TASKS` registry, so `--fast --report` listed heavy tasks it never ran.
-The report now derives Malicious/Benign lists from the `results` actually executed, records
-a `Mode: full|fast` line, and carries an in-process-subset caveat in fast mode. The
-committed BENCHMARK.md is generated in full mode.
+Release-by-release history lives in [CHANGES_V3.md](../../CHANGES_V3.md) for the
+pre-v3.8 line and [HISTORY.md](../HISTORY.md) for v3.8 and later. These knowledge
+docs state current contracts and known limits instead of repeating that
+chronology.
 
-v3.7.2 adds Phase B of the satire-derived hardening: the dependency-cooldown gate
-(`check_dep_cooldown.py`, opt-in `SUBSTRATE_DEP_COOLDOWN=N` days, 0=off). It flags DIRECT
-deps whose resolved version published < N days ago — a FRESH-VERSION RISK SIGNAL (the
-window a malicious new fork/typosquat exploits), explicitly NOT a malware detector. The
-RULE is a deterministic date comparison; the DATA (publish dates) is registry metadata
-(network), so it is an opt-in DEEP tier, never part of the offline base — `manage.sh
-check` runs it only when the flag is > 0. SKIP-HONEST: a dep whose publish time can't be
-determined (offline, uncached, registry-ambiguous) is SKIPPED with a reason, never
-assumed young; results cache to `.substrate/dep_cooldown_cache.json` (gitignored;
-publish dates are immutable). Direct deps only (npm package.json+lock / pyproject+uv.lock
-/ go.mod non-indirect); transitive is a later mode. Exit 0 (clean / skips-only) | 1
-(young found, or required+unverifiable) | 2 (malformed lockfile/config). Mirrored in both
-validators (`_INT_KEYS`), lockable via `.substrate/required_dep_cooldown` (frozen by the
-trusted-base audit), and surfaced as a go-live deep row.
-
-v3.7.4 closes the Phase-B audit findings + a release-provenance class: required-mode
-cooldown now BLOCKS on ANY unverifiable dep (one verified dep no longer masks a skipped
-one); `package_release.sh` marks `git_commit` as `<commit>-dirty` when the tree has
-uncommitted tracked changes so the manifest never claims a clean commit it isn't; the
-committed BENCHMARK.md is regenerated per release (asserted by a version-match test); full
-`--json`/trace eval `results[]` normalize skipped tasks to `status:"skipped"`/`ok:null`
-(not `ok:true`); and the offline go-live `dep_cooldown` row reports `warn` (enabled, runs
-in `manage.sh check`) rather than overclaiming `pass`.
-
-v3.7.5 adds MEASURED memory coverage (memory was strong but un-evaluated): new eval tasks
-`memory_chain_rewrite_detected` (tampering events.jsonl breaks the hash chain → `memory_log
-verify` detects), `memory_anchor_mismatch_detected` (post-anchor history rewrite → `verify
---anchor` detects; skip-honest where a git-note anchor can't be written), and benign
-`memory_restore_from_structured` (a valid current.json IS restored — the positive path
-works). The go-live `memory_anchor` row is now 3-state: no-log→warn | hash-chain
-BROKEN→fail | ok+anchored→pass | ok+unanchored→warn (the gate already BLOCKS a broken
-chain; go-live surfaces it).
-
-v3.7.6 fixes that go-live row to VERIFY the anchor (compare `_anchored_head()` to
-`_head_hash()`), not just check a note exists — a stale anchor (new events since last
-anchor, or a rewrite) is now `fail`, not a false `pass`. This surfaced a real isolation
-bug: `capture_for_root(root)` scoped session_handoff's files but not memory_log's globals,
-so the durable event `capture()` appends leaked into the PROCESS repo — meaning running
-the eval suite / go-live silently mutated the host repo's memory and staled its anchor.
-`_root_context` now rebinds `memory_log.ROOT/MEM/EVENTS` too. Also v3.7.6: the Copilot
-adapter now FAILS CLOSED (denies shell tools) when the policy/containment guard can't
-import, instead of failing open. v3.7.7 completes that posture: the malformed/non-object/
-empty-input paths (which route through `_deny_if_required`, whose `required` came from a
-fallback stub) also deny when the guard import failed — so a double fault (broken guard +
-malformed Copilot JSON) no longer allows. Non-shell tools still allow; a working guard is
-unchanged.
-
-v3.7.8 adds engineering-SHAPE governance (the reviewability gap the security gates don't
-cover): `code_shape.py` (`./manage.sh code-shape [--json]`) — a LOCAL, read-only,
-WARN-ONLY, deterministic report (no LLM, no gate, no network, no writes). Repo-wide: the
-largest source files, files over a line threshold (sprawl), and long python functions (AST;
-god-function risk). Diff (vs HEAD + untracked): changed lines, a large-diff warning,
-source-changed-without-tests, and flags for governance/CI + dependency-manifest churn —
-the high-review-value AI-diff failure modes. It does NOT block `check`. Plus
-`context-report --budget`: warn-only token thresholds (always-loaded prompt / AGENTS.md /
-skill index / session current.json) on top of the footprint report. Both are reports, not
-gates — they surface shape so a human/agent decides; no config flag added.
-
-v3.7.9 makes code-shape measure the USER's PROJECT, not the substrate it is installed into
-(the v3.7.8 bug: a fresh install read as "your repo has sprawl + a huge diff", which was
-the harness). Substrate-owned files are classified via the canonical
-`_substrate_surfaces` inventory (+ `extras/`; `tests/` is mixed so only the kit's specific
-shipped test files are owned) and EXCLUDED from the project shape by default — they appear
-in a separate substrate-owned summary; `--include-substrate` dogfoods the kit. An
-install-dominated diff (substrate lines dominate / fresh bootstrap) is reported as a
-substrate install, not a large project diff (the large-diff + source-without-tests warnings
-key off PROJECT lines only). Governance-churn detection was extended to the agent/control
-surfaces it missed (`.substrate/**`, AGENTS.md/CLAUDE.md/GEMINI.md, `.claude`/`.codex`,
-CODEOWNERS, `.mcp.json`, `docs/knowledge|decisions`, `scripts/**`).
-
-v3.7.10 completes governance churn: a governance-ONLY diff (an agent edits AGENTS.md /
-.substrate/config with no project source — the "agent changed its own rules" case) now
-warns (v3.7.9 only warned when project code also changed), and the classifier was extended
-to the canonical context surfaces it missed (docs/HISTORY.md, docs/README.md,
-docs/ARCHITECTURE.md, docs/INTENT.md, docs/blind-spot-checklists/**, docs/templates/**,
-docs/postmortems/**, design-system/**).
+`check_raw_file_io.py` joins the structural pins in `manage.sh check`: raw file
+I/O against a repo-derived path fails the gate, so the link/TOCTOU class that
+recurred across six audit rounds is enforced mechanically rather than by review.

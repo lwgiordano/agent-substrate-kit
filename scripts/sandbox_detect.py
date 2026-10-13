@@ -38,6 +38,17 @@ import shutil
 import sys
 from pathlib import Path
 
+# v3.8.43 (round-26): shared guarded file-IO helpers. Fallbacks fail CLOSED —
+# a reader yields None (no usable content) and a writer RAISES; neither
+# degrades to an unguarded operation.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+try:
+    from _doc_common import safe_read_text as _safe_read_text
+except Exception:  # pragma: no cover - stripped install
+    def _safe_read_text(path, root=None, max_bytes=None, tail_bytes=None):
+        return None
+
 _BACKENDS = {"auto", "anthropic-srt", "bubblewrap", "seatbelt", "none"}
 _NETWORK = {"deny", "allowlist"}
 _WRITE_SCOPE = {"repo", "cwd", "none"}
@@ -88,7 +99,7 @@ def _load_config(root: Path) -> dict:
     if not path.exists():
         return cfg
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(_safe_read_text(path, root, max_bytes=8 << 20) or "null")
     except Exception as e:
         raise ValueError(f"sandbox.json is not valid JSON: {e}") from e
     if not isinstance(data, dict):

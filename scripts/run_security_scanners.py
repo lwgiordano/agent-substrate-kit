@@ -34,6 +34,37 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+# v3.8.43 (round-26): shared guarded file-IO helpers. Fallbacks fail CLOSED —
+# a reader yields None (no usable content) and a writer RAISES; neither
+# degrades to an unguarded operation.
+
+try:
+    from _doc_common import safe_atomic_write as _safe_atomic_write
+except Exception:  # pragma: no cover - stripped install
+    def _safe_atomic_write(*a, **k):
+        raise OSError("safe_atomic_write unavailable — refusing an unguarded write")
+
+# v3.8.46 (round-29 P2): guarded mkdir. A raw mkdir(parents=True) BEFORE a
+# guarded write creates the directory through a symlinked ancestor and only
+# then gets refused — the mutation has already happened outside the repo.
+try:
+    from _doc_common import safe_mkdir as _safe_mkdir
+except Exception:  # pragma: no cover - stripped install
+    def _safe_mkdir(*a, **k):
+        raise OSError("safe_mkdir unavailable — refusing an unguarded mkdir")
+
+
+# v3.8.43 (round-26 P2): the canonical guarded reader. The fallback returns None
+# ("no usable config") rather than an unguarded read, so a stripped install
+# degrades to the caller's fail-closed default instead of blocking on a FIFO.
+try:
+    from _doc_common import safe_read_text as _safe_read_text
+except Exception:  # pragma: no cover - stripped install
+    def _safe_read_text(path, root=None, max_bytes=None, tail_bytes=None):
+        return None
+
+from _doc_common import read_lock as _dc_read_lock  # noqa: E402
 try:
     from _substrate_root import substrate_root as _sr
     _DEFAULT_ROOT = _sr()
@@ -53,8 +84,10 @@ SCANNERS = [
 
 def _cfg(root: Path, key: str, default: str = "0") -> str:
     cfg = root / ".substrate" / "config"
-    if cfg.is_file():
-        for ln in cfg.read_text(encoding="utf-8", errors="replace").splitlines():
+    # v3.8.43 (round-26 P2): guarded read — a FIFO config must not block a gate.
+    _cfg_text = _safe_read_text(cfg, root, max_bytes=1 << 20)
+    if _cfg_text is not None:
+        for ln in _cfg_text.splitlines():
             ln = ln.split("#", 1)[0].strip()
             if ln.startswith(key + "="):
                 return ln.split("=", 1)[1].strip().strip("\"'")
@@ -64,11 +97,15 @@ def _cfg(root: Path, key: str, default: str = "0") -> str:
 def _required(root: Path, argv) -> bool:
     if "--require" in argv:
         return True
-    p = root / ".substrate" / "required_security_scanners"
-    try:
-        return p.is_file() and p.read_text(encoding="utf-8").strip() == "1"
-    except OSError:
-        return False
+    # v3.8.36: canonical fail-closed lock read (Codex round-19) — the old
+    # `except OSError` both failed OPEN on I/O errors and CRASHED on
+    # undecodable bytes (UnicodeDecodeError is a ValueError). A malformed
+    # present lock now means the tier IS required.
+    state, val, _reason = _dc_read_lock(
+        root / ".substrate" / "required_security_scanners", {"0", "1"}, root=root)
+    if state == "bad":
+        return True
+    return state == "ok" and val == "1"
 
 
 def _run_scanner(cmd, root: Path) -> tuple[int, str]:
@@ -116,8 +153,9 @@ def main(argv=None) -> int:
         import hashlib
         run_id = hashlib.sha256(json.dumps(results, sort_keys=True).encode()).hexdigest()[:12]
         outdir = root / ".substrate" / "audits" / "security" / run_id
-        outdir.mkdir(parents=True, exist_ok=True)
-        (outdir / "results.json").write_text(json.dumps(results, indent=2) + "\n", encoding="utf-8")
+        _safe_mkdir(outdir, root)
+        _safe_atomic_write(outdir / "results.json",
+                           json.dumps(results, indent=2) + "\n", root=root)
     except Exception:
         pass
 

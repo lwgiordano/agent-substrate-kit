@@ -87,6 +87,10 @@ _BUG_FIX_SUBJECT_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^[A-Z]\d+(c\d+)?(-fix(-r\d+)?)\b", re.IGNORECASE),
     # Loose: `fix` or `bug` as a token followed by colon within first 60 chars
     re.compile(r"^.{0,60}\b(fix|bug)(es|ed|ing|fix|fixes)?\b.{0,30}:", re.IGNORECASE),
+    # v3.8.38: version-prefixed audit-remediation release (lock-step with
+    # check_postmortem_for_bug_fix). Scoped to remediation/finding language so
+    # feature releases do not trip.
+    re.compile(r"^v?\d+\.\d+\.\d+:.*(\bremediat\w*|\d+\s+findings?\b)", re.IGNORECASE),
 )
 
 

@@ -79,6 +79,18 @@
           }
         ]
       }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/completion_gate.py\"",
+            "timeout": 10
+          }
+        ]
+      }
     ]
   }
 }

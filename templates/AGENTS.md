@@ -7,11 +7,19 @@ hooks at context tail — never add it here.
 
 ## Startup protocol (keep it light)
 
-1. Read the last 5 entries in `docs/HISTORY.md`.
+1. Session start injects the `docs/INTENT.md` objectives, the last 5
+   `docs/HISTORY.md` summaries with each entry's Knowledge lesson, the
+   `docs/lessons.jsonl` rules whose triggers match recently changed files,
+   and the newest `docs/REJECTED.md` entries; verify them there (read the
+   files directly only if none were injected). Do not re-propose a rejected
+   approach without new information (`./manage.sh reject` logs one).
 2. If a session-handoff block was injected at session start, verify it
-   against `git log -5 --oneline` before trusting it.
+   against `git log -5 --oneline` before trusting it. If other agents work
+   this repo, run `./manage.sh bus --digest` (open claims + recent entries)
+   instead of reading all of `AGENT_BUS.md`.
 3. Read `docs/knowledge/*.md` and `docs/decisions/*.md` ONLY for the
-   area you are about to touch (just-in-time, not wholesale).
+   area you are about to touch (just-in-time, not wholesale);
+   `./manage.sh recall "<question>"` returns the matching sections.
 
 ## Source-of-truth order
 
@@ -28,8 +36,12 @@ hooks at context tail — never add it here.
 - Every TodoWrite is mirrored to `docs/.todo_state.json`.
 - Compaction and session end capture STRUCTURED state to
   `.substrate/memory/tasks/current.json`; session start restores from that
-  JSON. `docs/CURRENT_SESSION.md` is a derived human view only — never
-  re-injected, never trusted as input.
+  JSON plus sanitized HISTORY summaries, and records the git baseline to
+  `.substrate/memory/session_start.json`. `docs/CURRENT_SESSION.md` is a
+  derived human view only — never re-injected, never trusted as input.
+- Opt-in (SUBSTRATE_COMPLETION_GATE=1): a Stop-hook gate nudges when
+  project files changed with no self-audit recorded after the last
+  change (`./manage.sh memory skill-run self-audit`). Warning-only.
 
 ## Docs/code parity contract
 
@@ -77,6 +89,7 @@ Substrate profile: `{{PROFILE}}` (see `.substrate/config`).
 ./manage.sh doctor    # readiness: file/hook wiring, security, operational
 ./manage.sh check      # full validator chain + lint/typecheck/test + pre-commit
 ./manage.sh evals      # prove the policy BEHAVES (block-rate / false-positive-rate)
+./manage.sh prove      # remove each registered guard in a copy; its tests must fail
 ./manage.sh audit      # quick self-audit report
 ./manage.sh release    # package + verify from the built artifact
 ```

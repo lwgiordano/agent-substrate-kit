@@ -132,6 +132,22 @@ Copilot (`.github/hooks/`) in addition to Claude.
   frozen by the trusted-base guard. Put PROJECT scripts in `tools/`, `bin/`, or
   `project-scripts/` — a project file under `scripts/` will trip the freeze.
 
+## Optional: completion gate (v3.8.3, default OFF)
+
+A Stop-hook nudge for AI sessions: when project files changed and no
+self-audit was recorded after the last change, the agent sees a
+warning at Stop telling it to run the self-audit skill and record it
+(`./manage.sh memory skill-run self-audit`). Enable per session with
+`SUBSTRATE_COMPLETION_GATE=1`, or repo-wide with `COMPLETION_GATE="1"`
+in `.substrate/config` (env `=0` is the kill-switch either way).
+Warning-only in this release; a strict blocking mode ships only after
+the warn mode has been dogfooded. Fail-open by contract — it can
+never wedge a session.
+
+Note: upgrading to v3.8.3 changes `.claude/settings.json` (adds the
+Stop hook), so Claude Code will show a one-time re-trust prompt for
+project hooks.
+
 ## After all three are done
 
 The substrate is fully active:

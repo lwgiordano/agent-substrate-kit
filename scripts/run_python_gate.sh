@@ -53,12 +53,45 @@ run_tool() {
     "${cmd[@]}" "$@"
   fi
 }
+# Drop substrate-RESERVED paths from the ruff FILE ARGUMENTS (v3.8.26 / adoption:pyproject).
+# Bootstrap correctly REFUSES to clobber a pre-existing pyproject.toml, so a repo that already
+# had one (i.e. essentially every real Python product) never received the kit's
+# `[tool.ruff] extend-exclude` — ruff then fell back to its defaults, linted the VENDORED
+# substrate code, and E402 in scripts/*.py BLOCKED every commit. Config the operator may not
+# have cannot be the only thing standing between them and a working install, so the invariant
+# lives in the adapter. Filtering ARGUMENTS (rather than passing --config/--exclude) is purely
+# additive: it never overrides the repo's own ruff excludes, and it works identically for
+# `ruff check` and `ruff format` (which do not accept the same exclude flags).
+# `tests/` is deliberately NOT filtered: it is CONSUMER-owned (the vendored consumer tests are
+# ruff-clean), so skipping it would silently drop linting of the project's own tests.
+_ruff_args=()
+_had_paths="no"
+for _a in "$@"; do
+  case "$_a" in -*) _ruff_args+=("$_a"); continue;; esac
+  _had_paths="yes"
+  case "${_a#./}" in
+    scripts|extras|scripts/*|extras/*) continue;;
+    *) _ruff_args+=("$_a");;
+  esac
+done
+# If EVERY path argument was substrate-reserved, there is nothing left to lint — do NOT fall
+# through to a bare `ruff check` (with no paths ruff would walk the whole repo instead).
+_only_reserved="no"
+if [ "$_had_paths" = "yes" ]; then
+  _remaining="no"
+  for _a in ${_ruff_args[@]+"${_ruff_args[@]}"}; do
+    case "$_a" in -*) ;; *) _remaining="yes";; esac
+  done
+  [ "$_remaining" = "no" ] && _only_reserved="yes"
+fi
 case "$gate" in
-  # --force-exclude: honor [tool.ruff] extend-exclude (substrate-owned dirs) even
-  # though pre-commit passes filenames explicitly on the command line; without it,
-  # ruff lints/formats explicitly-passed paths regardless of the exclude list.
-  format)    run_tool ruff format --force-exclude "$@";;
-  lint)      run_tool ruff check --fix --force-exclude "$@";;
+  # --force-exclude: honor extend-exclude (substrate-owned dirs) even though pre-commit passes
+  # filenames explicitly on the command line; without it, ruff lints/formats explicitly-passed
+  # paths regardless of the exclude list.
+  format)    [ "$_only_reserved" = "yes" ] && exit 0
+             run_tool ruff format --force-exclude ${_ruff_args[@]+"${_ruff_args[@]}"};;
+  lint)      [ "$_only_reserved" = "yes" ] && exit 0
+             run_tool ruff check --fix --force-exclude ${_ruff_args[@]+"${_ruff_args[@]}"};;
   typecheck) run_tool mypy "$@";;
   test)      run_tool pytest tests/ -q "$@";;
   *) echo "run_python_gate: unknown gate '$gate'" >&2; exit 2;;

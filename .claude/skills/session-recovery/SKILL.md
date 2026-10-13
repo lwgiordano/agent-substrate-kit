@@ -8,8 +8,10 @@ description: Recover working state after context compaction, a crash, or startin
 Hooks do the capture automatically: PreCompact and SessionEnd write the
 STRUCTURED handoff to `.substrate/memory/tasks/current.json` (and a derived
 human view to `docs/CURRENT_SESSION.md`). SessionStart restores from the
-structured JSON only. This skill is the verification half — restored state
-is a CLAIM about the past, not ground truth.
+structured JSON only, and also injects the last 5 `docs/HISTORY.md` summary
+lines (sanitized) so the "read HISTORY" step is done for you. This skill is
+the verification half — restored state is a CLAIM about the past, not
+ground truth.
 
 ## Protocol
 
@@ -38,5 +40,6 @@ Before a risky operation, or when stopping mid-task without a hook trigger:
 ## Staleness rule
 
 `session_handoff.py restore` ignores structured handoffs older than 7 days
-and truncates to 4,000 chars. A truncated or missing handoff means HISTORY +
-git are the better recovery source — trust them over the snapshot tail.
+and truncates the handoff body to 4,000 chars (HISTORY summaries have their
+own 1,500-char budget). A truncated or missing handoff means HISTORY + git
+are the better recovery source — trust them over the snapshot tail.

@@ -1,0 +1,7 @@
+{
+  "backend": "auto",
+  "network": "deny",
+  "allowed_domains": [],
+  "write_scope": "repo",
+  "deny_read": ["~/.ssh", "~/.aws", "~/.config/gh", ".env"]
+}

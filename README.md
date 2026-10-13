@@ -27,7 +27,8 @@ bash /path/to/agent_substrate_kit_v3/bootstrap.sh --profile standard --lang auto
 --profile starter|standard|strict
 --lang auto|python|node|go|none
 --force                    Overwrite existing substrate-owned files
---install-tools            Best-effort install of dev tooling
+--install-tools            Install dev tooling (runs `manage.sh setup`; bootstrap
+                           FAILS if that setup does not complete — v3.8.23)
 --no-doctor                Skip final doctor check
 ```
 
@@ -41,11 +42,61 @@ bash /path/to/agent_substrate_kit_v3/bootstrap.sh --profile standard --lang auto
 | 4-field bug-fix commit protocol + postmortem-per-bugfix hooks | — | — | yes |
 | Extras (calibration, stale-phrases, license headers) | — | — | yes |
 
-## Current status (v3.3.13)
+## Current status (v3.9.3)
+
+**v3.9.3** — HISTORY outcome labels police claims, not silence. An entry with no
+label reads as `unverified` and is reported, not failed, so merging a branch whose
+entries were written by an older tool can no longer leave HISTORY permanently red.
+`shipped-green` still needs release-gate proof.
+
+**v3.9.2** — the test files the kit copies into a consumer's `tests/` pass the
+consumer's ruff rules.
+
+**v3.9.1 — fixes found in consumer repos.** Every tree walker skips a nested
+session worktree (`.claude/worktrees/<name>`) that git confirms, and skips
+nothing when git cannot answer. The leak scanner is now `check_leaks.py`: its
+old name matched the kit's own read deny rule. The bus reader lists claims it
+cannot parse instead of reporting none open, `./manage.sh bus --digest` shows
+open claims and recent entries, and bootstrap seeds a bus with a union merge
+rule. Upgrades keep a grown bus and a project's `tests/conftest_project.py`.
+The pytest watchdog dumps to `.pytest_cache/watchdog-dump.txt`. Eleven lessons
+from those repos are in `docs/lessons.jsonl`, each with a test.
+
+**Memory that is delivered, not just kept.** A fresh session is told the
+operator's goals (`docs/INTENT.md` objectives), the lesson from each recent
+HISTORY entry, and the rules in `docs/lessons.jsonl` whose triggers match what
+just changed. Each lesson is bound to a test or gate that must still exist.
+HISTORY entries carry outcome labels; `shipped-green` needs release-gate
+evidence. The memory chain attests HISTORY, REJECTED and lessons entry by
+entry. `./manage.sh recall "<question>"` returns ranked doc sections under a
+token budget, and `./manage.sh prove` removes each registered guard in a copy of
+the tree and requires its tests to fail, in the release gate too. Commits stay
+fast: the full suite runs at push, in `check`, CI and release. CI measures
+sandbox containment instead of skipping it.
+
+**Local-first, remote-expandable.** The base is offline-complete (memory,
+hooks, validators, evals, sandbox, release bundle) — no GitHub/CI/token/remote
+required. Three orthogonal capability axes layer on top: governance **profile**
+(starter/standard/strict), egress **sandbox** (`SUBSTRATE_SANDBOX`), and **remote
+governance** (`SUBSTRATE_REMOTE_GOVERNANCE` — CODEOWNERS coverage + the
+trusted-base authority). v3.6.0 **decoupled remote governance from the strict
+profile**: a repo can be strict-LOCAL (no remote → never told it is "broken" for
+lacking a GitHub-only CODEOWNERS) or standard+remote. `./manage.sh go-live` is the
+map across all three tiers — it surfaces the current state, the next rung, and the
+exact `enable` command, and **never claims production-hardening offline** (live
+GitHub enforcement needs `enable remote --check`). Turn the tier on with
+`bootstrap --profile strict+remote` or `./manage.sh enable remote --write` (which
+installs the trusted-base workflow from a staged template — no re-bootstrap). go-live
+is the **fast** map (cheap base checks + offline detection only, never the full gate),
+and enabling remote governance is **complete-or-blocked**: `check` refuses if the flag
+is on but the trusted-base workflow is missing — the tier can't claim authority it
+doesn't have. `./manage.sh context-report` measures the token/context footprint locally
+(always-loaded vs on-demand, the cache-prefix hash, largest contributors) so the lean
+keystone + progressive-disclosure design stays honest and visible.
 
 Credible for controlled trial in **standard mode** across Python, Node,
-Go, and no-language repos. **Strict mode** enforces CODEOWNERS coverage
-of the actual privileged files (last-match semantics, `*`/`**`/trailing-
+Go, and no-language repos. The **remote-governance tier** enforces CODEOWNERS
+coverage of the actual privileged files (last-match semantics, `*`/`**`/trailing-
 slash matching, placeholder rejection, 3 MB load-limit check),
 subdirectory-safe exfil policy, and environment-independent audits.
 Untrusted model/tool state — transcript turns AND TodoWrite labels — is
@@ -57,9 +108,9 @@ hook boundary). The substrate **pins three layers**, so a weakening at any
 of them BLOCKS the gate and requires an explicit, reviewed, CODEOWNED pin
 update: pattern **DATA** (`REQUIRED_PATTERN_SHA256` / `INTEGRITY_SHA256`
 regex hashes), policy + scanner **LOGIC** (`check_policy_code_integrity.py`
-pins the **whole normalized-module AST** of `command_policy.py` and
-`check_agent_harness.py` — any added top-level code, reassignment, fake
-object, or in-place edit changes the hash and BLOCKS), and scanner/hook
+pins the **whole source** of `command_policy.py` and `check_agent_harness.py`
+with a version-portable raw-byte SHA-256 — any edit, added top-level code,
+reassignment, or fake object changes the hash and BLOCKS), and scanner/hook
 **BEHAVIOR** (`check_harness_smoke.py` + `check_hook_smoke.py` run the real
 scanner/hooks against randomized multi-family payloads, with live-regex
 hash + real-`re.Pattern`-type checks). The kit source tree is self-governed
@@ -89,9 +140,10 @@ imports and defeat the hash pins.
 **Root of trust (strict).** The local gate runs validators FROM the PR, so
 on its own it cannot stop a PR that edits both a policy file and the
 validator that judges it — a repo-local gate is developer feedback, not the
-final authority. Strict mode therefore ships
-`.github/workflows/trusted-base-audit.yml`, which **freezes** the validator,
-policy, profile, AND CI-execution code relative to the protected **base
+final authority. The **remote-governance tier** therefore ships
+`.github/workflows/trusted-base-audit.yml` (written by `bootstrap --profile
+*+remote` / `enable remote`, not by `strict` alone — v3.6.0), which **freezes** the
+validator, policy, profile, AND CI-execution code relative to the protected **base
 branch**: a `git diff` guard FAILS the check on any change to `scripts/`,
 `manage.sh`, `.pre-commit-config.yaml`, `.github/workflows/`, or
 `.substrate/required_profile`, and on any diff that changes `SUBSTRATE_PROFILE`
@@ -117,8 +169,18 @@ runtime hook (`command_policy.profile()`) clamps UP to it, so a downgraded
 Known limitations, by design:
 - The exfil guard is a **tripwire, not a sandbox** — pattern matching,
   not shell parsing. It covers the common upload/transfer forms but a
-  determined attacker can mutate command shape; strict containment needs
-  a sandboxed runtime with no secret access and egress control.
+  determined attacker can mutate command shape. For real **containment**,
+  set `SUBSTRATE_SANDBOX=1` (or `bootstrap --profile strict+sandbox`) and run
+  agent commands through `scripts/sandbox_exec.sh`, which selects a **backend**
+  (`.substrate/sandbox.json`, resolved by `scripts/sandbox_detect.py`,
+  fail-closed): **`@anthropic-ai/sandbox-runtime` (`srt`)** when present
+  (whole-process network deny+allowlist + filesystem write-scope — used only if
+  already installed, never a forced Node dependency), else the OS-native
+  primitive (Linux `bwrap` / macOS `sandbox-exec`, **network containment only**),
+  else refuse (exit 3). `./manage.sh go-live` reports the resolved backend and
+  its **honest capabilities** (it never claims allowlist/fs-scope on a
+  network-only backend). The sandbox is an **optional backend the substrate
+  selects**, not the product — governance/memory/eval/release remain the core.
 - The CODEOWNERS validator implements the main `*`/`**`/trailing-slash/
   ownerless/last-match behaviors and the 3 MB load limit offline, but it
   is **not a full GitHub CODEOWNERS validator** — it cannot prove owner
@@ -129,7 +191,29 @@ Known limitations, by design:
   / FP-rate over staged states), NOT a hosted longitudinal observability or
   trend-reporting system — pair with one for long-running high-stakes agents.
 
-See `CHANGES_V3.md` for the full per-version remediation history (v3.2.0–v3.3.13).
+See `CHANGES_V3.md` for the full per-version remediation history (v3.2.0–v3.5.10).
+See `BENCHMARK.md` for the reproducible block-rate / false-positive-rate result
+(regenerate with `./manage.sh evals --report`).
+
+### One-time v3.8.32 knowledge-boundary migration
+
+Upgrading a pre-v3.8.32 consumer across this boundary must run the **verified new
+kit's** engine against the old repository. The old consumer's `./manage.sh
+upgrade` dispatches its already-installed engine, which cannot know the future
+ownership rule and may falsely report an edited project knowledge sibling as
+machinery drift. From a trusted checkout or an extracted release that you have
+already verified, run:
+
+```bash
+cd /path/to/verified-agent-substrate-kit-v3.8.32
+./manage.sh upgrade --root /path/to/consumer --from . --allow-unverified --write
+```
+
+Here `--allow-unverified` applies only to the already-verified extracted
+directory source; do not use it as a substitute for release verification. After
+this one-time crossing, the consumer's installed v3.8.32 engine handles normal
+future upgrades. A scheduled auto-upgrade installed before v3.8.32 likewise
+needs this manual crossing once.
 
 ## What is new in v3.2 / v3.2.1
 

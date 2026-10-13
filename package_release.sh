@@ -46,22 +46,37 @@ find "$KITROOT" \( -name '__pycache__' -o -name '.pytest_cache' -o -name '.ruff_
   -o -name '.mypy_cache' \) -type d -prune -exec rm -rf {} + 2>/dev/null || true
 find "$KITROOT" -name '*.pyc' -delete 2>/dev/null || true
 find "$KITROOT" -name '.DS_Store' -delete 2>/dev/null || true
-# Disposable runtime state + local toolchain roots must not ship. The find above
-# prunes the cache DIRS; .venv / .substrate/venv / node_modules are NOT in that
-# find, so remove them explicitly — a dirty source root must not contaminate the
-# artifact OR the source-tree hash (v3.3.9 reviewer).
-rm -rf "$KITROOT/.substrate/traces" "$KITROOT/.substrate/memory/tasks" \
-       "$KITROOT/.venv" "$KITROOT/.substrate/venv" "$KITROOT/node_modules" 2>/dev/null || true
+# Disposable runtime state + local toolchain roots (.venv, .substrate/venv,
+# node_modules, .substrate/traces, .substrate/memory — the maintainer's own
+# event log + lock are runtime state; consuming repos get a fresh chain) must
+# not ship — but
+# they are EXCLUDED from both the source-tree hash (find ! -path, below) and the
+# artifact (zip -x, below) and re-checked by the hygiene gate, so they never need
+# to be deleted from the working tree. package_release is NON-DESTRUCTIVE to the
+# source root: deleting $KITROOT/.venv + $KITROOT/.substrate/venv in place used to
+# wipe an ACTIVE dev/CI toolchain mid-run (v3.4.3 — surfaced as flaky
+# FileNotFoundError under pytest-randomly when a packaging test ran before the
+# venv-dependent eval/smoke tests). Cache dirs/.DS_Store are pruned above only
+# because they regenerate for free; no toolchain or runtime state is removed.
 
 # Source-tree hash: stable hash of all tracked source files (order-independent).
 echo "==> Hashing source tree"
 SRC_HASH="$(cd "$KITROOT" && find . -type f \
     ! -path './.git/*' ! -path './dist/*' ! -path '*/__pycache__/*' \
     ! -path './.venv/*' ! -path '*/.substrate/venv/*' ! -path './node_modules/*' \
+    ! -path '*/.substrate/traces/*' ! -path '*/.substrate/memory/*' \
     ! -path '*/.pytest_cache/*' ! -path '*/.ruff_cache/*' ! -path '*/.mypy_cache/*' \
-    ! -name '*.pyc' \
+    ! -name '*.pyc' ! -name '.DS_Store' \
     -exec shasum -a 256 {} + | awk '{print $1}' | sort | shasum -a 256 | awk '{print $1}')"
 GIT_COMMIT="$(cd "$KITROOT" && git rev-parse --short HEAD 2>/dev/null || echo 'none')"
+# Provenance honesty (v3.7.4 audit P1): the manifest's git_commit must point at the
+# packaged content. If the tree has UNCOMMITTED changes to tracked files, the artifact
+# is NOT the commit — mark it `<commit>-dirty` so a reviewer is never sent to a commit
+# whose source differs from the zip. Package AFTER committing for a clean provenance.
+if [ "$GIT_COMMIT" != "none" ] && [ -n "$(cd "$KITROOT" && git status --porcelain --untracked-files=no 2>/dev/null)" ]; then
+  GIT_COMMIT="${GIT_COMMIT}-dirty"
+  echo "    WARN: working tree has uncommitted changes — manifest git_commit=$GIT_COMMIT (commit first for clean provenance)"
+fi
 
 echo "==> Building $ZIP_VER"
 mkdir -p "$DIST"
@@ -69,12 +84,42 @@ rm -f "$ZIP_VER" "$ZIP_PLAIN"
 ( cd "$PARENT" && zip -rq "$ZIP_VER" "$NAME" \
     -x "$NAME/.git/*" "$NAME/dist/*" "$NAME/.venv/*" "$NAME/node_modules/*" \
        "*/__pycache__/*" "*/.pytest_cache/*" "*/.ruff_cache/*" "*/.mypy_cache/*" \
-       "*/.substrate/venv/*" "*/.substrate/traces/*" "*/.substrate/memory/tasks/*" )
+       "*/.substrate/venv/*" "*/.substrate/traces/*" "*/.substrate/memory/*" )
 cp "$ZIP_VER" "$ZIP_PLAIN"
 NFILES="$(cd "$PARENT" && unzip -l "$ZIP_VER" | tail -1 | awk '{print $2}')"
 ART_SHA="$(shasum -a 256 "$ZIP_VER" | awk '{print $1}')"
 echo "$ART_SHA  ${NAME}-${VER}.zip" > "$ZIP_VER.sha256"
 echo "    $NFILES files, sha256 ${ART_SHA:0:16}…"
+
+# --- release signature (minisign) ---
+# Sign the artifact with the maintainer's minisign secret key when available, so a
+# consumer can verify AUTHENTICITY before applying an upgrade (scripts/_minisign.py is
+# a pure-Python verifier — no minisign binary needed on the consumer side; the trusted
+# comment embeds version+commit+sha256 and is tamper-evident via the global signature).
+# Signing is best-effort: without the key/binary the release is simply UNSIGNED
+# (packaging never fails on it); the consumer-side check fails CLOSED only when a
+# signature is REQUIRED. (v3.7.13 — installer/upgrade trust root, Phase 1a.)
+SIGNED="false"; ART_SIG=""
+if [ -n "${SUBSTRATE_RELEASE_SECKEY:-}" ] && command -v minisign >/dev/null 2>&1; then
+  if minisign -S -s "$SUBSTRATE_RELEASE_SECKEY" -m "$ZIP_VER" \
+       -t "agent_substrate_kit ${VER} ${GIT_COMMIT} sha256:${ART_SHA}" >/dev/null 2>&1; then
+    # Self-verify against the COMMITTED trust pubkey: a release that claims "signed"
+    # but doesn't verify against .substrate/trust/minisign.pub is a key mismatch and
+    # must FAIL the build (worse than honestly unsigned).
+    if python3 "$KITROOT/scripts/_minisign.py" --pub "$KITROOT/.substrate/trust/minisign.pub" \
+         --file "$ZIP_VER" >/dev/null 2>&1; then
+      SIGNED="true"; ART_SIG="${NAME}-${VER}.zip.minisig"
+      echo "    signed + self-verified against trust pubkey: ${ART_SIG}"
+    else
+      echo "    ERROR: signature does not verify against .substrate/trust/minisign.pub (key mismatch)" >&2
+      exit 4
+    fi
+  else
+    echo "    WARN: minisign signing FAILED — release is UNSIGNED"
+  fi
+else
+  echo "    note: release UNSIGNED (set SUBSTRATE_RELEASE_SECKEY + install minisign to sign)"
+fi
 
 # Zip hygiene: no generated/toolchain junk must ride along. Write the listing to
 # a FILE first — piping `unzip -l` straight into `grep -q` is BROKEN under
@@ -85,7 +130,7 @@ echo "    $NFILES files, sha256 ${ART_SHA:0:16}…"
 echo "==> Zip hygiene"
 _LISTING="$(mktemp)"
 ( cd "$PARENT" && unzip -l "$ZIP_VER" ) > "$_LISTING"
-_JUNK_RE='(/\.venv/|/\.substrate/venv/|/__pycache__/|/\.pytest_cache/|/\.ruff_cache/|/\.mypy_cache/|/node_modules/|\.DS_Store|\.pyc$)'
+_JUNK_RE='(/\.venv/|/\.substrate/venv/|/\.substrate/traces/|/\.substrate/memory/|/__pycache__/|/\.pytest_cache/|/\.ruff_cache/|/\.mypy_cache/|/node_modules/|\.DS_Store|\.pyc$)'
 if grep -Eq "$_JUNK_RE" "$_LISTING"; then
   echo "release: BLOCK — packaging junk in artifact:" >&2
   grep -E "$_JUNK_RE" "$_LISTING" | head -30 >&2
@@ -180,7 +225,11 @@ if [ "$MODE" = "full" ]; then
   echo "==> Full: complete pytest suite from the artifact"
   EARLY_DUMP="${SUBSTRATE_ARTIFACT_EARLY_DUMP:-30}"
   DUMP_AFTER="${SUBSTRATE_ARTIFACT_DUMP_AFTER:-90}"
-  HARD_CAP="${SUBSTRATE_ARTIFACT_HARD_CAP:-300}"
+  # 900s (was 300): the suite legitimately grew to ~290 tests with 20+ subprocess-bootstrap
+  # cases across v3.7.x (install/upgrade/scanner/distribution tiers); local full-run ~240s, so
+  # a cold artifact extract needs headroom. The 30s/90s watchdog dumps still surface a real hang.
+  # FOLLOW-UP: a session-scoped bootstrapped-repo fixture would cut most of this runtime.
+  HARD_CAP="${SUBSTRATE_ARTIFACT_HARD_CAP:-900}"
   PLOG="$WORK/pytest.log"
   ( cd "$APP" && exec env PYTHONNOUSERSITE=1 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
       python3 -m pytest -v -p no:randomly -p no:cacheprovider > "$PLOG" 2>&1 ) &
@@ -212,6 +261,8 @@ cat > "$DIST/RELEASE_MANIFEST.json" <<JSON
   "artifact": "${NAME}-${VER}.zip",
   "review_bundle": "${NAME}-${VER}-review-bundle.tar.gz",
   "artifact_sha256": "$ART_SHA",
+  "artifact_signature": "$ART_SIG",
+  "signed": $SIGNED,
   "source_tree_sha256": "$SRC_HASH",
   "file_count": $NFILES,
   "verification_mode": "$MODE",
@@ -228,20 +279,44 @@ JSON
 echo "==> Review bundle"
 REVIEW="$DIST/review"; rm -rf "$REVIEW"; mkdir -p "$REVIEW"
 cp "$ZIP_VER" "$ZIP_VER.sha256" "$DIST/RELEASE_MANIFEST.json" "$REVIEW/"
-cat > "$REVIEW/README_REVIEW.md" <<MD
-# Review bundle — ${NAME} ${VER}
-
-Three files, verifiable provenance:
-
-1. Verify the checksum (run in this directory):
-       shasum -a 256 -c ${NAME}-${VER}.zip.sha256
-2. Confirm the printed SHA equals artifact_sha256 in RELEASE_MANIFEST.json.
-3. Extract and audit ${NAME}-${VER}.zip.
-
-If your audit environment accepts only ONE upload, upload
-${NAME}-${VER}-review-bundle.tar.gz (it contains all of the above, with names
-that line up so \`shasum -c\` works after extraction).
-MD
+# Include the signature + trusted public key so a reviewer can verify authenticity
+# (minisign -Vm <zip> -p minisign.pub, or scripts/_minisign.py) — not just the checksum.
+[ -n "$ART_SIG" ] && [ -f "$ZIP_VER.minisig" ] && cp "$ZIP_VER.minisig" "$REVIEW/"
+[ -f "$KITROOT/.substrate/trust/minisign.pub" ] && cp "$KITROOT/.substrate/trust/minisign.pub" "$REVIEW/"
+{
+  echo "# Review bundle — ${NAME} ${VER}"
+  echo
+  if [ "$SIGNED" = "true" ]; then
+    echo "SIGNED release — verifiable AUTHENTICITY + integrity (run in this directory):"
+    echo
+    echo "1. Verify the checksum:"
+    echo "       shasum -a 256 -c ${NAME}-${VER}.zip.sha256"
+    echo "2. Verify the signature against the bundled trust key:"
+    echo "       minisign -Vm ${NAME}-${VER}.zip -p minisign.pub"
+    echo "   (or from a kit checkout: python3 -I scripts/verify_release.py \\"
+    echo "        --pub minisign.pub --sig ${NAME}-${VER}.zip.minisig ${NAME}-${VER}.zip)"
+    echo "3. Confirm artifact_sha256 in RELEASE_MANIFEST.json matches, and the signature's"
+    echo "   trusted comment carries the same version + git_commit."
+    echo "4. Extract and audit ${NAME}-${VER}.zip."
+  else
+    echo "UNSIGNED build — checksum-only provenance (no .minisig/pubkey in this bundle):"
+    echo
+    echo "1. Verify the checksum:"
+    echo "       shasum -a 256 -c ${NAME}-${VER}.zip.sha256"
+    echo "2. Confirm the printed SHA equals artifact_sha256 in RELEASE_MANIFEST.json."
+    echo "3. Extract and audit ${NAME}-${VER}.zip."
+  fi
+  echo
+  echo "If your audit environment accepts only ONE upload, upload"
+  echo "${NAME}-${VER}-review-bundle.tar.gz — it carries all of the above with names that"
+  echo "line up so \`shasum -c\` works after extraction."
+} > "$REVIEW/README_REVIEW.md"
+# The review bundle's file list — signature + trust key included WHEN the release is signed,
+# so the one-file upload path preserves authenticity proof, not just the checksum (v3.7.16 P2a).
+REVIEW_FILES=( "${NAME}-${VER}.zip" "${NAME}-${VER}.zip.sha256" "RELEASE_MANIFEST.json" "README_REVIEW.md" )
+if [ "$SIGNED" = "true" ] && [ -f "$REVIEW/${NAME}-${VER}.zip.minisig" ] && [ -f "$REVIEW/minisign.pub" ]; then
+  REVIEW_FILES+=( "${NAME}-${VER}.zip.minisig" "minisign.pub" )
+fi
 BUNDLE="$DIST/${NAME}-${VER}-review-bundle.tar.gz"
 # Build the review bundle with Python tarfile, NOT platform tar. macOS bsdtar
 # embeds com.apple.provenance as a LIBARCHIVE.xattr PAX header even after
@@ -250,24 +325,14 @@ BUNDLE="$DIST/${NAME}-${VER}-review-bundle.tar.gz"
 # elsewhere. tarfile never reads xattrs, and we normalize every TarInfo
 # (mtime/mode/uid/gid/uname/gname) in USTAR format, so the bundle is
 # deterministic + metadata-clean on every platform (v3.3.11 reviewer).
-python3 - "$REVIEW" "$BUNDLE" "$NAME" "$VER" <<'PY'
-import io, sys, tarfile
-from pathlib import Path
-review, bundle, name, ver = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3], sys.argv[4]
-files = [f"{name}-{ver}.zip", f"{name}-{ver}.zip.sha256",
-         "RELEASE_MANIFEST.json", "README_REVIEW.md"]
-with tarfile.open(bundle, "w:gz", format=tarfile.USTAR_FORMAT) as tf:
-    for rel in files:
-        data = (review / rel).read_bytes()
-        info = tarfile.TarInfo(rel)
-        info.size = len(data); info.mtime = 0; info.mode = 0o644
-        info.uid = info.gid = 0; info.uname = info.gname = ""
-        tf.addfile(info, io.BytesIO(data))
-PY
+# Build via the SHARED builder (scripts/build_review_bundle.py) so the keyless template and the
+# local/minisign path produce the bundle ONE way — the dedup that keeps the tiers from drifting
+# (v3.7.21). The platform `tar -tzf` warning check below stays as the canonical-path belt.
+python3 "$KITROOT/scripts/build_review_bundle.py" "$REVIEW" "$BUNDLE" "${REVIEW_FILES[@]}"
 # Bundle hygiene (pipefail-safe): listing must SUCCEED, emit NO warnings (a stray
 # xattr/metadata header prints a tar warning), contain no ._*/.DS_Store, and be
-# EXACTLY the four review files. Listings go to files so grep/diff status is
-# authoritative (the v3.3.9 SIGPIPE lesson).
+# EXACTLY the expected review files (4, or 6 when signed). Listings go to files so
+# grep/diff status is authoritative (the v3.3.9 SIGPIPE lesson).
 _BLIST="$(mktemp)"; _BERR="$(mktemp)"
 if ! tar -tzf "$BUNDLE" > "$_BLIST" 2>"$_BERR"; then
   echo "release: BLOCK — review bundle cannot be listed" >&2; cat "$_BERR" >&2
@@ -282,11 +347,10 @@ if grep -Eq '(^|/)\._|(^|/)\.DS_Store$' "$_BLIST"; then
   grep -E '(^|/)\._|(^|/)\.DS_Store$' "$_BLIST" >&2; rm -f "$_BLIST" "$_BERR"; exit 1
 fi
 _EXP="$(mktemp)"; _ACT="$(mktemp)"
-printf '%s\n' "${NAME}-${VER}.zip" "${NAME}-${VER}.zip.sha256" \
-  RELEASE_MANIFEST.json README_REVIEW.md | LC_ALL=C sort > "$_EXP"
+printf '%s\n' "${REVIEW_FILES[@]}" | LC_ALL=C sort > "$_EXP"
 LC_ALL=C sort "$_BLIST" > "$_ACT"
 if ! diff -q "$_EXP" "$_ACT" >/dev/null; then
-  echo "release: BLOCK — review bundle is not exactly the four review files:" >&2
+  echo "release: BLOCK — review bundle is not exactly the expected review files:" >&2
   cat "$_BLIST" >&2; rm -f "$_BLIST" "$_BERR" "$_EXP" "$_ACT"; exit 1
 fi
 rm -f "$_BLIST" "$_BERR" "$_EXP" "$_ACT"

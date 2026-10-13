@@ -1,0 +1,120 @@
+---
+purpose: Release packaging, signing, manifests, and artifact verification.
+last_human_reviewed: 2026-09-28
+covers:
+  - manage.sh
+  - package_release.sh
+  - scripts/_minisign.py
+  - scripts/_verify_backends.py
+  - scripts/build_review_bundle.py
+  - scripts/release_gate.sh
+  - scripts/setup_release_key.sh
+  - scripts/update_manifest.py
+  - scripts/verify_release.py
+  - scripts/write_install_json.py
+---
+
+# Release and distribution
+
+[Back to the substrate map](00_substrate.md).
+
+The release path packages the current source tree, records exact provenance, and
+verifies the built artifact rather than trusting an in-place checkout. The root
+`package_release.sh` and `manage.sh release` route through the same release gate.
+
+## Artifact contents
+
+The package includes substrate-owned scripts, templates, trust configuration,
+workflows, and compact install assets. Consumer-heavy self-tests and source-only
+knowledge siblings are not installed by default. Cheap installed-file and smoke
+tests remain in consumer repositories; `--dev-tests` opts into the full source
+self-test suite.
+
+`docs/manifest.json` is generated from source knowledge docs and ADRs. It is not
+hand-edited. `.substrate/install.json` is generated after render and records the
+installed answers, owned-file hashes, version, and source tree used by later
+drift checks.
+Its stripped-install inventory fallback mirrors the canonical install-owned
+surface lists exactly while deliberately excluding governed project-authored
+knowledge directories from provenance, so a missing helper import does not
+silently shrink the upgrade drift baseline.
+
+## Verification
+
+Release verification supports the configured signature backends and pins their
+trusted material. The verifier executes the source bytes it checks and includes
+the local dependency closure. A missing or malformed pin refuses verification;
+the operator must choose the explicit unverified path for local development.
+
+The release manifest binds the commit, source-tree identity, and artifact
+SHA-256. `BENCHMARK.md` carries measured behavior but delegates exact artifact
+provenance to that manifest. Review bundles include the evidence required for a
+human or another agent to reproduce the decision.
+
+The gate also verifies the tamper-evident memory chain, and in the strict
+profile requires its git-note anchor unconditionally — an absent anchor is a
+named failure, never a silent downgrade to the unanchored check (that hedge was
+the v3.8.50 self-audit's P1: a trust anchor failing open on absence). Once every
+other gate has passed, each profile's release writes a fresh anchor for that
+commit, so each release re-ties the chain to a known-good state; the first
+strict release in a repo needs a one-time `./manage.sh memory anchor`.
+
+The success line comes AFTER that, not before. The gate certifies the state it
+LEAVES: the anchor is written, published, and re-verified, and only then is the
+release called passed. The re-verification asks no shell variable — branching on
+the profile loaded at gate start let a config raised to strict mid-run be
+certified by the standard-tier check, so `verify --anchor` runs unconditionally
+and reads the live profile itself. The gate also pins `.substrate/config` with a
+fingerprint taken before its first validator and refuses to announce success if
+that file changed while it ran: a run cannot certify a configuration the
+repository no longer has. That pin is taken BEFORE the config is loaded, and the
+load is proved not to have changed it — fingerprinting afterwards left the
+already-cached profile, lang and test command outside what was pinned. Whether
+the memory log is part of the release is likewise decided once, at the chain
+check, and any change to that afterwards is a refusal rather than a skipped
+verification. See [the memory trust anchor](08_memory_anchor.md).
+
+The gate's own trusted inputs are SNAPSHOTTED, not re-read. Comparing
+`.substrate/config` before and after the load still admitted A-B-A — swap the
+file for exactly as long as the loader reads, restore it, and both fingerprints
+match while the run carries the swapped values — so the gate copies the config to
+a private directory and loads FROM the copy. There is no window rather than a
+checked one. The config LOADER is treated the same way: it used to be sourced
+before any validator attested it, so a helper that acted during the trusted
+release and restored itself was clean by the time integrity checks looked. It is
+now copied, the validators run over the live tree, the live file is re-hashed to
+prove it is the one they saw, and the COPY is sourced. Memory presence is tested
+with `-e`, not `-f`: `-f` is false for a FIFO, so a non-regular `events.jsonl`
+read as absent at both ends and every memory check was skipped while the gate
+passed. Present-but-not-regular is a refusal, as is a symlinked config.
+
+The runner array is expanded as `${RUN[@]+"${RUN[@]}"}`. On Bash 3.2 — still
+`/bin/bash` on macOS — expanding an empty array under `set -u` aborts, so the
+no-venv fallback was unreachable on exactly the hosts that needed it.
+
+The gate PUBLISHES that anchor itself rather than delegating it. Git does not
+transport `refs/notes/*` on a normal push, clone, or fetch, so a different clone
+never receives the ref and cannot push it — v3.8.51 asked an operator to do
+exactly that, which was impossible anywhere but the producing clone. When the
+push is refused (no remote, no permission, an egress policy) the gate prints the
+note payload and the `git notes --ref=substrate-memory add -f -m` command that
+recreates it on any clone, because the payload travels in text where the ref
+does not.
+
+The release gate runs deterministic validators, project tests, the guard proof
+(`prove`, when `tests/guards.json` exists), policy evals, and artifact
+verification in sequence, then records a `release-pass` memory event for the
+commit it started on before writing the anchor (see
+[lessons, records, and recall](10_lessons_recall.md)). A finalizer or verifier failure is a release
+failure. Published HISTORY entries refer to real immutable commit objects, so
+published release commits must merge without squash rewriting.
+
+Signature strength depends on protection of the configured key or identity and
+the remote trusted-base boundary. A local agent-writable install manifest is not
+a substitute for the signed release. Hosts without a verification backend must
+report that limitation instead of labeling an artifact verified.
+
+
+`manage.sh check` runs `check_raw_file_io.py` alongside the other structural
+pins: it fails the chain when raw file I/O targets a repo-derived path, which is
+the mechanized form of the link/TOCTOU class the earlier rounds fixed by hand.

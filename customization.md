@@ -26,7 +26,7 @@ These are pure substrate, project-agnostic. Copy verbatim:
 | `scripts/check_finding_response.py` | Four-field bug-fix protocol |
 | `scripts/check_postmortem_gates_resolved.py` | Postmortem gate cross-ref |
 | `scripts/check_validator_input_coverage.py` | Meta-validator |
-| `scripts/check_secrets.py` | Pattern-based secrets lint |
+| `scripts/check_leaks.py` | Pattern-based secrets lint |
 | `scripts/check_coverage_floors.py` | Per-area coverage ratchet (start with empty floors dict) |
 | `scripts/check_bandit_skip_baseline.py` | Bandit skip drift |
 | `scripts/diy_ultrareview.sh` | 7-lens parallel review helper |
@@ -72,8 +72,11 @@ These all follow the SAME PATTERN:
 3. A pre-commit hook entry in `.pre-commit-config.yaml`
 4. (Optional) An opt-out marker (`# coverage-opt-out: <reason>`)
 
-When you find a class of bug specific to YOUR project, write a new
-validator following this pattern. The four meta-validators (doc-drift,
+When you find a class of bug specific to YOUR project, scaffold a new
+validator following this pattern with
+`./manage.sh new-validator <name> [--files-regex REGEX] [--desc TEXT]`
+— it generates the check + adversarial test pair and prints the
+pre-commit block to paste. The four meta-validators (doc-drift,
 history-sha, validator-input-coverage, postmortem-gates-resolved) will
 keep your new validators in line.
 
@@ -178,7 +181,7 @@ populate them as your project grows.
 - id: bandit                           # security lint
 
 # Substrate self-defense
-- id: check-secrets                    # pattern-based secrets lint
+- id: check-leaks                    # pattern-based secrets lint
 - id: check-stale-phrases              # descriptive-claim drift (start empty)
 - id: check-history-sha                # HISTORY entry SHA validity
 - id: check-coverage-floors            # per-area ratchet (start empty)

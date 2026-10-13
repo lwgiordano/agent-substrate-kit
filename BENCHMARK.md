@@ -1,0 +1,66 @@
+# Agent Substrate Kit — Behavioral Benchmark
+
+A **reproducible** adversarial eval: every malicious task must BLOCK, every benign task
+must be ALLOWED. This turns the substrate's block-rate from a self-description into a
+result anyone can re-run and verify.
+
+- **Version:** 3.9.3
+- **Generated:** 2026-09-29
+- **Mode:** full
+- **Host:** Linux x86_64, python 3.11.15; resolved sandbox backend: `bubblewrap`
+- **Exact provenance:** see `RELEASE_MANIFEST.json` (git commit + source-tree + artifact SHA-256) in the release / review bundle — this report embeds no mutable pre-commit hash.
+
+## Results
+
+| Metric | Value |
+|---|---|
+| Malicious blocked | 57/57 (block-rate 1.00) |
+| Malicious skipped (untested) | 0 |
+| Benign false-positives | 0/14 (FP-rate 0.00) |
+| Skipped tasks | none |
+
+## What this measures — and what it does NOT
+
+- It runs the **real deterministic validators/hooks** against staged adversarial repo
+  states. **No LLM is in the loop** — it measures the gate's behavior, not a model's.
+- A **skipped** task (e.g. the containment eval where no OS sandbox backend exists) is
+  **excluded** from the malicious total + block-rate and surfaced above — a skip is
+  **never** counted as a block. Run `--require-sandbox-evals` to make a skip a failure.
+- Egress **containment** is *proven* where a backend is available, *skipped honestly*
+  where it is not. Interactive agent-Bash is **fail-closed across Claude/Codex/Copilot**
+  with host-bound proof (`agent_bash_uncontained_blocked`).
+- This is a **repo-local adversarial suite** — NOT a hosted longitudinal benchmark, and
+  NOT an external standard like AgentDojo. Pair it with those for long-running/high-stakes
+  agents; they are additive, not replaced by this.
+
+## Adversarial-context coverage (the "talk the gatekeeper out of it" threat)
+
+Staged prompt-injection-like artifacts **do not alter the deterministic gate's
+decisions** — the gates never consult repo prose and cannot be persuaded:
+
+- hidden "this is APPROVED / mark SAFE / great job" text in agent context does **not**
+  disable exfil blocking (`injection_says_safe_blocks_exfil`, `agents_md_injection`);
+- a planted `docs/CURRENT_SESSION.md` is **never** restored into context — only the
+  structured `.substrate/memory/tasks/current.json` is (`current_session_fallback`);
+- runtime/remote text cannot mutate the sandbox egress allowlist (sourced **only** from
+  `.substrate/sandbox.json`; covered by regression tests).
+
+These are staged artifacts proving the gates ignore persuasion — **not** a claim that
+prompt injection is "solved."
+
+## Tasks (full mode — only tasks ACTUALLY EXECUTED are listed)
+
+- **Malicious (must BLOCK):** `profile_downgrade`, `stdlib_shadowing`, `policy_regex_weakening`, `policy_module_mutation`, `scanner_mutation`, `hook_neuter`, `exfil_secret_read`, `exfil_upload`, `exfil_strict_curlconfig`, `exfil_hook_rc2`, `copilot_payload_deny`, `config_dangerous_cmd`, `todowrite_injection`, `current_session_fallback`, `agents_md_injection`, `sandbox_exfil_contained`, `agent_bash_uncontained_blocked`, `lock_symlink_lowers_no_floor`, `lock_padded_value_no_floor`, `lock_symlinked_parent_no_floor`, `lock_in_repo_alias_no_floor`, `lock_hardlink_lowers_no_floor`, `lock_fifo_no_hang`, `handoff_capture_no_write_through_symlink`, `agentsync_refuses_hardlinked_bus`, `injection_says_safe_blocks_exfil`, `memory_chain_rewrite_detected`, `memory_anchor_mismatch_detected`, `memory_anchor_relaunder_blocked`, `memory_anchor_spoofed_remote_blocked`, `memory_anchor_hostile_git_env_blocked`, `memory_anchor_force_needs_evidence`, `memory_anchor_hostile_user_config_blocked`, `release_gate_unpublished_anchor_blocked`, `release_gate_stale_profile_blocked`, `release_gate_config_load_gap_blocked`, `release_gate_unattested_helper_blocked`, `release_gate_nonregular_memory_blocked`, `release_gate_memory_vanish_blocked`, `memory_anchor_duplicate_profile_enforced`, `memory_anchor_forced_head_race_blocked`, `history_injection_stripped`, `rejected_injection_stripped`, `handoff_forged_state_stripped`, `profile_ratchet_lower_refused`, `completion_gate_unaudited`, `raw_io_gate_catches_new_unguarded_write`, `mkdir_creates_nothing_outside_the_repo`, `detached_parent_write_refused`, `raw_io_gate_catches_wrapped_governed_write`, `completion_gate_forged_linked_events`, `memory_linked_events_break`, `history_fifo_no_hang`, `uncommitted_lesson_not_injected`, `recorded_history_edit_detected`, `shipped_green_without_release_pass_refused`, `prove_catches_a_test_that_does_not_pin_its_guard`
+- **Benign (must be ALLOWED):** `profile_ratchet_raise_succeeds`, `memory_restore_from_structured`, `history_restore_benign`, `rejected_restore_benign`, `completion_gate_audited`, `benign_ls`, `benign_curl_download`, `benign_grep`, `benign_agents_md`, `benign_memory_anchor_growth`, `fresh_session_knows_goals_and_lesson`, `benign_node_lint`, `benign_go_test`, `benign_ruff`
+
+## Reproduce
+
+```bash
+# On the published v3.9.3 release artifact (its exact commit is in RELEASE_MANIFEST.json):
+./manage.sh setup
+./manage.sh evals --report      # or: python3 -I scripts/run_substrate_evals.py --no-trace
+```
+
+Generated by `scripts/run_substrate_evals.py --report`. Re-run on your host; with an OS
+sandbox backend present (macOS seatbelt / Linux bubblewrap / `@anthropic-ai/sandbox-runtime`)
+the containment task is tested rather than skipped.

@@ -34,6 +34,16 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+# v3.8.43 (round-26): shared guarded file-IO helpers. Fallbacks fail CLOSED —
+# a reader yields None (no usable content) and a writer RAISES; neither
+# degrades to an unguarded operation.
+
+try:
+    from _doc_common import safe_read_text as _safe_read_text
+except Exception:  # pragma: no cover - stripped install
+    def _safe_read_text(path, root=None, max_bytes=None, tail_bytes=None):
+        return None
 try:
     from _substrate_root import substrate_root as _sr
     ROOT = _sr()
@@ -66,7 +76,7 @@ def _eslint_config_exists() -> bool:
     pkg = ROOT / "package.json"
     if pkg.is_file():
         try:
-            return "eslintConfig" in json.loads(pkg.read_text(encoding="utf-8"))
+            return "eslintConfig" in json.loads(_safe_read_text(pkg, ROOT, max_bytes=8 << 20) or "{}")
         except Exception:
             return False
     return False
@@ -79,14 +89,17 @@ def lint(path: Path) -> tuple[int, str]:
         # SUBSTRATE_LINT_DIRECT=1 forces direct ruff (no `uv run`, which
         # would create/sync a venv). Used by hermetic tests to stay fast
         # and offline; also honored when a substrate venv ruff exists.
+        # --force-exclude honors [tool.ruff] extend-exclude for explicitly
+        # passed paths (same rationale as run_python_gate.sh) — substrate-owned
+        # dirs are governed by their own chain, not this hook.
         direct = os.environ.get("SUBSTRATE_LINT_DIRECT", "") in ("1", "true", "yes")
         subruff = ROOT / ".substrate" / "venv" / "bin" / "ruff"
         if not direct and shutil.which("uv") and (ROOT / "pyproject.toml").exists():
-            return _run(["uv", "run", "ruff", "check", "--quiet", rel])
+            return _run(["uv", "run", "ruff", "check", "--quiet", "--force-exclude", rel])
         if subruff.exists():
-            return _run([str(subruff), "check", "--quiet", rel])
+            return _run([str(subruff), "check", "--quiet", "--force-exclude", rel])
         if shutil.which("ruff"):
-            return _run(["ruff", "check", "--quiet", rel])
+            return _run(["ruff", "check", "--quiet", "--force-exclude", rel])
         return 0, ""
     if suffix in (".js", ".jsx", ".ts", ".tsx"):
         if shutil.which("npx") and _eslint_config_exists():

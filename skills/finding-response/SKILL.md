@@ -19,8 +19,10 @@ flagged while identical siblings survive elsewhere.
    or explicitly dispositioned.
 
 3. **Pick a lock-down** — the mechanism that makes recurrence visible:
-   new validator, new test, new checklist entry, or opt-out comment
-   with reason. No lock-down → the class returns.
+   new validator (scaffold one: `./manage.sh new-validator <name>` —
+   generates the check + adversarial test pair and prints the
+   pre-commit block), new test, new checklist entry, or opt-out
+   comment with reason. No lock-down → the class returns.
 
 4. **Verify the lock-down catches the VERBATIM original bug shape.**
    Run the test/regex against the actual buggy code, not a

@@ -23,23 +23,59 @@ from __future__ import annotations
 # --- CONTEXT surfaces: agent reads these AS instructions/knowledge ---
 CONTEXT_GLOBS = [
     "AGENTS.md", "CLAUDE.md", "DESIGN.md",
+    # v3.8.47 (round-30 P3): the bus is coordination prose that agents
+    # READ, so injected instructions posted there reach model context the
+    # same way HISTORY.md would. It is scanned with one narrow carve-out
+    # (see EVIDENCE_QUOTING_SURFACES in check_agent_harness): it is also
+    # the audit channel, where an attack string must be quotable.
+    "AGENT_BUS.md",
     ".claude/**/*.md", ".codex/**/*.md", ".codex/**/*.toml", ".agents/**/*.md",
     ".mcp.json",
     ".github/copilot-instructions.md", ".github/instructions/**/*.md",
     ".github/skills/**/*.md",
-    "docs/HISTORY.md", "docs/README.md", "docs/ARCHITECTURE.md", "docs/INTENT.md",
+    "docs/HISTORY.md", "docs/REJECTED.md", "docs/README.md", "docs/ARCHITECTURE.md",
+    "docs/INTENT.md",
     "docs/knowledge/**/*.md", "docs/decisions/**/*.md", "docs/postmortems/**/*.md",
+    # Plans/specs are operational instructions consumed directly by agents.
+    "docs/superpowers/**/*.md",
     # auditor-reference material — read by checklist-auditor / ultrareview
     "docs/blind-spot-checklists/**/*.md", "docs/templates/**/*.md",
     # UI design system — AGENTS.md tells agents to read these on UI work.
     "design-system/**/*.md",
+    # templates/ ships VERBATIM to consumer installs, so a poisoned template
+    # reaches every downstream repo. Scan the ones that become AGENT-INSTRUCTION
+    # surfaces there (what an agent reads as rules) — NOT the human-operator docs
+    # (OPERATOR_ENABLEMENT/SECURITY/CONTRIBUTING), which legitimately document the
+    # security flags and would false-positive, exactly as their installed twins
+    # are not context-scanned either. (v3.8.4)
+    "templates/AGENTS.md", "templates/CLAUDE.md", "templates/copilot-instructions.md",
+    "templates/github/*.instructions.md", "templates/claude/**/*.md", "templates/codex/**/*.md",
+    # v3.8.5: the REMAINING agent-read template sources bootstrap ships verbatim into
+    # downstream CONTEXT surfaces — auditor-reference material (finding_response,
+    # diy_ultrareview_prompts, blind-spot-checklists) and the ADR/knowledge/postmortem
+    # scaffolds (installed under docs/decisions, docs/knowledge, docs/postmortems, all
+    # of which ARE context-scanned). A poison planted only in one of these passed
+    # check_agent_harness before, then landed as an installed context doc. Human-operator
+    # docs (OPERATOR_ENABLEMENT/SECURITY/CONTRIBUTING) stay excluded — they legitimately
+    # document the bypass flags and would false-positive, exactly as their installed
+    # twins are not context-scanned.
+    "templates/finding_response.md", "templates/diy_ultrareview_prompts.md",
+    "templates/blind-spot-checklists/**/*.md",
+    "templates/0000-adr-template.md", "templates/knowledge_doc_template.md",
+    "templates/postmortem_template.md",
 ]
 
 # --- CODE surfaces: executed by agent or CI ---
 _SKILL_RESOURCE_EXTS = ("sh", "py", "js", "ts", "json", "yml", "yaml", "toml")
 _SKILL_ROOTS = (".claude/skills", ".agents/skills", ".github/skills")
 CODE_GLOBS = [
-    "manage.sh", "pytest.ini", ".pre-commit-config.yaml", ".gitattributes", ".gitignore",
+    # Root EXECUTION surfaces the agent/CI actually runs. manage.sh was scanned,
+    # but bootstrap/agentsync/package_release were NOT (round-20 P1) — a
+    # pipe-to-shell payload dropped into package_release.sh passed the harness
+    # scan clean. All four are shell the substrate executes, so all four are
+    # content-scanned. (v3.8.37)
+    "manage.sh", "bootstrap.sh", "agentsync.sh", "package_release.sh",
+    "pytest.ini", ".pre-commit-config.yaml", ".gitattributes", ".gitignore",
     # .substrate/config is read by manage.sh/CI as gate commands — it is
     # an execution surface and MUST be scanned for shell-danger (it is
     # parsed as data, never sourced, but its command values still run).
@@ -50,6 +86,13 @@ CODE_GLOBS = [
     ".claude/**/*.json", ".codex/**/*.json",
     # UI design-system config/tokens.
     "design-system/**/*.json", "design-system/**/*.yml", "design-system/**/*.yaml", "design-system/**/*.toml",
+    # templates/ EXECUTION surfaces shipped to consumers: rendered hook/config
+    # templates + the pre-commit template (their installed twins are code-scanned,
+    # so scan the source too). The human-doc .template files (pyproject/pytest/
+    # CODEOWNERS) are inert scaffolding and excluded. (v3.8.4)
+    "templates/claude/**/*.template", "templates/codex/**/*.template",
+    "templates/pre-commit-config.yaml.template", "templates/github/*.hook.json",
+    "templates/manage.sh.template",
 ] + [f"{root}/**/*.{ext}" for root in _SKILL_ROOTS for ext in _SKILL_RESOURCE_EXTS]
 
 # NOT harness-scanned: the adversarial test suite legitimately contains
@@ -63,24 +106,154 @@ HARNESS_SKIP_GLOBS = ["tests/**/*.py"]
 # caught by CODEOWNERS review + the validator tests.
 HARNESS_ALLOWLIST = {"scripts/harness_patterns.json"}
 
+
+# --- nested linked worktrees: another tree's files, never this tree's (v3.9.1) ---
+# The Claude app checks each session out at .claude/worktrees/<name>/ INSIDE the main
+# checkout (git-ignored via .git/info/exclude), and people keep scratch worktrees under
+# build/. Every file-system walker then read each session's copy of the repo as this
+# tree's files: doc drift reported every copied module as a coverage gap and the harness
+# scanner blocked on each copied harness_patterns.json, failing every commit from the
+# main checkout. Found and fixed first in a consumer (domain-lookup a350bd4, three live
+# sessions: 369 false gaps); ported here. Such a directory is its own working tree: its
+# own hooks check it when it commits, and a CI checkout never holds one. ONLY a worktree
+# git has registered, whose .git FILE and admin dir name each other, counts; a plain
+# directory, a copied .git file, a pruned worktree's leftovers, a submodule or a nested
+# clone is still walked. If git cannot answer, nothing is skipped (fail closed).
+def nested_worktrees(root) -> tuple[str, ...]:
+    """Repo-relative POSIX paths of registered linked worktrees nested strictly
+    inside `root`. Empty when git is missing, fails or times out."""
+    import os
+    import subprocess
+    from pathlib import Path
+    root = Path(root).resolve()
+    # Only git's own list of worktrees can say which directories to skip, so git must
+    # answer for THIS repository: an inherited GIT_DIR / GIT_COMMON_DIR / GIT_WORK_TREE
+    # would answer for another one, and GIT_CONFIG* could inject config. Discover from
+    # `root` instead; a hook's GIT_DIR names the same repository `root` resolves to.
+    env = {k: v for k, v in os.environ.items()
+           if not (k.startswith("GIT_CONFIG") or k in (
+               "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+               "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+               "GIT_NAMESPACE", "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM"))}
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(root), "worktree", "list", "--porcelain", "-z"],
+            capture_output=True, check=True, timeout=30, env=env,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ()
+    found = set()
+    for field in out.split(b"\0"):
+        if not field.startswith(b"worktree "):
+            continue
+        try:
+            tree = Path(os.fsdecode(field[len(b"worktree "):])).resolve()
+        except (OSError, ValueError, RuntimeError):
+            continue
+        if root in tree.parents and is_linked_worktree(tree, root):
+            found.add(tree.relative_to(root).as_posix())
+    return tuple(sorted(found))
+
+
+def is_linked_worktree(path, root) -> bool:
+    """True when path/.git is a regular FILE naming an admin dir whose `gitdir` file
+    names path/.git back. Git refuses to track a `.git` path, so nothing committed —
+    nothing a CI checkout holds — can pass this. Both reads go through the guarded
+    reader (no links, no FIFOs, contained in `root`)."""
+    from pathlib import Path
+    try:
+        from _doc_common import safe_read_text   # lazy: _doc_common imports this module
+    except Exception:
+        return False
+    path, root = Path(path), Path(root)
+    try:
+        head = (safe_read_text(path / ".git", root, max_bytes=4096) or "").strip()
+        if not head.startswith("gitdir:"):
+            return False
+        admin = (path / head[len("gitdir:"):].strip()).resolve()
+        back = (safe_read_text(admin / "gitdir", root, max_bytes=4096) or "").strip()
+        return bool(back) and (admin / back).resolve() == (path / ".git").resolve()
+    except (OSError, ValueError, RuntimeError):
+        return False
+
+
+def under(rel: str, trees) -> bool:
+    """Whether repo-relative POSIX `rel` lies inside one of `trees` (with a '/'
+    boundary: `.claude/worktrees/wt` does not cover `.claude/worktrees/wt2`)."""
+    return any(rel == t or rel.startswith(t + "/") for t in trees)
+
 # --- strict CODEOWNERS coverage: required-owned files/dirs ---
 # Directories owned recursively (a trailing-slash CODEOWNERS rule covers them).
 OWNED_DIRS = [
     "scripts", "tests", ".claude", ".codex", ".agents",
-    "docs/knowledge", "docs/decisions", "docs/blind-spot-checklists", "docs/templates",
+    "docs/decisions", "docs/blind-spot-checklists", "docs/templates",
     ".github/hooks", ".github/instructions", ".github/workflows",
 ]
 OWNED_FILES = [
-    "AGENTS.md", "CLAUDE.md", "DESIGN.md", "manage.sh", "pytest.ini", ".pre-commit-config.yaml",
+    # Root execution surfaces are content-scanned (CODE_GLOBS) AND review-gated
+    # (v3.8.37) — a scanned-but-unowned script could be replaced without a
+    # CODEOWNER seeing it. bootstrap/agentsync/package_release join manage.sh.
+    "AGENTS.md", "CLAUDE.md", "DESIGN.md", "AGENT_BUS.md", "manage.sh", "bootstrap.sh",
+    "agentsync.sh", "package_release.sh", "pytest.ini", ".pre-commit-config.yaml",
     ".gitattributes", ".gitignore", ".github/copilot-instructions.md",
     ".github/dependabot.yml", ".substrate/config", ".substrate/required_profile",
-    "docs/HISTORY.md", "docs/README.md", "docs/ARCHITECTURE.md", "docs/INTENT.md",
+    "docs/HISTORY.md", "docs/REJECTED.md", "docs/README.md", "docs/ARCHITECTURE.md", "docs/INTENT.md",
+    # The generated consumer guide and installed scaffold are substrate-owned;
+    # project-authored knowledge siblings are governed context, not provenance.
+    "docs/knowledge/00_substrate.md", "docs/knowledge/_template.md",
 ]
-# Optional agent-control surfaces: required-owned ONLY when present.
-OPTIONAL_FILES = [".mcp.json"]
-OPTIONAL_DIRS = [".github/skills", "docs/postmortems", "design-system"]
+# Optional substrate-owned surfaces: required-owned ONLY when present and part
+# of the installed machinery baseline when present.
+# .substrate/trust/* are the release/upgrade TRUST ANCHORS — owned-when-present so a PR can't
+# swap a verification key/identity without CODEOWNER review (v3.7.13; sigstore_identity v3.7.20).
+# They are ALSO frozen by trusted-base (the release root of trust).
+OPTIONAL_FILES = [".mcp.json", ".substrate/trust/minisign.pub",
+                  ".substrate/trust/sigstore_identity.json", ".substrate/install.json"]
+# templates/ ships verbatim to consumers and now carries context-scanned agent
+# sources (above), so it must be required-OWNED when present — closing the v3.8.5
+# gap where the scanned template files had no CODEOWNER requirement despite this
+# module's contract that both surface classes are required-owned. Owned-when-present
+# (not unconditionally) so a consumer that strips templates/ is not falsely failed.
+OPTIONAL_DIRS = [".github/skills", "docs/postmortems", "design-system", "templates"]
+# Project-authored agent context that must always receive CODEOWNER review but
+# must NOT become substrate install ownership/drift. Knowledge exists in every
+# install, while Superpowers plans/specs are optional adoption surfaces.
+GOVERNED_DIRS = ["docs/knowledge"]
+# Project-authored agent context that still requires CODEOWNER review when
+# present, but must NOT become substrate install ownership/drift. Keeping this
+# distinct prevents a normal plan edit from blocking a later kit upgrade.
+GOVERNED_OPTIONAL_DIRS = ["docs/superpowers"]
+# NOTE: the substrate-init installer (installer/) carries a COPY of the trust key, but the
+# authoritative anchor is .substrate/trust/minisign.pub (OPTIONAL_FILES, owned + frozen). The
+# installer copy is guarded against drift by test_installer_vendored_pubkey_matches_kit rather
+# than by owning installer/ here — owning it would wrongly demand knowledge-doc coverage of a
+# separate package's modules. (v3.7.15)
 # Generated runtime/toolchain state that is NOT governance source.
 COVERAGE_SKIP_PARTS = {"__pycache__", "venv", "node_modules", ".pytest_cache", ".ruff_cache", ".mypy_cache"}
+
+# --- tests/ classification ---------------------------------------------------
+# tests/ is required-OWNED as a dir, but a CONSUMER repo's tests/ is MIXED (the
+# kit's self-tests + the project's own tests), so tooling that must tell them
+# apart (code_shape shape report, bootstrap install) keys off the kit's own test
+# FILENAMES — named here as the single source of truth.
+KIT_TEST_FILES = {
+    "tests/conftest.py", "tests/test_doc_consistency.py", "tests/test_hook_scripts.py",
+    "tests/test_smoke.py", "tests/test_substrate_files.py",
+}
+# Heavy behavioral self-tests STRIPPED from a consumer install (bootstrap): on
+# byte-identical vendored code they re-prove what the kit's OWN CI already proves,
+# adding ~2 min to every consumer CI run for ~zero marginal safety (content-pins
+# already detect vendored-file tampering more cheaply). KEPT on install is the
+# cheap install-integrity smoke — test_substrate_files.py (a contract test that
+# only runs in an installed repo), test_smoke.py (always-green so pytest never
+# exit-5s before the project adds tests), and conftest.py (the watchdog/hermetic
+# fixtures those rely on). The kit's OWN tests/ dir is untouched — the full suite
+# still runs here. `bootstrap.sh --dev-tests` vendors the full suite (dogfooding).
+# (v3.7.11)
+CONSUMER_STRIP_TESTS = {
+    "test_hook_scripts.py",
+    "test_doc_consistency.py",
+}
 
 # --- agent-config-audit workflow trigger paths (CI must watch the same set) ---
 def audit_trigger_paths():
@@ -93,7 +266,7 @@ def audit_trigger_paths():
             paths.add(g.rsplit("/", 1)[0] + "/**")
         else:
             paths.add(g)
-    for d in OWNED_DIRS + OPTIONAL_DIRS:
+    for d in OWNED_DIRS + OPTIONAL_DIRS + GOVERNED_DIRS + GOVERNED_OPTIONAL_DIRS:
         paths.add(d + "/**")
     for f in OWNED_FILES + OPTIONAL_FILES:
         paths.add(f)
@@ -104,4 +277,11 @@ def audit_trigger_paths():
 
 if __name__ == "__main__":
     import json
-    print(json.dumps(audit_trigger_paths(), indent=2))
+    import sys
+    if "--consumer-strip-tests" in sys.argv:
+        # Emit the bootstrap strip list (one filename per line) so bootstrap.sh
+        # derives it from this single source of truth instead of duplicating it.
+        for _n in sorted(CONSUMER_STRIP_TESTS):
+            print(_n)
+    else:
+        print(json.dumps(audit_trigger_paths(), indent=2))

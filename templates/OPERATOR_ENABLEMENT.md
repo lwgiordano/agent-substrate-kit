@@ -120,9 +120,33 @@ Copilot (`.github/hooks/`) in addition to Claude.
   exact strict-mode GitHub settings to enable; `--check` (in CI, admin token)
   verifies them via `check_github_governance.py --require`. There is no
   auto-apply — enabling protection is your explicit action.
+- **Sandbox (egress containment, opt-in):** set `SUBSTRATE_SANDBOX=1` in
+  `.substrate/config` and run agent commands through `scripts/sandbox_exec.sh`
+  — it composes the OS sandbox (macOS `sandbox-exec` / Linux `bwrap`) to **deny
+  network egress at the kernel**, turning exfil from a *detected* tripwire into
+  a *contained* one. Fail-closed: refuses (exit 3) if no OS sandbox is present
+  rather than running unsandboxed. macOS + Linux only (no Windows). To enforce
+  it for the agent, point the agent's shell at `sandbox_exec.sh` (or run the
+  agent itself under it). `./manage.sh go-live` shows whether it's active.
 - **Reserved namespace:** in strict mode `scripts/` is **substrate-owned** and
   frozen by the trusted-base guard. Put PROJECT scripts in `tools/`, `bin/`, or
   `project-scripts/` — a project file under `scripts/` will trip the freeze.
+
+## Optional: completion gate (v3.8.3, default OFF)
+
+A Stop-hook nudge for AI sessions: when project files changed and no
+self-audit was recorded after the last change, the agent sees a
+warning at Stop telling it to run the self-audit skill and record it
+(`./manage.sh memory skill-run self-audit`). Enable per session with
+`SUBSTRATE_COMPLETION_GATE=1`, or repo-wide with `COMPLETION_GATE="1"`
+in `.substrate/config` (env `=0` is the kill-switch either way).
+Warning-only in this release; a strict blocking mode ships only after
+the warn mode has been dogfooded. Fail-open by contract — it can
+never wedge a session.
+
+Note: upgrading to v3.8.3 changes `.claude/settings.json` (adds the
+Stop hook), so Claude Code will show a one-time re-trust prompt for
+project hooks.
 
 ## After all three are done
 

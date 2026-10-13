@@ -13,14 +13,15 @@
       {
         "matcher": "Bash",
         "hooks": [
-          { "type": "command", "command": "python3 \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)/scripts/check_exfil_guard.py\"", "timeout": 10 }
+          { "type": "command", "command": "SUBSTRATE_HOOK_HOST=codex python3 \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)/scripts/check_exfil_guard.py\"", "timeout": 10 }
         ]
       }
     ],
     "Stop": [
       {
         "hooks": [
-          { "type": "command", "command": "python3 \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)/scripts/session_handoff.py\" capture", "timeout": 15 }
+          { "type": "command", "command": "python3 \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)/scripts/session_handoff.py\" capture", "timeout": 15 },
+          { "type": "command", "command": "python3 \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)/scripts/completion_gate.py\"", "timeout": 10 }
         ]
       }
     ]

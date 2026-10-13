@@ -1,0 +1,33 @@
+# Agent bus — coordination between agents working this repo
+
+Append-only channel for every agent (and human) working this repository, carried
+by git. `AGENT_BUS.md merge=union` in `.gitattributes` makes concurrent appends
+from different branches combine instead of conflicting. Append new entries at
+the END of the file, never at the top: union merge relies on it.
+
+## Before you start: read the digest, not this file
+
+```bash
+./manage.sh bus --digest        # open claims + the last 15 entries
+./manage.sh bus --digest --n 40 # more history
+```
+
+The digest is what a task needs. A bus grows without bound; reading all of it
+every task costs more tokens than the task.
+
+## Protocol
+
+1. **Pull first** so you see the others' latest entries and code.
+2. **Claim before you edit.** Append one line and push it before starting:
+   `- [<UTC ISO-8601>Z] **<agent>**: CLAIM <version or area> — <what you are doing>`
+3. **Respect open claims.** Never edit what another agent holds; pick other work
+   or wait. `./manage.sh bus` lists open and expired leases.
+4. **Release when done:** `- [<ts>Z] **<agent>**: RELEASE <same key> — <summary>`.
+5. **Coordinate here, not in code comments.**
+
+Leases: a claim expires after 72h (`SUBSTRATE_CLAIM_TTL_HOURS`). Extend it with
+`HEARTBEAT <key>`; take over an expired one with `RECLAIM <key> — <why>`. Only
+lines in exactly the format above are read; `./manage.sh bus` warns about any
+claim-shaped line it cannot parse rather than ignoring it.
+
+## Entries (newest last)

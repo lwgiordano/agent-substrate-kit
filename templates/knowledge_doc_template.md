@@ -5,6 +5,12 @@ covers:
   - <relative/path/to/config/file.yaml>
 last_human_reviewed: YYYY-MM-DD
 purpose: subsystem-<short-slug>
+# OPTIONAL (v3.8.29) — claims this doc makes about the code, checked every commit.
+# Format: <path>::<substring>. If the substring is gone (renamed/deleted), the
+# drift gate fails, so the doc cannot silently lie about a symbol that no longer
+# exists. DECLARATIVE ONLY: nothing here is ever executed.
+asserts:
+  - <relative/path/to/source/file1.py>::<function_or_phrase_the_doc_describes>
 ---
 
 # <Subsystem name> — <one-line description>
@@ -15,6 +21,8 @@ subsystem. Frontmatter:
   covers:              every source/config file the doc describes
   last_human_reviewed: date the human last verified the doc matches code
   purpose:             short-slug used for cross-referencing
+  asserts:             OPTIONAL `path::substring` claims, verified every commit
+                       (a renamed/deleted symbol fails the gate; never executed)
 
 `scripts/check_doc_drift.py` walks the covered files' git log and fires
 if any has been modified after `last_human_reviewed`. Bumping the date

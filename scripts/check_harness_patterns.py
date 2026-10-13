@@ -42,6 +42,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 try:
+    from _doc_common import safe_read_text as _safe_read_text
+except Exception:  # pragma: no cover - stripped install
+    def _safe_read_text(path, root=None, max_bytes=None, tail_bytes=None):
+        return None
+
+try:
     from _substrate_root import substrate_root as _sr
     ROOT = _sr()
 except Exception:
@@ -180,7 +186,15 @@ def _compile_group(data: dict, key: str):
 
 def main() -> int:
     try:
-        data = json.loads(PATTERNS.read_text(encoding="utf-8"))
+        # v3.8.43 (round-26 P2): this pre-scan validator loaded the pattern
+        # data with a BLOCKING raw read, so a FIFO harness_patterns.json hung
+        # it (and check_agent_harness behind it) before any non-regular-surface
+        # guard could run. Guarded read; None -> invalid, which is rc 2.
+        _raw = _safe_read_text(PATTERNS, PATTERNS.parent.parent, max_bytes=8 << 20)
+        if _raw is None:
+            raise ValueError("harness_patterns.json is unreadable or not a "
+                             "private regular file")
+        data = json.loads(_raw)
         if not isinstance(data, dict):
             raise ValueError("top-level JSON is not an object")
         groups = {k: _compile_group(data, k) for k in REQUIRED_GROUPS}

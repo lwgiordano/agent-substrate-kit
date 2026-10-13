@@ -7,7 +7,15 @@ CLI:
     --files    "<comma,separated>" \\
     --intent   "<why>"             \\
     --knowledge "<what next sessions need>" \\
-    [--commit-hash <short-sha>]
+    [--commit-hash <short-sha>] \\
+    [--outcome shipped-green|unverified|wip|abandoned|reverts:<sha>|supersedes:<sha>]
+
+--outcome (v3.9.0, default `unverified`) says whether the change WORKED.
+`shipped-green` is the only label that claims success and the only one that
+needs evidence: a release-pass event for that commit in a memory chain that
+verifies, from a release gate that started on a clean tree. reverts/supersedes
+must name an earlier entry. The new entry is then recorded in the memory chain,
+so a later edit to it is a BREAK.
 
 Each field is required and must be >= 10 characters (M15).
 
@@ -27,17 +35,24 @@ Exit codes: 0 ok | 1 invalid args | 2 file I/O error.
 from __future__ import annotations
 
 import argparse
-import os
 import re
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 # Explicit local import path so this works under `python -I` (isolated mode
 # does NOT auto-prepend the script dir). Stdlib imports above resolve first.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _doc_common import git_short_sha, repo_root, utc_now_iso
+from _doc_common import (
+    HISTORY_OUTCOME_LINE_RE,
+    git_short_sha,
+    history_outcome_problem,
+    locked_atomic_append,
+    record_in_chain,
+    repo_root,
+    safe_read_text,
+    utc_now_iso,
+)
 
 
 def _other_files_dirty(root: Path) -> list[str]:
@@ -73,6 +88,11 @@ def _other_files_dirty(root: Path) -> list[str]:
     return dirty
 
 SESSION_TOKEN_RE = re.compile(r"^\*\*Session token:\*\*\s+(\S+)\s*$", re.MULTILINE)
+# v3.8.42 (round-25 P2): the token is copied verbatim into an append-only HISTORY
+# header, so it must be a machine-token shape and nothing else. `(\S+)` alone
+# accepts anything non-space — including the U+FFFD run that lossy-decoding
+# undecodable bytes produces — which would embed garbage in the log permanently.
+_SAFE_SESSION_TOKEN_RE = re.compile(r"\A[A-Za-z0-9._:@+-]{1,128}\Z")
 HISTORY_HEADER = """\
 # HISTORY.md — Append-only project changelog
 
@@ -87,9 +107,21 @@ def read_session_token(history_root: Path) -> str:
     session_file = history_root / "docs" / "CURRENT_SESSION.md"
     if not session_file.exists():
         return "NO_SESSION"
-    text = session_file.read_text(encoding="utf-8")
+    # v3.8.41 (round-24 P2): CURRENT_SESSION.md is agent-writable, untrusted
+    # state. A symlinked OR hard-linked leaf would read an OUTSIDE file and copy
+    # its `**Session token:**` value verbatim into the append-only HISTORY entry.
+    # v3.8.42 (round-25 P2): the leaf guard ran but the read that FOLLOWED it was
+    # still a bare read_text — so a FIFO hung and undecodable bytes raised
+    # UnicodeDecodeError out of the CLI. safe_read_text does the guard AND the
+    # read as one operation (O_NOFOLLOW|O_NONBLOCK, S_ISREG, bounded, lossy
+    # decode), so every unsafe shape degrades to NO_SESSION instead.
+    text = safe_read_text(session_file, history_root, max_bytes=256 * 1024)
+    if text is None:
+        return "NO_SESSION"
     m = SESSION_TOKEN_RE.search(text)
-    return m.group(1) if m else "NO_SESSION"
+    if not m or not _SAFE_SESSION_TOKEN_RE.match(m.group(1)):
+        return "NO_SESSION"
+    return m.group(1)
 
 
 def compose_entry(
@@ -100,6 +132,7 @@ def compose_entry(
     files: str,
     intent: str,
     knowledge: str,
+    outcome: str | None = None,
 ) -> str:
     return (
         f"## {timestamp} — {token} — {sha}\n"
@@ -107,24 +140,20 @@ def compose_entry(
         f"**Files:** {files}\n"
         f"**Intent:** {intent}\n"
         f"**Knowledge:** {knowledge}\n"
-        f"\n"
+        + (f"**Outcome:** {outcome}\n" if outcome is not None else "")
+        + "\n"
     )
 
 
 def atomic_append(target: Path, entry: str) -> None:
-    """Read existing file, append entry, write tmp, os.replace."""
-    target.parent.mkdir(parents=True, exist_ok=True)
-    existing = target.read_text(encoding="utf-8") if target.exists() else HISTORY_HEADER
-    new_text = existing + entry
-    fd, tmp_path = tempfile.mkstemp(prefix=".HISTORY.", suffix=".tmp", dir=str(target.parent))
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(new_text)
-        os.replace(tmp_path, target)
-    except Exception:
-        if os.path.exists(tmp_path):
-            os.unlink(tmp_path)
-        raise
+    """Serialized atomic append — see _doc_common.locked_atomic_append.
+
+    v3.8.31: the previous read/mkstemp/replace here was atomic for readers but
+    raced concurrent WRITERS — two simultaneous appends kept only one entry
+    (Codex reproduced it against append_rejected, which had mirrored this
+    function verbatim). Both appenders now share the one flock-serialized
+    implementation."""
+    locked_atomic_append(target, entry, HISTORY_HEADER, ".HISTORY.")
 
 
 def main() -> int:
@@ -145,6 +174,12 @@ def main() -> int:
         default=None,
         help="Short SHA the entry documents (overrides git HEAD capture). "
              "Use post-commit to avoid the parent-vs-current off-by-one.",
+    )
+    parser.add_argument(
+        "--outcome",
+        default="unverified",
+        help="Did it work? shipped-green (needs a release-pass for the commit), "
+             "unverified (default), wip, abandoned, reverts:<sha>, supersedes:<sha>",
     )
     args = parser.parse_args()
 
@@ -207,9 +242,20 @@ def main() -> int:
             return 1
     sha = args.commit_hash.strip() if args.commit_hash else git_short_sha(cwd=root)
     token = read_session_token(root)
-    entry = compose_entry(timestamp, token, sha, **fields)
-
     target = root / "docs" / "HISTORY.md"
+    outcome = args.outcome.strip()
+    existing = safe_read_text(target, root, max_bytes=64 << 20) or ""
+    earlier = [m.group(1).strip() for m in re.finditer(r"^## \S+ — \S+ — (.+)$", existing, re.M)]
+    problem = history_outcome_problem(outcome, sha, earlier, root)
+    if problem:
+        print(f"append_history: {problem}", file=sys.stderr)
+        return 1
+    entry = compose_entry(timestamp, token, sha, **fields, outcome=outcome)
+    if len(HISTORY_OUTCOME_LINE_RE.findall(entry)) != 1:
+        print("append_history: a field may not contain its own **Outcome:** line",
+              file=sys.stderr)
+        return 1
+
     try:
         atomic_append(target, entry)
     except OSError as e:
@@ -217,6 +263,11 @@ def main() -> int:
         return 2
 
     sys.stdout.write(entry)
+    rc, out = record_in_chain(root, "docs/HISTORY.md")
+    if rc != 0:
+        print(f"append_history: entry APPENDED but NOT recorded in the memory chain "
+              f"({out}). Run `./manage.sh memory record docs/HISTORY.md`.", file=sys.stderr)
+        return 2
     return 0
 
 

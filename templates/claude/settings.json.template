@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/check_exfil_guard.py\"",
+            "command": "SUBSTRATE_HOOK_HOST=claude python3 \"$CLAUDE_PROJECT_DIR/scripts/check_exfil_guard.py\"",
             "timeout": 10
           }
         ]
@@ -76,6 +76,18 @@
             "type": "command",
             "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/lint_on_write.py\"",
             "timeout": 60
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/completion_gate.py\"",
+            "timeout": 10
           }
         ]
       }

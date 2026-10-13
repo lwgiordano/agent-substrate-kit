@@ -42,7 +42,10 @@ jobs:
           # profile). NOT the audited DATA/content — harness_patterns.json is
           # .json (data) and AGENTS.md / docs / .substrate/config (command
           # values) may change. (v3.2.19/20 findings.)
-          TRUSTED="scripts manage.sh .pre-commit-config.yaml .github/workflows .substrate/required_profile"
+          # .substrate/trust + the installer's embedded trust dir are the RELEASE ROOT OF TRUST
+          # (v3.7.20): the keys/identities that verify future upgrades. A PR must not swap them —
+          # rotation routes through the release process, like the profile/scanner locks.
+          TRUSTED="scripts manage.sh .pre-commit-config.yaml .github/workflows .substrate/required_profile .substrate/required_sandbox .substrate/required_remote_governance .substrate/required_dep_cooldown .substrate/required_security_scanners .substrate/trust installer/substrate-init/src/substrate_init/trust .substrate/trusted-base-audit.yml.template"
           # carve the one DATA file back out of scripts/ (PRs may extend it; the
           # frozen check_harness_patterns.py validates it against pinned hashes).
           changed="$(git diff --name-only "origin/${{ github.base_ref }}...HEAD" -- $TRUSTED \
@@ -65,7 +68,54 @@ jobs:
             echo "::error::Lowering it disables strict-only behavior — route through release."
             exit 1
           fi
-          echo "freeze-guard: ok — no frozen policy/validator/CI/profile change"
+          # Sandbox authority (v3.5.1): when containment is a required minimum
+          # (.substrate/required_sandbox=1), the SUBSTRATE_SANDBOX flag is frozen too
+          # — a PR must not disable egress containment while keeping strict governance.
+          if git diff "origin/${{ github.base_ref }}...HEAD" -- .substrate/config \
+               | grep -Eq '^[+-]\s*SUBSTRATE_SANDBOX='; then
+            echo "::error::This PR changes SUBSTRATE_SANDBOX in .substrate/config."
+            echo "::error::Sandbox enablement is frozen when .substrate/required_sandbox=1."
+            echo "::error::Disabling containment must route through the release process."
+            exit 1
+          fi
+          # Remote-governance authority (v3.6.0): when remote governance is a required
+          # minimum (.substrate/required_remote_governance=1), the SUBSTRATE_REMOTE_GOVERNANCE
+          # flag is frozen too — a PR must not silently drop CODEOWNERS coverage / trusted-base
+          # authority while keeping the rest of the governance posture.
+          if git diff "origin/${{ github.base_ref }}...HEAD" -- .substrate/config \
+               | grep -Eq '^[+-]\s*SUBSTRATE_REMOTE_GOVERNANCE='; then
+            echo "::error::This PR changes SUBSTRATE_REMOTE_GOVERNANCE in .substrate/config."
+            echo "::error::Remote governance is frozen when .substrate/required_remote_governance=1."
+            echo "::error::Disabling it must route through the release process."
+            exit 1
+          fi
+          # Dependency-cooldown authority (v3.7.2): frozen when required_dep_cooldown=1 —
+          # a PR must not silently disable the fresh-version risk signal.
+          if git diff "origin/${{ github.base_ref }}...HEAD" -- .substrate/config \
+               | grep -Eq '^[+-]\s*SUBSTRATE_DEP_COOLDOWN='; then
+            echo "::error::This PR changes SUBSTRATE_DEP_COOLDOWN in .substrate/config."
+            echo "::error::Dependency cooldown is frozen when .substrate/required_dep_cooldown=1."
+            echo "::error::Disabling it must route through the release process."
+            exit 1
+          fi
+          # Security-scanner authority (v3.7.17): frozen when required_security_scanners=1 —
+          # a PR must not silently disable the composed scanner tier.
+          if git diff "origin/${{ github.base_ref }}...HEAD" -- .substrate/config \
+               | grep -Eq '^[+-]\s*SUBSTRATE_SECURITY_SCANNERS='; then
+            echo "::error::This PR changes SUBSTRATE_SECURITY_SCANNERS in .substrate/config."
+            echo "::error::The scanner tier is frozen when .substrate/required_security_scanners=1."
+            echo "::error::Disabling it must route through the release process."
+            exit 1
+          fi
+          # Release-backend authority (v3.7.18): the release/signing posture is maintainer-owned
+          # — a PR must not silently downgrade it (e.g. keyless -> local) to weaken release trust.
+          if git diff "origin/${{ github.base_ref }}...HEAD" -- .substrate/config \
+               | grep -Eq '^[+-]\s*SUBSTRATE_RELEASE_BACKEND='; then
+            echo "::error::This PR changes SUBSTRATE_RELEASE_BACKEND in .substrate/config."
+            echo "::error::The release/signing posture is frozen — change it through the release process."
+            exit 1
+          fi
+          echo "freeze-guard: ok — no frozen policy/validator/CI/profile/sandbox/remote-governance/cooldown/scanner/release-backend change"
       - name: Run the (frozen) validators + strict governance against PR content
         run: |
           set -euo pipefail

@@ -1,0 +1,80 @@
+# DORMANT + EXPERIMENTAL TEMPLATE — activate with `./manage.sh enable release keyless`.
+# Tag-triggered release, signed KEYLESS with Sigstore/cosign via the workflow's OIDC identity;
+# NO signing key stored anywhere — the strongest tier. Marked experimental until validated on a
+# real keyless release end-to-end (package_release builds the artifact UNSIGNED, then cosign
+# signs it and this workflow patches the manifest to reflect the Sigstore signature).
+#
+# One-time setup (see DISTRIBUTION.md):
+#   - consumers must carry .substrate/trust/sigstore_identity.json
+#     {"identity_regexp": "https://github.com/<owner>/<repo>/.github/workflows/release-keyless.yml@refs/tags/v.*",
+#      "issuer": "https://token.actions.githubusercontent.com"}
+#   - (optional) configure PyPI Trusted Publishing to auto-publish substrate-init.
+# Trigger: push a tag like v3.7.18.
+name: Release (keyless / Sigstore)
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write    # create the GitHub Release
+  id-token: write    # OIDC identity for keyless signing (and PyPI trusted publishing)
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 0}
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      - uses: sigstore/cosign-installer@v3
+      - name: Build (unsigned artifact + manifest)
+        run: |
+          python3 -m pip install --quiet cryptography
+          ./package_release.sh --smoke   # SUBSTRATE_RELEASE_SECKEY unset -> honestly unsigned zip
+      - name: Keyless-sign the artifact (Sigstore bundle)
+        run: |
+          ZIP="$(ls dist/*.zip | grep -v -- '-review-bundle' | head -1)"
+          COSIGN_EXPERIMENTAL=1 cosign sign-blob --yes --bundle "$ZIP.sigstore" "$ZIP"
+      - name: Record the keyless signature in the manifest (package_release built it unsigned)
+        run: |
+          ZIP="$(ls dist/*.zip | grep -v -- '-review-bundle' | head -1)"
+          python3 - "$ZIP" <<'PY'
+          import json, pathlib, sys
+          z = pathlib.Path(sys.argv[1]).name
+          m = pathlib.Path("dist/RELEASE_MANIFEST.json")
+          d = json.loads(m.read_text())
+          d["signed"] = True
+          d["artifact_signature"] = z + ".sigstore"
+          d["signature_backend"] = "sigstore"
+          m.write_text(json.dumps(d, indent=2) + "\n")
+          PY
+      - name: Verify the keyless signature (fail-closed)
+        run: |
+          ZIP="$(ls dist/*.zip | grep -v -- '-review-bundle' | head -1)"
+          python3 -I scripts/verify_release.py "$ZIP" --require
+      - name: Rebuild the review bundle WITH the keyless signature + patched manifest
+        # package_release built the bundle before cosign ran (unsigned); rebuild it now so the
+        # one-file audit path carries the .sigstore + identity + signed=true manifest (v3.7.20).
+        run: |
+          ZIP="$(ls dist/*.zip | grep -v -- '-review-bundle' | head -1)"; B="$(basename "$ZIP")"
+          R=dist/review; rm -rf "$R"; mkdir -p "$R"
+          cp "$ZIP" "$ZIP.sha256" "$ZIP.sigstore" .substrate/trust/sigstore_identity.json dist/RELEASE_MANIFEST.json "$R/"
+          { echo "# Review bundle (keyless / Sigstore) — $B";
+            echo; echo "Verify: scripts/verify_release.py $B  (needs cosign + the trusted identity in sigstore_identity.json).";
+            echo "RELEASE_MANIFEST.json records signed=true, signature_backend=sigstore."; } > "$R/README_REVIEW.md"
+          BUNDLE="dist/${B%.zip}-review-bundle.tar.gz"
+          # Same shared builder as package_release (v3.7.21) — one bundle path for every backend.
+          python3 scripts/build_review_bundle.py "$R" "$BUNDLE" "$B" "$B.sha256" "$B.sigstore" sigstore_identity.json RELEASE_MANIFEST.json README_REVIEW.md
+      - name: Create the GitHub Release
+        env: {GH_TOKEN: "${{ github.token }}"}
+        run: |
+          ZIP="$(ls dist/*.zip | grep -v -- '-review-bundle' | head -1)"
+          gh release create "${GITHUB_REF_NAME}" \
+            "$ZIP" "$ZIP.sha256" "$ZIP.sigstore" .substrate/trust/sigstore_identity.json \
+            dist/RELEASE_MANIFEST.json dist/*-review-bundle.tar.gz \
+            --title "${GITHUB_REF_NAME}" \
+            --notes "Keyless (Sigstore) release. Verify: \`scripts/verify_release.py <zip>\` (needs cosign + the trusted identity)."
+      # - name: Publish substrate-init to PyPI (Trusted Publishing / OIDC — no token)
+      #   run: |
+      #     python3 -m pip install --quiet build
+      #     python3 -m build installer/substrate-init --outdir dist_pypi
+      #   # then: pypa/gh-action-pypi-publish (uses the id-token above; configure the trusted publisher on pypi.org first)

@@ -510,3 +510,36 @@ def test_full_suite_watchdog_has_measured_runtime_margin(monkeypatch) -> None:
 
     assert scheduled["seconds"] >= 2 * 603
     assert scheduled["exit"] is True
+
+
+def test_consumer_workflow_templates_pin_the_same_action_versions_as_the_kit() -> None:
+    """Dependabot bumps the actions in the kit's own .github/workflows and
+    cannot see workflows/*.template, so after checkout v4->v7, setup-go v5->v6 and
+    setup-node v4->v6 the workflows the kit installs in consumers were left on the old
+    majors. Every action that both use must be pinned to the same ref in both, so the
+    next bump fails here and names the template to update with it."""
+    import re
+
+    pin = re.compile(r"uses:\s*([\w.-]+/[\w./-]+)@([^\s#]+)")
+
+    def pins(paths):
+        found: dict[str, dict[str, set[str]]] = {}
+        for path in paths:
+            text = path.read_text(encoding="utf-8")
+            for action, ref in pin.findall(text):
+                found.setdefault(action, {}).setdefault(ref, set()).add(path.name)
+        return found
+
+    kit = pins(sorted((KIT / ".github" / "workflows").glob("*.yml")))
+    shipped = pins(sorted((KIT / "workflows").glob("*.template")))
+    assert kit and shipped, "expected workflows on both sides"
+    drift = []
+    for action in sorted(set(kit) & set(shipped)):
+        if len(kit[action]) != 1:
+            drift.append(f"{action}: the kit's own workflows disagree: {sorted(kit[action])}")
+            continue
+        (want,) = kit[action]
+        for ref, files in sorted(shipped[action].items()):
+            if ref != want:
+                drift.append(f"{action}@{ref} in {sorted(files)}; the kit uses @{want}")
+    assert not drift, "consumer workflow templates drifted from the kit:\n" + "\n".join(drift)

@@ -42,7 +42,9 @@ bash /path/to/agent_substrate_kit_v3/bootstrap.sh --profile standard --lang auto
 | 4-field bug-fix commit protocol + postmortem-per-bugfix hooks | — | — | yes |
 | Extras (calibration, stale-phrases, license headers) | — | — | yes |
 
-## Current status (v3.9.3)
+## Current status (v3.10.0)
+
+**v3.10.0 — task evidence.** Three opt-in commands, all offline. `./manage.sh brief "<task>"` shows the current task's sourced context: goals, matching lessons and decisions, open claims, recent findings. `./manage.sh receipt` records a task, runs one known check (check, evals or prove) and reports whether it passed on the exact tree you still have, or whether that tree changed. `./manage.sh projects --root DIR ...` reports installed version, Git state, hook wiring, config and latest receipt for the projects you name, without running any of their code. Imported HISTORY success labels from another machine now read as unverifiable here instead of failing, and the workflow templates installed in consumers pin the same action versions as the kit.
 
 **v3.9.3** — HISTORY outcome labels police claims, not silence. An entry with no
 label reads as `unverified` and is reported, not failed, so merging a branch whose

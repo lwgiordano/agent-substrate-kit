@@ -27,8 +27,9 @@ is the system-level view that connects them.
    mirrors todo state; every durable change lands in git-tracked files.
 3. **Compaction / session end**: capture writes the structured snapshot and
    appends a hash-chained memory event.
-4. **Commit**: pre-commit runs the full gate chain; commits that fail any
-   deterministic check do not land.
+4. **Commit and push**: fast deterministic validators run at commit. The full
+   test suite runs at pre-push and in `manage.sh check`, CI, and release.
+   A successful commit alone is not evidence that the full suite passed.
 5. **Release**: the artifact is packaged and the gates re-run from the built
    artifact before a release is claimed. Signing is CONDITIONAL — with a
    maintainer key (`SUBSTRATE_RELEASE_SECKEY` + minisign) the artifact is

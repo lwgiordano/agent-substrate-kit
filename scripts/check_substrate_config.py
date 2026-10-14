@@ -208,6 +208,51 @@ def _strip_quotes_checked(raw: str, key: str):
     return v, None
 
 
+def parse_config_text(text: str) -> tuple[dict, str | None]:
+    """The `.substrate/config` DATA grammar, as a pure function: (values, error).
+
+    One implementation for every Python reader (this validator and the read-only
+    project status report), so a second copy cannot drift from the shell loader.
+    Lines are split on "\\n" only, exactly as `while IFS= read -r` does: Python's
+    `str.splitlines()` also breaks on VT/FF/NEL/LS/PS, so a value hidden after one
+    of those would read as a separate assignment here and as part of one line to
+    the shell (v3.10.0; the same class `_doc_common.substrate_profile` closed in
+    round 39). Policy checks (locks, dangerous commands) stay in main().
+    """
+    vals: dict[str, str] = {}
+    for raw in text.split("\n"):
+        line = raw
+        # drop full-line comments / blanks
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        line = line.split("  #", 1)[0].rstrip()
+        if " #" in line:
+            line = line.split(" #", 1)[0].rstrip()
+        if not line:
+            continue
+        # strict KEY=VALUE: uppercase key, no leading `export`, no space before `=`
+        if not re.match(r"^[A-Z][A-Z0-9_]*=", line):
+            return vals, f"invalid line (only KEY=VALUE allowed): {line}"
+        key, raw_val = line.split("=", 1)
+        if key not in _ALLOWED_KEYS:
+            return vals, f"unknown key: {key}"
+        # command substitution / backticks / ${...} forbidden (data, not code)
+        if "$(" in raw_val or "`" in raw_val or "${" in raw_val:
+            return vals, f"command substitution forbidden in {key}"
+        val, err = _strip_quotes_checked(raw_val, key)
+        if err:
+            return vals, err
+        # enum values must be in their fixed domain (a typo like "stirct"
+        # would otherwise silently disable strict governance).
+        if key in _ENUMS and val not in _ENUMS[key]:
+            return vals, f"invalid {key}: {val}"
+        # integer-valued keys (e.g. cooldown days) must be non-negative ints.
+        if key in _INT_KEYS and not val.isdigit():
+            return vals, f"invalid {key}: {val} (want non-negative integer)"
+        vals[key] = val
+    return vals, None
+
+
 def main() -> int:
     cfg = ROOT / ".substrate" / "config"
     # In-process repeat calls must not inherit a previous run's lock errors
@@ -269,42 +314,10 @@ def main() -> int:
               "safely read (symlinked, hard-linked, non-regular, routed, or oversize) "
               "— treating as tampering, not as 'no config'", file=sys.stderr)
         return 2
-    for raw in _cfg_text.splitlines():
-        line = raw
-        # drop full-line comments / blanks
-        if not line.strip() or line.lstrip().startswith("#"):
-            continue
-        line = line.split("  #", 1)[0].rstrip()
-        if " #" in line:
-            line = line.split(" #", 1)[0].rstrip()
-        if not line:
-            continue
-        # strict KEY=VALUE: uppercase key, no leading `export`, no space before `=`
-        if not re.match(r"^[A-Z][A-Z0-9_]*=", line):
-            print(f"check-substrate-config: invalid line (only KEY=VALUE allowed): {line}", file=sys.stderr)
-            return 2
-        key, raw_val = line.split("=", 1)
-        if key not in _ALLOWED_KEYS:
-            print(f"check-substrate-config: unknown key: {key}", file=sys.stderr)
-            return 2
-        # command substitution / backticks / ${...} forbidden (data, not code)
-        if "$(" in raw_val or "`" in raw_val or "${" in raw_val:
-            print(f"check-substrate-config: command substitution forbidden in {key}", file=sys.stderr)
-            return 2
-        val, err = _strip_quotes_checked(raw_val, key)
-        if err:
-            print(f"check-substrate-config: {err}", file=sys.stderr)
-            return 2
-        # enum values must be in their fixed domain (a typo like "stirct"
-        # would otherwise silently disable strict governance).
-        if key in _ENUMS and val not in _ENUMS[key]:
-            print(f"check-substrate-config: invalid {key}: {val}", file=sys.stderr)
-            return 2
-        # integer-valued keys (e.g. cooldown days) must be non-negative ints.
-        if key in _INT_KEYS and not val.isdigit():
-            print(f"check-substrate-config: invalid {key}: {val} (want non-negative integer)", file=sys.stderr)
-            return 2
-        vals[key] = val
+    vals, _err = parse_config_text(_cfg_text)
+    if _err:
+        print(f"check-substrate-config: {_err}", file=sys.stderr)
+        return 2
     profile = vals.get("SUBSTRATE_PROFILE", "standard")
     # PROFILE LOCK: a repo may RAISE its profile but never silently LOWER it.
     # `.substrate/required_profile` (written by bootstrap, CODEOWNED + frozen by

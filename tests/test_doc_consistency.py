@@ -39,11 +39,23 @@ KNOWLEDGE_DOCS = {
     "08_memory_anchor.md": "The memory trust anchor — monotonic advance, remote confirmation, and limits.",
     "09_deterministic_validators.md": "Deterministic validator layers, pinned copies, and append-only gates.",
     "10_lessons_recall.md": "Lessons with evidence, the record the chain attests, outcome labels, and recall.",
+    "11_receipts_projects.md": "Work receipts and read-only multi-project status.",
 }
 
 KNOWLEDGE_ASSERTS = {
     "bootstrap.sh::_safe_mkdir_p",
     "scripts/_doc_common.py::history_outcome_problem",
+    "scripts/_doc_common.py::release_evidence_status",
+    "scripts/task_brief.py::build",
+    "scripts/_task_evidence.py::git_facts",
+    "scripts/_task_evidence.py::def trusted_executable",
+    "scripts/task_receipt.py::state-changed-during-check",
+    "scripts/task_receipt.py::digest-only",
+    "scripts/task_receipt.py::result-without-start",
+    "scripts/task_receipt.py::harness_changed",
+    "scripts/project_status.py::not checked",
+    "scripts/project_status.py::inspection-failed",
+    "scripts/check_substrate_config.py::def parse_config_text",
     "scripts/check_lessons.py::evidence_exists",
     "scripts/memory_log.py::record_units",
     "scripts/memory_log.py::release_pass",
@@ -163,8 +175,12 @@ def test_source_knowledge_is_functionally_partitioned() -> None:
             assert "](00_substrate.md)" in path.read_text(encoding="utf-8")
 
 
-def test_source_knowledge_covers_every_discovered_module() -> None:
+def test_source_knowledge_covers_every_discovered_module(monkeypatch) -> None:
     import importlib.util
+
+    # Do not depend on test_hook_scripts being collected first to expose the
+    # helper's sibling imports when this module is run on its own.
+    monkeypatch.syspath_prepend(str(KIT / "scripts"))
 
     spec = importlib.util.spec_from_file_location(
         "_knowledge_doc_common", KIT / "scripts" / "_doc_common.py"
@@ -503,3 +519,36 @@ def test_full_suite_watchdog_has_measured_runtime_margin(monkeypatch) -> None:
 
     assert scheduled["seconds"] >= 2 * 603
     assert scheduled["exit"] is True
+
+
+def test_consumer_workflow_templates_pin_the_same_action_versions_as_the_kit() -> None:
+    """Dependabot bumps the actions in the kit's own .github/workflows and
+    cannot see workflows/*.template, so after checkout v4->v7, setup-go v5->v6 and
+    setup-node v4->v6 the workflows the kit installs in consumers were left on the old
+    majors. Every action that both use must be pinned to the same ref in both, so the
+    next bump fails here and names the template to update with it."""
+    import re
+
+    pin = re.compile(r"uses:\s*([\w.-]+/[\w./-]+)@([^\s#]+)")
+
+    def pins(paths):
+        found: dict[str, dict[str, set[str]]] = {}
+        for path in paths:
+            text = path.read_text(encoding="utf-8")
+            for action, ref in pin.findall(text):
+                found.setdefault(action, {}).setdefault(ref, set()).add(path.name)
+        return found
+
+    kit = pins(sorted((KIT / ".github" / "workflows").glob("*.yml")))
+    shipped = pins(sorted((KIT / "workflows").glob("*.template")))
+    assert kit and shipped, "expected workflows on both sides"
+    drift = []
+    for action in sorted(set(kit) & set(shipped)):
+        if len(kit[action]) != 1:
+            drift.append(f"{action}: the kit's own workflows disagree: {sorted(kit[action])}")
+            continue
+        (want,) = kit[action]
+        for ref, files in sorted(shipped[action].items()):
+            if ref != want:
+                drift.append(f"{action}@{ref} in {sorted(files)}; the kit uses @{want}")
+    assert not drift, "consumer workflow templates drifted from the kit:\n" + "\n".join(drift)

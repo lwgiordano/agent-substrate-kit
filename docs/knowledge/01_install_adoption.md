@@ -4,7 +4,7 @@ asserts:
   - bootstrap.sh::_safe_mkdir_p
   - bootstrap.sh::wappend
   - scripts/run_python_gate.sh::_ruff_args
-last_human_reviewed: 2026-09-28
+last_human_reviewed: 2026-10-14
 covers:
   - bootstrap.sh
   - manage.sh
@@ -71,8 +71,9 @@ replace a pre-existing `pyproject.toml`. The Python gate filters substrate-owned
 tests in scope. If every explicit Ruff path is substrate-reserved, the adapter
 exits successfully instead of invoking a bare whole-repository scan.
 
-Substrate runtime memory is ignored in consumer Git state so hook activity does
-not make commits perpetually dirty. Setup supports the project runner selected in
+Substrate runtime memory and the work-receipt store (`.substrate/receipts/`) are
+ignored in consumer Git state so hook activity and receipts do not make commits
+perpetually dirty. Setup supports the project runner selected in
 config and installs both substrate tools and the relevant project development
 toolchain.
 
@@ -83,10 +84,10 @@ locations under `.substrate/`. Code that can run in either layout resolves both
 locations explicitly and treats an absent required asset as an error rather than
 silently skipping work.
 
-The source kit holds eight functional knowledge documents. A consumer install
+The source kit holds eleven functional knowledge documents. A consumer install
 gets one generated `docs/knowledge/00_substrate.md` with a live inventory of its
 installed scripts. Upgrade preserves consumer-authored sibling knowledge docs
-and does not add the seven source-only documents to the owned overwrite set.
+and does not add the ten source-only documents to the owned overwrite set.
 The generated `00_substrate.md` and installed `_template.md` are provenance-owned;
 additional project knowledge siblings remain governed context but stay outside
 the upgrade drift baseline.

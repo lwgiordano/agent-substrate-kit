@@ -65,6 +65,7 @@ SRC_HASH="$(cd "$KITROOT" && find . -type f \
     ! -path './.git/*' ! -path './dist/*' ! -path '*/__pycache__/*' \
     ! -path './.venv/*' ! -path '*/.substrate/venv/*' ! -path './node_modules/*' \
     ! -path '*/.substrate/traces/*' ! -path '*/.substrate/memory/*' \
+    ! -path '*/.substrate/receipts/*' ! -path './.superpowers/*' \
     ! -path '*/.pytest_cache/*' ! -path '*/.ruff_cache/*' ! -path '*/.mypy_cache/*' \
     ! -name '*.pyc' ! -name '.DS_Store' \
     -exec shasum -a 256 {} + | awk '{print $1}' | sort | shasum -a 256 | awk '{print $1}')"
@@ -84,7 +85,8 @@ rm -f "$ZIP_VER" "$ZIP_PLAIN"
 ( cd "$PARENT" && zip -rq "$ZIP_VER" "$NAME" \
     -x "$NAME/.git/*" "$NAME/dist/*" "$NAME/.venv/*" "$NAME/node_modules/*" \
        "*/__pycache__/*" "*/.pytest_cache/*" "*/.ruff_cache/*" "*/.mypy_cache/*" \
-       "*/.substrate/venv/*" "*/.substrate/traces/*" "*/.substrate/memory/*" )
+       "*/.substrate/venv/*" "*/.substrate/traces/*" "*/.substrate/memory/*" \
+       "*/.substrate/receipts/*" "*/.superpowers/*" )
 cp "$ZIP_VER" "$ZIP_PLAIN"
 NFILES="$(cd "$PARENT" && unzip -l "$ZIP_VER" | tail -1 | awk '{print $2}')"
 ART_SHA="$(shasum -a 256 "$ZIP_VER" | awk '{print $1}')"
@@ -130,7 +132,7 @@ fi
 echo "==> Zip hygiene"
 _LISTING="$(mktemp)"
 ( cd "$PARENT" && unzip -l "$ZIP_VER" ) > "$_LISTING"
-_JUNK_RE='(/\.venv/|/\.substrate/venv/|/\.substrate/traces/|/\.substrate/memory/|/__pycache__/|/\.pytest_cache/|/\.ruff_cache/|/\.mypy_cache/|/node_modules/|\.DS_Store|\.pyc$)'
+_JUNK_RE='(/\.venv/|/\.substrate/venv/|/\.substrate/traces/|/\.substrate/memory/|/\.substrate/receipts/|/\.superpowers/|/__pycache__/|/\.pytest_cache/|/\.ruff_cache/|/\.mypy_cache/|/node_modules/|\.DS_Store|\.pyc$)'
 if grep -Eq "$_JUNK_RE" "$_LISTING"; then
   echo "release: BLOCK — packaging junk in artifact:" >&2
   grep -E "$_JUNK_RE" "$_LISTING" | head -30 >&2

@@ -1,9 +1,11 @@
 ---
 purpose: Lessons with evidence, the record the chain attests, outcome labels, and recall.
-last_human_reviewed: 2026-09-29
+last_human_reviewed: 2026-10-14
 covers:
   - scripts/check_lessons.py
   - scripts/recall.py
+  - scripts/task_brief.py
+  - scripts/_task_evidence.py
   - scripts/check_knowledge_narrative.py
   - scripts/memory_log.py
   - scripts/append_history.py
@@ -13,7 +15,10 @@ asserts:
   - scripts/memory_log.py::record_units
   - scripts/memory_log.py::release_pass
   - scripts/_doc_common.py::history_outcome_problem
+  - scripts/_doc_common.py::release_evidence_status
   - scripts/check_lessons.py::evidence_exists
+  - scripts/task_brief.py::build
+  - scripts/_task_evidence.py::git_facts
 ---
 
 # Lessons, records, and recall
@@ -87,9 +92,11 @@ anchor covers the evidence. `memory_log` re-derives HEAD and refuses if it
 moved during the run. The event says the gates passed on that commit;
 publication of the anchor is reported separately.
 
-`check_history_sha.py` re-applies the write-time rule to every label an entry
-carries, so a hand-edited `shipped-green` is drift, and so is an entry with two
-labels. It polices claims, not silence (v3.9.3): an entry with no label claims
+`append_history` requires verified local proof before writing `shipped-green`.
+`check_history_sha.py` distinguishes verified proof, unavailable proof, and
+invalid proof through `_doc_common.release_evidence_status`. A new or changed
+success entry without proof is drift, and so is an entry with two labels.
+It polices claims, not silence: an entry with no label claims
 nothing and reads as `unverified` through `_doc_common.history_entry_outcome`,
 the one reader of outcomes, and the gate reports it without failing. A line that
 looks like a label but is not one (`**outcome:** shipped-green`, a list marker, a
@@ -102,10 +109,18 @@ could clear it (domain-lookup, 2026-09-28). Leaving a label off gains nothing,
 since only a label can claim success; `append_history` still writes one on every
 entry. The order-bound rules (`reverts:`/`supersedes:` and `Correction-of-`
 name only an entry their author already had) survive the same merge, because a
-union merge keeps each side's own order; a test merges two branches to show it. The chain is gitignored, so a CI checkout
-or fresh clone has none: there `shipped-green` is reported as not verifiable in
-this checkout (the producing clone judged it at write time), never as verified.
-A chain that is present but broken or linked is still judged, and fails.
+union merge keeps each side's own order; a test merges two branches to show it.
+The chain is gitignored: a receiving clone may have no chain, or a healthy
+unrelated chain without the producing clone's release-pass. An unchanged
+committed entry then reports **NOT verifiable in this checkout**, never verified.
+The comparison covers the whole entry and its multiplicity, ignoring only
+separator newlines. It uses HEAD and, during a merge, resolved MERGE_HEAD
+parents; shared entries cannot authorize extra duplicates. Git failures refuse
+the comparison. This is provenance for a reported historical claim, not proof
+that the claim was true or reviewed. New/edited success entries require local
+proof even in a fresh clone. Broken, linked, or unreadable chains and matching
+dirty-start-only passes remain invalid. Reader output separates imported
+unverified, locally verified, and invalid outcomes.
 
 ## Recall and the narrative lint
 
@@ -116,6 +131,45 @@ trimmed to a token budget. The index is built in memory on every call and
 discarded, so no stale or planted index can answer for the markdown. Query
 terms are quoted before they reach FTS5. Without FTS5 a term-count fallback
 runs and says so.
+
+## Current task briefs
+
+`./manage.sh brief "<task>" [--path PATH ...] [--budget N] [--json]`
+assembles current repository identity, objectives, applicable committed lessons,
+ranked ADR/knowledge sections, parsed bus leases, and recent reported findings.
+Without explicit paths it discloses scope inferred from raw working changes and
+the last five commits. An empty scope is not a repository-wide review. Findings
+are reported prose, never an inferred count of unresolved defects.
+
+The structured collectors sit below the existing recall and session renderers.
+Each item carries a path and line or stable ID, same-read content hash, source
+revision/state, selection reason, and collection time. Missing, unsafe,
+undecodable, and unparsed sources produce diagnostics rather than silent gaps.
+Existence of lesson evidence is still not proof of relevance. Legacy recall
+does not collect Git provenance it will not display; session budgets are unchanged.
+
+The default brief is 800 estimated tokens (UTF-8 bytes divided by four), with
+an accepted range of 200–6000. Identity and omission notices take priority over
+whole evidence items. JSON is separately capped at 64 KiB with omission counts.
+All displayed string fields use known-pattern sanitization, not universal secret
+detection. A recognized private-key header causes the whole display field to
+be discarded before truncation, not just the header. Retrieved prose is labelled
+data; the command never executes it or
+runs the suggested checks. Invalid arguments or essential repository lookup
+failure return 2; missing optional evidence remains an explicit partial report.
+
+Read-only Git observations use bounded index/tree inventories and guarded raw
+regular-file bytes and permission bits, not status, filters, textconv, staging,
+or object writes. Git dirtiness uses the owner-execute bit; raw fingerprints
+also distinguish permission changes Git does not track.
+Inherited Git routing and user/system configuration are isolated; fsmonitor,
+lazy object fetches, and transports are disabled. Per-call timeout is 10 seconds.
+`git` resolves from absolute PATH entries only, and importing the module drops
+relative PATH entries for the process, so a `git` planted in the observed tree
+never runs.
+Unsupported, linked, unreadable, or oversized inputs report unknown, not clean;
+converted worktree text may conservatively report dirty. This is an observation,
+not protection against concurrent same-user rewriting (ADR 0002).
 
 `check_knowledge_narrative.py` warns (it never blocks) when a knowledge doc
 narrates release history — past-tense change verbs, version stamps, audit-round

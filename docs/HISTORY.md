@@ -397,3 +397,45 @@ This file is `merge=union` in `.gitattributes` so concurrent branch entries comb
 **Knowledge:** A rule re-checked over merged append-only history must relate an entry only to what its own author had: the label rule tied entries from different branches together and deadlocked, while reverts/supersedes and Correction-of, which name only what their author already had, survive a union merge. Relaxing a gate opens the near-miss hole the strict rule used to cover — the security-auditor found that a line a human reads as a label but the regex misses would show a success the gate reads as silence; it is now drift. The first release-gate run failed one test when the container's commit-signing service timed out inside a fixture's git commit; the same tree had just passed the full check, and the re-run passed.
 **Outcome:** shipped-green
 
+## 2026-10-02T14:37:44Z — NO_SESSION — 741ceb8
+**Summary:** Approved and published the task evidence and project status design and implementation claim.
+**Files:** AGENT_BUS.md,docs/superpowers/specs/2026-10-02-task-evidence-and-project-status-design.md,docs/superpowers/plans/2026-10-02-task-evidence-and-project-status.md
+**Intent:** Publish the agreed scope and ownership before changing product implementation.
+**Knowledge:** An unrelated valid local memory chain exposes an imported HISTORY evidence portability bug; preserve both chain and history during the repair.
+**Outcome:** unverified
+
+## 2026-10-02T15:25:58Z — NO_SESSION — c5b2d2d
+**Summary:** Expanded the published task evidence claim to repair shipped-test classification.
+**Files:** AGENT_BUS.md
+**Intent:** Publish ownership of the canonical test inventory and its code-shape fallback before editing either file.
+**Knowledge:** Automatic copying and manual classification must stay aligned; discover all shipped test files rather than maintaining a second test list.
+**Outcome:** unverified
+
+## 2026-10-02T16:03:30Z — NO_SESSION — a60fc1e
+**Summary:** Repair HISTORY evidence portability without certifying imported release claims.
+**Files:** scripts/_doc_common.py,scripts/check_history_sha.py,scripts/_substrate_surfaces.py,scripts/code_shape.py,tests/test_history_evidence_portability.py,tests/test_hook_scripts.py,tests/test_doc_consistency.py,tests/guards.json,docs/knowledge,docs/postmortems/2026-10-02-history-evidence-portability.md
+**Intent:** Unblock receiving clones while retaining strict creation-time proof and fail-closed damaged-evidence handling.
+**Knowledge:** Unchanged whole committed entries may be reported as imported-unverified, never locally verified. New, modified, or excess duplicate success claims still need local clean-start proof. Check exit 0; evals 57/57 blocked and 0/14 FP; eight guard-removal proofs and fresh consumer tests passed. No release-pass was minted.
+**Outcome:** unverified
+
+## 2026-10-02T22:04:48Z — NO_SESSION — a51c3e7
+**Summary:** Add bounded current task briefs with current Git identity and source-backed project context.
+**Files:** scripts/task_brief.py,scripts/_task_evidence.py,scripts/recall.py,scripts/session_handoff.py,manage.sh,templates/manage.sh.template,tests/test_task_brief.py,tests/guards.json,docs/knowledge/10_lessons_recall.md
+**Intent:** Deliver the first approved task-evidence command without automatic context injection or target command execution.
+**Knowledge:** Structured report boundaries need same-read provenance and explicit missing-source diagnostics. Context sanitization is not terminal sanitization; normalize and suppress recognized secret fields before selector clipping. Permission bits can change check behavior without changing bytes. Full check exited 0, evals 57/57 blocked and 0/14 FP, 13 guard-removal probes discriminating. This entry remains unverified because no packaged release-pass was created.
+**Outcome:** unverified
+
+## 2026-10-14T15:08:58Z — NO_SESSION — b5c2956
+**Summary:** Consumer workflow templates pin the same action versions as the kit: Dependabot bumped checkout v4->v7, setup-go v5->v6 and setup-node v4->v6 in .github/workflows only, leaving workflows/*.template on the old majors.
+**Files:** workflows/*.template,tests/test_doc_consistency.py
+**Intent:** The operator asked to fix the drift flagged after merging Dependabot PRs #5, #3 and #1.
+**Knowledge:** Dependabot cannot see workflows/*.template, so the kit and what it installs drift on every action bump; a test now requires one ref per action across both, failing the next bump with the template named. No version bump: the fix rides with the in-progress v3.10.0 release on this branch.
+**Outcome:** unverified
+
+## 2026-10-14T17:19:42Z — NO_SESSION — 51b0253
+**Summary:** v3.10.0: work receipts (receipt start/check/annotate/show) and read-only multi-project status (projects --root), completing the approved task-evidence design after Codex's brief.
+**Files:** scripts/task_receipt.py,scripts/project_status.py,scripts/_task_evidence.py,scripts/check_substrate_config.py,scripts/bus_claims.py,manage.sh,templates/manage.sh.template,bootstrap.sh,package_release.sh,.gitignore,tests/test_task_receipt.py,tests/test_project_status.py,tests/guards.json,docs/knowledge/11_receipts_projects.md,VERSION,README.md
+**Intent:** Operator asked to finish v3.10.0 to a working stable release: let an agent show what was asked, which known check ran on which exact tree and whether that result still applies, and let an operator see the state of several projects without running any of their code.
+**Knowledge:** Exit 0 certifies only the input it started from: receipts fingerprint before and after and derive the state on every read, so a self-editing check or a hand-edited record cannot read as a clean pass. Inspecting another project must use only the inspector's own code, and that includes tool lookup: shared helpers ran a bare git on first import, so the inspector drops relative PATH entries process-wide. Two security and two test audits drove the hardening; every new guard is proven load-bearing.
+**Outcome:** shipped-green
+

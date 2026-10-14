@@ -12,5 +12,7 @@ dist/
 build/
 .substrate/memory/
 .substrate/traces/
+.substrate/receipts/
+.superpowers/
 .substrate/dep_cooldown_cache.json
 .DS_Store

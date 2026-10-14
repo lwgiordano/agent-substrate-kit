@@ -59,6 +59,7 @@ import os
 import re
 import subprocess
 import sys
+from collections import Counter
 from pathlib import Path
 
 _REPO = Path(__file__).resolve().parents[1]
@@ -80,6 +81,7 @@ from _doc_common import HISTORY_OUTCOME_LINE_RE as _OUTCOME_LINE_RE  # noqa: E40
 from _doc_common import history_entry_outcome as _entry_outcome  # noqa: E402
 from _doc_common import history_malformed_outcome_lines as _malformed  # noqa: E402
 from _doc_common import history_outcome_problem as _outcome_problem  # noqa: E402
+from _doc_common import release_evidence_status as _release_evidence_status  # noqa: E402
 
 # `## <ts> — <token> — <sha|WORKING|Correction...>` with em-dash
 # separators. The token is usually a ULID (uppercase Crockford-32:
@@ -100,6 +102,57 @@ _CORRECTION_OF_RE = re.compile(
     r"^correction[-_: ]*of[-_: ]+(?P<sha>[0-9a-fA-F]{7,40})$",
     re.IGNORECASE,
 )
+
+
+def _entry_units(text: str) -> list[str]:
+    """Whole entries, ignoring only separator newlines added by union merges."""
+    headers = list(_HEADER_RE.finditer(text))
+    return [text[m.start():(headers[i + 1].start() if i + 1 < len(headers) else len(text))]
+            .rstrip("\n") for i, m in enumerate(headers)]
+
+
+def _committed_history_entries() -> Counter:
+    """Reported provenance, NEVER release proof. Fail if Git cannot answer.
+
+    A merge can bring unchanged entries from either parent. Counter union takes
+    the maximum multiplicity across parents, not their sum: the common ancestor
+    must not authorize an extra identical success entry.
+    """
+    from memory_log import _clean_env
+    env = _clean_env()
+    env.update(GIT_NO_REPLACE_OBJECTS="1", GIT_OPTIONAL_LOCKS="0")
+
+    def git(*args):
+        p = subprocess.run(["git", "-c", "core.fsmonitor=false", *args], cwd=_REPO,
+                           env=env, capture_output=True, timeout=30, check=True)
+        return p.stdout.decode("utf-8")
+
+    refs = [git("rev-parse", "--verify", "HEAD^{commit}").strip()]
+    # git worktrees keep MERGE_HEAD in their own administration directory.
+    admin = Path(git("rev-parse", "--absolute-git-dir").strip())
+    merge_path = admin / "MERGE_HEAD"
+    if os.path.lexists(merge_path):
+        raw = _safe_read_text(merge_path, admin, max_bytes=65536)
+        if not raw or not raw.strip():
+            raise ValueError("unreadable MERGE_HEAD")
+        for sha in raw.splitlines():
+            if not re.fullmatch(r"[0-9a-f]{40,64}", sha):
+                raise ValueError("malformed MERGE_HEAD")
+            refs.append(git("rev-parse", "--verify", f"{sha}^{{commit}}").strip())
+    entries = Counter()
+    for ref in refs:
+        listing = git("ls-tree", "-z", ref, "--", "docs/HISTORY.md")
+        if not listing:
+            continue
+        metadata, path = listing.rstrip("\0").split("\t", 1)
+        mode, kind, oid = metadata.split()
+        if mode not in ("100644", "100755") or kind != "blob" or path != "docs/HISTORY.md":
+            raise ValueError("committed HISTORY is not a regular blob")
+        size = int(git("cat-file", "-s", oid).strip())
+        if size > 64 << 20:
+            raise ValueError("committed HISTORY exceeds read limit")
+        entries |= Counter(_entry_units(git("cat-file", "blob", oid)))
+    return entries
 
 
 def _all_commits() -> dict[str, str]:
@@ -405,7 +458,9 @@ def main() -> int:
     # be edited, and nothing appended could clear it (domain-lookup, 2026-09-28).
     # Leaving a label off gains nothing: only a label can claim success.
     # append_history still writes one on every entry.
-    n_outcome = n_unverifiable = 0
+    n_outcome = n_unverifiable = n_locally_verified = n_invalid = 0
+    imported = None
+    units = _entry_units(text)
     unlabelled: list[str] = []
     bodies = [text[m.end():(headers[i + 1].start() if i + 1 < len(headers) else len(text))]
               for i, m in enumerate(headers)]
@@ -430,19 +485,28 @@ def main() -> int:
             if not _OUTCOME_LINE_RE.search(bodies[i]):
                 unlabelled.append(ts)
                 continue
-            vals = [claim]
-            # The chain lives in .substrate/memory/, which is gitignored: a CI
-            # checkout or a fresh clone has NONE, so shipped-green evidence can
-            # only be judged in the producing clone (append_history already did,
-            # at write time). ABSENT is reported as unverifiable-here, not as
-            # drift and not as verified; a chain that is PRESENT but broken or
-            # linked is still judged, and fails.
-            if vals[0] == "shipped-green" and not os.path.lexists(
-                    _REPO / ".substrate" / "memory" / "events.jsonl"):
-                n_unverifiable += 1
-                continue
-            problem = _outcome_problem(vals[0], entry_shas[i], entry_shas[:i], _REPO)
+            if claim == "shipped-green":
+                state, problem = _release_evidence_status(_REPO, entry_shas[i])
+                if state == "unavailable":
+                    if imported is None:
+                        try:
+                            imported = _committed_history_entries()
+                        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                            print("check-history-sha: cannot read committed HISTORY provenance "
+                                  f"({type(exc).__name__})", file=sys.stderr)
+                            return 2
+                    if imported[units[i]] > 0:
+                        imported[units[i]] -= 1
+                        n_unverifiable += 1
+                        continue
+                    problem = "new or modified shipped-green entry needs local proof: " + problem
+                elif state == "verified":
+                    n_locally_verified += 1
+                    problem = None
+            else:
+                problem = _outcome_problem(claim, entry_shas[i], entry_shas[:i], _REPO)
             if problem:
+                n_invalid += 1
                 findings.append(f"{ts}: {problem}")
                 continue
             n_outcome += 1
@@ -455,16 +519,19 @@ def main() -> int:
         print(
             f"\n{len(findings)} drift issue(s) "
             f"({n_sha} sha-verified / {n_working} bootstrap / "
-            f"{n_correction} correction).",
+            f"{n_correction} correction; {n_unverifiable} imported-unverified / "
+            f"{n_locally_verified} locally-verified / {n_invalid} invalid outcome).",
             file=sys.stderr,
         )
         return 1
 
     total = n_sha + n_working + n_correction
     print(
-        f"check-history-sha: {total} entries verified "
+        f"check-history-sha: {total} entries checked "
         f"({n_sha} sha-resolved / {n_working} bootstrap / "
-        f"{n_correction} correction; {n_outcome} outcome-labelled)."
+        f"{n_correction} correction; {n_outcome} outcome-labelled; "
+        f"{n_unverifiable} imported-unverified / {n_locally_verified} locally-verified / "
+        f"{n_invalid} invalid outcome)."
     )
     if unlabelled:
         print(f"check-history-sha: WARNING — {len(unlabelled)} entr"
@@ -475,8 +542,8 @@ def main() -> int:
               "append_history labels every entry it writes.")
     if n_unverifiable:
         print(f"check-history-sha: {n_unverifiable} shipped-green label(s) NOT verifiable in "
-              "this checkout — no memory chain here (.substrate/memory/ is gitignored); "
-              "their release-pass evidence lives in the producing clone.")
+              "this checkout — unchanged committed claims without matching local proof "
+              "(.substrate/memory/ is gitignored). Committed provenance is NOT release evidence.")
     return 0
 
 

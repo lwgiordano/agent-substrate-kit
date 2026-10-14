@@ -2,6 +2,108 @@
   "_comment": "Guard registry for scripts/prove_guards.py (`./manage.sh prove`). Each guard is neutralized in a private copy of the tree and its tests must then FAIL. Add an entry with every security guard and regression you ship; a guard whose snippet moves makes prove fail until the entry is updated.",
   "guards": [
     {
+      "id": "task-evidence-permission-bits",
+      "file": "scripts/_task_evidence.py",
+      "find": "field(stat.S_IMODE(mode).to_bytes(4, \"big\"))",
+      "replace": "pass",
+      "tests": [
+        "tests/test_task_brief.py::test_git_facts_fingerprint_covers_raw_permission_bits"
+      ],
+      "why": "permissions can change check behavior without changing regular-file bytes"
+    },
+    {
+      "id": "task-evidence-owner-execute",
+      "file": "scripts/_task_evidence.py",
+      "find": "observed_mode = \"100755\" if mode & stat.S_IXUSR else \"100644\"",
+      "replace": "observed_mode = \"100755\" if mode & 0o111 else \"100644\"",
+      "tests": [
+        "tests/test_task_brief.py::test_git_facts_owner_execute_change_is_dirty"
+      ],
+      "why": "group execution must not hide the loss of owner execution from dirty status"
+    },
+    {
+      "id": "task-evidence-pem-body",
+      "file": "scripts/session_handoff.py",
+      "find": "text = \"[REDACTED-SECRET]\"",
+      "replace": "pass",
+      "tests": [
+        "tests/test_task_brief.py::test_report_sanitizer_discards_pem_body_before_truncating",
+        "tests/test_task_brief.py::test_brief_discards_already_redacted_objective_body",
+        "tests/test_task_brief.py::test_lesson_selector_discards_secret_before_clipping"
+      ],
+      "why": "header-only PEM redaction preserves private material in report fields"
+    },
+    {
+      "id": "task-evidence-terminal-controls",
+      "file": "scripts/_task_evidence.py",
+      "find": "return _shown(_safe_history_line(value, limit, discard_secrets=True))",
+      "replace": "return _safe_history_line(value, limit, discard_secrets=True)",
+      "tests": [
+        "tests/test_task_brief.py::test_report_sanitizer_removes_terminal_controls"
+      ],
+      "why": "context sanitization alone preserves terminal escape controls"
+    },
+    {
+      "id": "task-brief-lesson-sha-shape",
+      "file": "scripts/session_handoff.py",
+      "find": "and re.fullmatch(r\"[0-9a-f]{7,64}\", ev[\"sha\"])",
+      "replace": "and True",
+      "tests": [
+        "tests/test_task_brief.py::test_lesson_metadata_validated_independently"
+      ],
+      "why": "invalid evidence SHA must be tested independently of forbidden extra metadata"
+    },
+    {
+      "id": "task-brief-lesson-id-shape",
+      "file": "scripts/session_handoff.py",
+      "find": "and re.fullmatch(r\"L[0-9]{1,8}\", lid)",
+      "replace": "and True",
+      "tests": [
+        "tests/test_task_brief.py::test_lesson_metadata_validated_independently"
+      ],
+      "why": "malformed stable IDs must not silently enter task evidence"
+    },
+    {
+      "id": "task-evidence-no-lazy-network",
+      "file": "scripts/_task_evidence.py",
+      "find": "GIT_NO_LAZY_FETCH=\"1\", GIT_ALLOW_PROTOCOL=\"\"",
+      "replace": "GIT_NO_LAZY_FETCH=\"0\", GIT_ALLOW_PROTOCOL=\"ext\"",
+      "tests": [
+        "tests/test_task_brief.py::test_read_only_git_never_fetches_missing_promisor_objects"
+      ],
+      "why": "read-only inspection must not invoke a remote helper when a promisor blob is absent"
+    },
+    {
+      "id": "task-evidence-routing-isolation",
+      "file": "scripts/_task_evidence.py",
+      "find": "env = {k: v for k, v in os.environ.items() if not k.startswith(\"GIT_\")}",
+      "replace": "env = dict(os.environ)",
+      "tests": [
+        "tests/test_task_brief.py::test_git_facts_ignores_inherited_routing"
+      ],
+      "why": "a report must inspect its explicit root, not an inherited alternate repository"
+    },
+    {
+      "id": "task-brief-all-metadata-sanitized",
+      "file": "scripts/task_brief.py",
+      "find": "report, changed = sanitize_report(report)",
+      "replace": "changed = 0",
+      "tests": [
+        "tests/test_task_brief.py::test_brief_json_sanitizes_all_exported_metadata"
+      ],
+      "why": "JSON metadata must not bypass the display sanitizer through branch or path fields"
+    },
+    {
+      "id": "task-brief-committed-lessons",
+      "file": "scripts/task_brief.py",
+      "find": "source, issue = committed_source(root, \"docs/lessons.jsonl\", head)",
+      "replace": "source, issue = read_source(root, \"docs/lessons.jsonl\", head)",
+      "tests": [
+        "tests/test_task_brief.py::test_brief_reads_current_docs_but_only_committed_lessons"
+      ],
+      "why": "uncommitted lesson edits must not replace the committed source used for task context"
+    },
+    {
       "id": "anchor-membership",
       "file": "scripts/memory_log.py",
       "find": "        if anchored not in seen:\n            print(f\"memory-log: ANCHOR MISMATCH",
@@ -378,22 +480,73 @@
     {
       "id": "history-gate-outcome-evidence",
       "file": "scripts/check_history_sha.py",
-      "find": "problem = _outcome_problem(vals[0], entry_shas[i], entry_shas[:i], _REPO)",
-      "replace": "problem = None",
+      "find": "                    if imported[units[i]] > 0:",
+      "replace": "                    if True:",
       "tests": [
-        "tests/test_hook_scripts.py::test_history_gate_outcome_claims_are_evidence_bound"
+        "tests/test_history_evidence_portability.py::test_new_or_changed_claim_cannot_borrow_imported_provenance"
       ],
       "why": "a hand-edited shipped-green with no release-pass behind it passes the gate"
     },
     {
-      "id": "history-gate-absent-chain-only",
+      "id": "history-gate-invalid-evidence",
       "file": "scripts/check_history_sha.py",
-      "find": "            if vals[0] == \"shipped-green\" and not os.path.lexists(",
-      "replace": "            if vals[0] == \"shipped-green\" or not os.path.lexists(",
+      "find": "                if state == \"unavailable\":",
+      "replace": "                if state != \"verified\":",
       "tests": [
-        "tests/test_hook_scripts.py::test_history_gate_outcome_claims_are_evidence_bound"
+        "tests/test_history_evidence_portability.py::test_imported_claim_does_not_hide_invalid_chain",
+        "tests/test_history_evidence_portability.py::test_matching_release_pass_remains_authoritative"
       ],
-      "why": "a checkout WITH a chain skips the shipped-green evidence check as if it had none"
+      "why": "invalid evidence gets the imported unavailable-evidence exception"
+    },
+    {
+      "id": "history-imported-chain-portability",
+      "file": "scripts/check_history_sha.py",
+      "find": "                if state == \"unavailable\":",
+      "replace": "                if False:",
+      "tests": [
+        "tests/test_history_evidence_portability.py::test_imported_history_survives_an_unrelated_local_chain"
+      ],
+      "why": "starting a healthy unrelated local chain rejects unchanged imported history"
+    },
+    {
+      "id": "history-import-multiplicity",
+      "file": "scripts/check_history_sha.py",
+      "find": "                        imported[units[i]] -= 1",
+      "replace": "                        pass",
+      "tests": [
+        "tests/test_history_evidence_portability.py::test_new_or_changed_claim_cannot_borrow_imported_provenance"
+      ],
+      "why": "one imported success entry authorizes arbitrary extra copies"
+    },
+    {
+      "id": "history-merge-shared-provenance",
+      "file": "scripts/check_history_sha.py",
+      "find": "        entries |= Counter(_entry_units(git(\"cat-file\", \"blob\", oid)))",
+      "replace": "        entries += Counter(_entry_units(git(\"cat-file\", \"blob\", oid)))",
+      "tests": [
+        "tests/test_history_evidence_portability.py::test_union_merge_uses_both_parents_without_double_counting"
+      ],
+      "why": "shared entries counted once per merge parent authorize duplicate success entries"
+    },
+    {
+      "id": "history-proof-commit-match",
+      "file": "scripts/_doc_common.py",
+      "find": "    hits = [d for d in passes if d.get(\"commit\") == full]",
+      "replace": "    hits = list(passes)",
+      "tests": [
+        "tests/test_history_evidence_portability.py::test_other_commits_clean_pass_cannot_verify_this_claim"
+      ],
+      "why": "proof for another commit falsely certifies an imported claim and authorizes writing it"
+    },
+    {
+      "id": "history-writer-local-proof",
+      "file": "scripts/_doc_common.py",
+      "find": "    return None if state == \"verified\" else reason",
+      "replace": "    return None",
+      "tests": [
+        "tests/test_history_evidence_portability.py::test_missing_evidence_is_still_refused_by_writer"
+      ],
+      "why": "the reader's portability rule silently weakens the strict write-time proof requirement"
     },
     {
       "id": "record-root-pinned",
@@ -528,7 +681,7 @@
     {
       "id": "lessons-inject-evidence-present",
       "file": "scripts/session_handoff.py",
-      "find": "if not isinstance(ev.get(\"test\"), str) or not evidence_exists(ROOT, ev[\"test\"]):",
+      "find": "if not isinstance(ev.get(\"test\"), str) or not evidence_exists(root, ev[\"test\"]):",
       "replace": "if False:",
       "tests": [
         "tests/test_hook_scripts.py::test_lessons_injected_only_when_matched_recorded_and_evidenced"
@@ -538,8 +691,8 @@
     {
       "id": "lessons-inject-status-and-superseded",
       "file": "scripts/session_handoff.py",
-      "find": "        if not isinstance(d, dict) or d.get(\"status\") not in (\"test\", \"gate\") \\\n                or d.get(\"superseded_by\") is not None:",
-      "replace": "        if not isinstance(d, dict):",
+      "find": "        if d.get(\"status\") not in (\"test\", \"gate\") or d.get(\"superseded_by\") is not None:",
+      "replace": "        if False:",
       "tests": [
         "tests/test_hook_scripts.py::test_lessons_injected_only_when_matched_recorded_and_evidenced"
       ],
@@ -567,9 +720,9 @@
     },
     {
       "id": "recall-guarded-read",
-      "file": "scripts/recall.py",
-      "find": "            text = safe_read_text(p, root, max_bytes=_MAX_FILE)",
-      "replace": "            text = p.read_text()",
+      "file": "scripts/_task_evidence.py",
+      "find": "    raw = safe_read_bytes(root / rel, root, max_bytes=4 << 20)",
+      "replace": "    raw = (root / rel).read_bytes() if (root / rel).is_file() else None",
       "tests": [
         "tests/test_hook_scripts.py::test_recall_does_not_read_a_linked_doc"
       ],
@@ -892,6 +1045,157 @@
         "tests/test_hook_scripts.py::test_history_gate_fails_a_near_miss_outcome_label"
       ],
       "why": "`**outcome:** shipped-green` shows a reader a success claim the gate reads as silence"
+    },
+    {
+      "id": "receipt-state-changed-during-check",
+      "file": "scripts/task_receipt.py",
+      "find": "    return \"unchanged\" if before_fp == after_fp else \"state-changed-during-check\"\n",
+      "replace": "    return \"unchanged\"\n",
+      "tests": [
+        "tests/test_task_receipt.py::test_a_check_that_edits_its_input_and_exits_zero_is_not_a_verified_pass"
+      ],
+      "why": "a check that edits its own inputs and exits 0 reads as a verified pass"
+    },
+    {
+      "id": "receipt-excerpt-sanitized",
+      "file": "scripts/task_receipt.py",
+      "find": "clean = safe_text(line, 500) if line.strip() else \"\"",
+      "replace": "clean = line",
+      "tests": [
+        "tests/test_task_receipt.py::test_output_is_digest_only_unless_an_excerpt_is_requested"
+      ],
+      "why": "a key printed by a check is stored verbatim in the receipt"
+    },
+    {
+      "id": "receipt-result-matches-start",
+      "file": "scripts/task_receipt.py",
+      "find": "                    or _valid_state(res.get(\"before\")) != before \\\n",
+      "replace": "                    or False \\\n",
+      "tests": [
+        "tests/test_task_receipt.py::test_hand_edited_records_cannot_invent_a_pass"
+      ],
+      "why": "a hand-edited result record turns a failed check into a pass"
+    },
+    {
+      "id": "receipt-kills-process-group",
+      "file": "scripts/task_receipt.py",
+      "find": "    try:\n        os.killpg(proc.pid, signal.SIGKILL)\n",
+      "replace": "    try:\n        pass\n",
+      "tests": [
+        "tests/test_task_receipt.py::test_timeout_kills_the_whole_process_group_even_children_that_ignore_term"
+      ],
+      "why": "a timed-out check leaves children that ignore SIGTERM running"
+    },
+    {
+      "id": "receipt-known-checks-only",
+      "file": "scripts/task_receipt.py",
+      "find": "    if kind not in CHECKS:\n",
+      "replace": "    if False:\n",
+      "tests": [
+        "tests/test_task_receipt.py::test_only_known_checks_run"
+      ],
+      "why": "receipt check becomes a way to run arbitrary manage.sh arguments"
+    },
+    {
+      "id": "config-parser-splits-like-shell",
+      "file": "scripts/check_substrate_config.py",
+      "find": "    for raw in text.split(\"\\n\"):\n",
+      "replace": "    for raw in text.splitlines():\n",
+      "tests": [
+        "tests/test_project_status.py::test_config_parser_splits_lines_like_the_shell"
+      ],
+      "why": "a value hidden after VT/FF reads as a separate assignment to Python but not to the shell"
+    },
+    {
+      "id": "projects-uses-kit-parser-not-target",
+      "file": "scripts/project_status.py",
+      "find": "        from check_substrate_config import parse_config_text\n",
+      "replace": "        sys.path.insert(0, str(root / 'scripts')); sys.modules.pop('check_substrate_config', None)\n        from check_substrate_config import parse_config_text\n",
+      "tests": [
+        "tests/test_project_status.py::test_inspection_never_runs_or_imports_target_code_and_writes_nothing"
+      ],
+      "why": "status inspection imports and runs the target project's own scripts"
+    },
+    {
+      "id": "receipt-reports-harness-changes",
+      "file": "scripts/task_receipt.py",
+      "find": "    harness = _harness_changed(before)\n",
+      "replace": "    harness = []\n",
+      "tests": [
+        "tests/test_task_receipt.py::test_a_check_run_on_modified_gate_files_says_so"
+      ],
+      "why": "a pass produced by a locally weakened manage.sh or scripts/ gate reads as an ordinary pass"
+    },
+    {
+      "id": "receipt-withholds-credential-lines",
+      "file": "scripts/task_receipt.py",
+      "find": "        if _CREDENTIAL_LINE.search(line):\n",
+      "replace": "        if False:\n",
+      "tests": [
+        "tests/test_task_receipt.py::test_credential_shaped_lines_and_key_blocks_are_withheld_from_excerpts"
+      ],
+      "why": "a NAME=value credential or a private-key block printed by a check is stored in the excerpt"
+    },
+    {
+      "id": "trusted-executables-absolute-path-only",
+      "file": "scripts/_task_evidence.py",
+      "find": "    keep = [p for p in os.environ.get(\"PATH\", \"\").split(os.pathsep) if p and os.path.isabs(p)]\n",
+      "replace": "    keep = [p for p in os.environ.get(\"PATH\", \"\").split(os.pathsep) if p]\n",
+      "tests": [
+        "tests/test_project_status.py::test_a_git_planted_on_a_relative_path_entry_never_runs",
+        "tests/test_task_receipt.py::test_a_bash_or_git_planted_in_the_project_never_runs"
+      ],
+      "why": "a git or bash planted in the inspected tree runs when PATH has a relative entry"
+    },
+    {
+      "id": "projects-isolates-each-root",
+      "file": "scripts/project_status.py",
+      "find": "    except Exception as exc:  # noqa: BLE001 - per-root isolation is the contract\n",
+      "replace": "    except ZeroDivisionError as exc:\n",
+      "tests": [
+        "tests/test_project_status.py::test_one_broken_project_never_aborts_or_hides_the_others"
+      ],
+      "why": "one malformed project aborts the status report for every other project"
+    },
+    {
+      "id": "receipt-state-derived-on-read",
+      "file": "scripts/task_receipt.py",
+      "find": "            if res.get(\"state\") != state:\n",
+      "replace": "            if False:\n",
+      "tests": [
+        "tests/test_task_receipt.py::test_hand_edited_records_cannot_invent_a_pass"
+      ],
+      "why": "a hand-edited result turns state-changed-during-check into unchanged"
+    },
+    {
+      "id": "receipt-sweeps-leftover-members",
+      "file": "scripts/task_receipt.py",
+      "find": "            os.killpg(proc.pid, signal.SIGKILL)\n",
+      "replace": "            pass\n",
+      "tests": [
+        "tests/test_task_receipt.py::test_members_that_outlive_a_normally_exiting_check_are_killed"
+      ],
+      "why": "a check's background child keeps running after the receipt says it finished"
+    },
+    {
+      "id": "receipt-cut-key-block-withheld",
+      "file": "scripts/task_receipt.py",
+      "find": "    in_pem = first is not None and first.group().startswith(\"-----END\")\n",
+      "replace": "    in_pem = False\n",
+      "tests": [
+        "tests/test_task_receipt.py::test_a_key_block_cut_off_by_the_excerpt_window_is_still_withheld"
+      ],
+      "why": "key material whose BEGIN line fell outside the excerpt window is stored"
+    },
+    {
+      "id": "receipt-latest-ordered-within-a-second",
+      "file": "scripts/task_receipt.py",
+      "find": "        dated.append((str(task.get(\"created_at\")), ns if isinstance(ns, int) else 0, task_id))\n",
+      "replace": "        dated.append((str(task.get(\"created_at\")), 0, task_id))\n",
+      "tests": [
+        "tests/test_task_receipt.py::test_latest_receipt_is_ordered_within_one_second_and_bad_ones_are_reported"
+      ],
+      "why": "two tasks started in the same second report a random one as the latest"
     }
   ]
 }

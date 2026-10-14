@@ -2,7 +2,7 @@
 purpose: Command policy, hooks, sandboxing, and local or remote governance.
 asserts:
   - scripts/command_policy.py::looks_dangerous_command
-last_human_reviewed: 2026-09-28
+last_human_reviewed: 2026-10-14
 covers:
   - manage.sh
   - scripts/_substrate_config.sh
@@ -52,7 +52,11 @@ decides the semantics, so the canonical parser takes RAW config text, never
 pre-split lines. The WRITERS mirror the same rule from the other side: they
 rewrite every assignment, because rewriting only the first leaves a later
 duplicate winning and a profile raise silently not in force. A discovery test
-fails on any new reader that does not route here.
+fails on any new reader that does not route here. The rest of the config
+grammar has one Python implementation too: `check_substrate_config.parse_config_text`
+(KEY=VALUE, key allowlist, no substitution, balanced quotes, enum and integer
+domains), split the same way and shared by the validator and `./manage.sh
+projects`.
 
 `command_policy.looks_dangerous_command` is the shared policy seam for configured
 and interactive shell checks. The policy blocks destructive filesystem forms,

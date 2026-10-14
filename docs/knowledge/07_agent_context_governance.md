@@ -1,6 +1,6 @@
 ---
 purpose: Agent context inventory, harness scanning, budgets, and doc drift.
-last_human_reviewed: 2026-09-29
+last_human_reviewed: 2026-10-14
 covers:
   - agentsync.sh
   - manage.sh
@@ -54,6 +54,12 @@ knowledge siblings and Superpowers plans require scanning, CODEOWNERS coverage,
 and CI audit triggers without entering provenance or upgrade drift. Only the
 generated consumer knowledge entry point and installed knowledge template are
 substrate-owned.
+
+`KIT_TEST_FILES` classifies the kit's copied tests by exact filename so a fresh
+install is not counted as new project-code sprawl. A discovery test compares
+the inventory with the source tree's actual top-level test modules; the
+`code_shape.py` fallback must match. Arbitrary consumer tests remain project
+code, and classification does not change which heavy tests bootstrap strips.
 
 The behavioral smoke runs the real scanner independently for root instructions,
 HISTORY, the stable knowledge entry point, a randomized knowledge sibling, and a
@@ -112,6 +118,10 @@ Budgets guide document shape. They do not prove relevance or accuracy. The
 source map uses one current-contract document per function, while release
 chronology remains in CHANGES and HISTORY.
 
+The opt-in `brief` command reads this context on demand with source provenance
+and omission counts. It adds no always-loaded prompt or startup block; see
+[current task briefs](10_lessons_recall.md#current-task-briefs).
+
 Bus claims are leases: `scripts/bus_claims.py` derives ACTIVE/EXPIRED/RELEASED
 deterministically from AGENT_BUS.md entries (default TTL 72h; HEARTBEAT and
 CLAIM EXPANSION refresh; an expired lease is reclaimable by any agent, and ONLY
@@ -122,8 +132,8 @@ listed with its line number and is not counted, and "no open claims" is then
 qualified as "in the parsed grammar" — a consumer's off-grammar claims once read
 as none open. `--digest [--n N]` prints the bus size, open claims, and the last
 N entries capped at 300 characters, so agents need not read the whole file.
-Bus text is agent-written, so every line the reader prints shows control, bidi
-and invisible characters as `?`.
+Bus text is agent-written, so every line the reader prints shows control, bidi,
+tag, lone-surrogate and invisible characters as `?`.
 `bootstrap.sh` seeds a consumer bus from `templates/AGENT_BUS.md.template` (never
 over an existing one) and adds `AGENT_BUS.md merge=union` to `.gitattributes`.
 The kit's own bus is not rotated: harness carve-outs pin line numbers in it.

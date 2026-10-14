@@ -425,3 +425,10 @@ This file is `merge=union` in `.gitattributes` so concurrent branch entries comb
 **Knowledge:** Structured report boundaries need same-read provenance and explicit missing-source diagnostics. Context sanitization is not terminal sanitization; normalize and suppress recognized secret fields before selector clipping. Permission bits can change check behavior without changing bytes. Full check exited 0, evals 57/57 blocked and 0/14 FP, 13 guard-removal probes discriminating. This entry remains unverified because no packaged release-pass was created.
 **Outcome:** unverified
 
+## 2026-10-14T15:08:58Z — NO_SESSION — b5c2956
+**Summary:** Consumer workflow templates pin the same action versions as the kit: Dependabot bumped checkout v4->v7, setup-go v5->v6 and setup-node v4->v6 in .github/workflows only, leaving workflows/*.template on the old majors.
+**Files:** workflows/*.template,tests/test_doc_consistency.py
+**Intent:** The operator asked to fix the drift flagged after merging Dependabot PRs #5, #3 and #1.
+**Knowledge:** Dependabot cannot see workflows/*.template, so the kit and what it installs drift on every action bump; a test now requires one ref per action across both, failing the next bump with the template named. No version bump: the fix rides with the in-progress v3.10.0 release on this branch.
+**Outcome:** unverified
+

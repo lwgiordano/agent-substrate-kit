@@ -432,3 +432,10 @@ This file is `merge=union` in `.gitattributes` so concurrent branch entries comb
 **Knowledge:** Dependabot cannot see workflows/*.template, so the kit and what it installs drift on every action bump; a test now requires one ref per action across both, failing the next bump with the template named. No version bump: the fix rides with the in-progress v3.10.0 release on this branch.
 **Outcome:** unverified
 
+## 2026-10-14T17:19:42Z — NO_SESSION — 51b0253
+**Summary:** v3.10.0: work receipts (receipt start/check/annotate/show) and read-only multi-project status (projects --root), completing the approved task-evidence design after Codex's brief.
+**Files:** scripts/task_receipt.py,scripts/project_status.py,scripts/_task_evidence.py,scripts/check_substrate_config.py,scripts/bus_claims.py,manage.sh,templates/manage.sh.template,bootstrap.sh,package_release.sh,.gitignore,tests/test_task_receipt.py,tests/test_project_status.py,tests/guards.json,docs/knowledge/11_receipts_projects.md,VERSION,README.md
+**Intent:** Operator asked to finish v3.10.0 to a working stable release: let an agent show what was asked, which known check ran on which exact tree and whether that result still applies, and let an operator see the state of several projects without running any of their code.
+**Knowledge:** Exit 0 certifies only the input it started from: receipts fingerprint before and after and derive the state on every read, so a self-editing check or a hand-edited record cannot read as a clean pass. Inspecting another project must use only the inspector's own code, and that includes tool lookup: shared helpers ran a bare git on first import, so the inspector drops relative PATH entries process-wide. Two security and two test audits drove the hardening; every new guard is proven load-bearing.
+**Outcome:** shipped-green
+

@@ -1,6 +1,6 @@
 ---
 purpose: Release packaging, signing, manifests, and artifact verification.
-last_human_reviewed: 2026-10-02
+last_human_reviewed: 2026-10-14
 covers:
   - manage.sh
   - package_release.sh
@@ -28,7 +28,9 @@ The package includes substrate-owned scripts, templates, trust configuration,
 workflows, and compact install assets. Consumer-heavy self-tests and source-only
 knowledge siblings are not installed by default. Cheap installed-file and smoke
 tests remain in consumer repositories; `--dev-tests` opts into the full source
-self-test suite.
+self-test suite. Local state never ships: the memory chain, traces, work
+receipts (`.substrate/receipts/`) and execution scratch (`.superpowers/`) are
+left out of the source hash, the zip, and the zip-hygiene check.
 
 `docs/manifest.json` is generated from source knowledge docs and ADRs. It is not
 hand-edited. `.substrate/install.json` is generated after render and records the

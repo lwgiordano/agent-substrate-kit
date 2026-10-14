@@ -39,6 +39,7 @@ KNOWLEDGE_DOCS = {
     "08_memory_anchor.md": "The memory trust anchor — monotonic advance, remote confirmation, and limits.",
     "09_deterministic_validators.md": "Deterministic validator layers, pinned copies, and append-only gates.",
     "10_lessons_recall.md": "Lessons with evidence, the record the chain attests, outcome labels, and recall.",
+    "11_receipts_projects.md": "Work receipts and read-only multi-project status.",
 }
 
 KNOWLEDGE_ASSERTS = {
@@ -47,6 +48,14 @@ KNOWLEDGE_ASSERTS = {
     "scripts/_doc_common.py::release_evidence_status",
     "scripts/task_brief.py::build",
     "scripts/_task_evidence.py::git_facts",
+    "scripts/_task_evidence.py::def trusted_executable",
+    "scripts/task_receipt.py::state-changed-during-check",
+    "scripts/task_receipt.py::digest-only",
+    "scripts/task_receipt.py::result-without-start",
+    "scripts/task_receipt.py::harness_changed",
+    "scripts/project_status.py::not checked",
+    "scripts/project_status.py::inspection-failed",
+    "scripts/check_substrate_config.py::def parse_config_text",
     "scripts/check_lessons.py::evidence_exists",
     "scripts/memory_log.py::record_units",
     "scripts/memory_log.py::release_pass",

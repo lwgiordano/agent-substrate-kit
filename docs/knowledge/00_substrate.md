@@ -1,6 +1,6 @@
 ---
 purpose: Entry point for current substrate contracts and functional knowledge.
-last_human_reviewed: 2026-10-02
+last_human_reviewed: 2026-10-14
 covers:
   - bootstrap.sh
   - manage.sh
@@ -26,6 +26,7 @@ The source kit keeps detail in function-oriented documents:
 - [The memory trust anchor](08_memory_anchor.md)
 - [Deterministic validators](09_deterministic_validators.md)
 - [Lessons, records, and recall](10_lessons_recall.md)
+- [Work receipts and project status](11_receipts_projects.md)
 
 ## Operating model
 

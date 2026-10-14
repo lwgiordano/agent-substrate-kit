@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import selectors
+import shutil
 import signal
 import stat
 import subprocess
@@ -24,8 +25,35 @@ def now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
 
+def _absolute_path() -> str:
+    """Absolute PATH entries only. An empty PATH would mean the current directory
+    to exec, so with no absolute entry left the platform default is used."""
+    keep = [p for p in os.environ.get("PATH", "").split(os.pathsep) if p and os.path.isabs(p)]
+    return os.pathsep.join(keep or [p for p in os.defpath.split(os.pathsep) if os.path.isabs(p)])
+
+
+def trusted_executable(name: str) -> str | None:
+    """Resolve a tool from absolute PATH entries only: an empty or relative entry
+    (".", "bin") would let the inspected tree supply its own `git` or `bash`."""
+    return shutil.which(name, path=_absolute_path())
+
+
+def harden_path() -> None:
+    """Drop relative PATH entries for this whole process. The shared helpers this
+    module reuses (session_handoff, check_substrate_config) discover their root
+    with a bare `git` when first imported, which a relative entry would resolve
+    inside the inspected tree. Entry points call this again because a library
+    caller may change PATH after import."""
+    if os.environ.get("PATH", "") != _absolute_path():
+        os.environ["PATH"] = _absolute_path()
+
+
+harden_path()
+
+
 def clean_env() -> dict:
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env["PATH"] = _absolute_path()
     env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull,
                GIT_CONFIG_NOSYSTEM="1", GIT_OPTIONAL_LOCKS="0",
                GIT_NO_REPLACE_OBJECTS="1", GIT_TERMINAL_PROMPT="0",
@@ -35,7 +63,10 @@ def clean_env() -> dict:
 
 def git(root: Path, *args: str, limit: int = GIT_LIMIT) -> bytes:
     """No target helpers, shell, optional writes, user config, or unbounded output."""
-    argv = ["git", "--no-pager", "-c", "core.fsmonitor=false", *args]
+    exe = trusted_executable("git")
+    if exe is None:
+        raise FileNotFoundError("git is not on an absolute PATH entry")
+    argv = [exe, "--no-pager", "-c", "core.fsmonitor=false", *args]
     end = time.monotonic() + 10
     with subprocess.Popen(argv, cwd=root, env=clean_env(), stdout=subprocess.PIPE,
                           stderr=subprocess.DEVNULL, start_new_session=True) as proc:

@@ -54,8 +54,10 @@ from _doc_common import repo_root
 # Bus text is written by agents and shown to terminals and other agents' context:
 # a C0/C1 control (terminal escapes), a bidi override or an invisible character is
 # shown as `?` rather than passed through (v3.9.1).
-_UNPRINTABLE = re.compile("[\x00-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e"
-                          "\u2060-\u2064\u2066-\u2069\ufeff]")
+_UNPRINTABLE = re.compile("[\x00-\x1f\x7f-\x9f\u00ad\u034f\u061c\u115f\u1160\u180e"
+                          "\u200b-\u200f\u202a-\u202e\u2060-\u206f\u3164\ufe00-\ufe0f\ufeff"
+                          "\uffa0\ufff9-\ufffb\ud800-\udfff\U000e0000-\U000e007f"
+                          "\U000e0100-\U000e01ef]")
 
 
 def _shown(s: str) -> str:

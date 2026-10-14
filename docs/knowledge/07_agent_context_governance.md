@@ -1,6 +1,6 @@
 ---
 purpose: Agent context inventory, harness scanning, budgets, and doc drift.
-last_human_reviewed: 2026-10-02
+last_human_reviewed: 2026-10-14
 covers:
   - agentsync.sh
   - manage.sh
@@ -132,8 +132,8 @@ listed with its line number and is not counted, and "no open claims" is then
 qualified as "in the parsed grammar" — a consumer's off-grammar claims once read
 as none open. `--digest [--n N]` prints the bus size, open claims, and the last
 N entries capped at 300 characters, so agents need not read the whole file.
-Bus text is agent-written, so every line the reader prints shows control, bidi
-and invisible characters as `?`.
+Bus text is agent-written, so every line the reader prints shows control, bidi,
+tag, lone-surrogate and invisible characters as `?`.
 `bootstrap.sh` seeds a consumer bus from `templates/AGENT_BUS.md.template` (never
 over an existing one) and adds `AGENT_BUS.md merge=union` to `.gitattributes`.
 The kit's own bus is not rotated: harness carve-outs pin line numbers in it.

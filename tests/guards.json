@@ -1196,6 +1196,16 @@
         "tests/test_task_receipt.py::test_latest_receipt_is_ordered_within_one_second_and_bad_ones_are_reported"
       ],
       "why": "two tasks started in the same second report a random one as the latest"
+    },
+    {
+      "id": "projects-inspector-version-in-consumers",
+      "file": "scripts/project_status.py",
+      "find": "    return _kit(home, [])[\"version\"]\n",
+      "replace": "    return None\n",
+      "tests": [
+        "tests/test_project_status.py::test_receipt_projects_and_brief_work_in_a_fresh_consumer"
+      ],
+      "why": "an installed project's status report names its own kit version as None"
     }
   ]
 }

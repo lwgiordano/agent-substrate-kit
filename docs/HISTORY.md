@@ -439,3 +439,10 @@ This file is `merge=union` in `.gitattributes` so concurrent branch entries comb
 **Knowledge:** Exit 0 certifies only the input it started from: receipts fingerprint before and after and derive the state on every read, so a self-editing check or a hand-edited record cannot read as a clean pass. Inspecting another project must use only the inspector's own code, and that includes tool lookup: shared helpers ran a bare git on first import, so the inspector drops relative PATH entries process-wide. Two security and two test audits drove the hardening; every new guard is proven load-bearing.
 **Outcome:** shipped-green
 
+## 2026-10-15T00:50:36Z — NO_SESSION — 9b761d4
+**Summary:** v3.10.1: ./manage.sh projects run inside an installed project names its own kit version instead of None.
+**Files:** scripts/project_status.py,tests/test_project_status.py,tests/guards.json,docs/knowledge/11_receipts_projects.md,VERSION,README.md,BENCHMARK.md
+**Intent:** Verify the documented install path end to end: v3.10.0 cloned from GitHub main into an empty folder, bootstrapped with --install-tools, then brief, a real receipt check, and projects run there. The status report showed the inspecting kit as None.
+**Knowledge:** Consumers have no VERSION file; their kit version lives in .substrate/install.json, so any reader of the kit's own version needs that fallback. Running the published install path in an empty folder found what the in-repo suite did not, because every kit-side test had a VERSION file next to the scripts.
+**Outcome:** shipped-green
+

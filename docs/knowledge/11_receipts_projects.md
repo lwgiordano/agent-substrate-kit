@@ -1,6 +1,6 @@
 ---
 purpose: Work receipts and read-only multi-project status.
-last_human_reviewed: 2026-10-14
+last_human_reviewed: 2026-10-15
 covers:
   - scripts/task_receipt.py
   - scripts/project_status.py
@@ -121,7 +121,8 @@ the others; the report finishes and exits 2. Target values are bounded: version
 and install time over 40 characters read as unknown, a hook path with `..`, an
 absolute path or a NUL reads `unsafe`, and a row keeps at most 50 diagnostics
 with an omitted count. JSON is capped at 1 MiB; projects that do not fit are
-counted in `truncated_projects` and the command exits 2.
+counted in `truncated_projects` and the command exits 2. The report names the inspecting kit's version: its
+`VERSION` file in the kit source, its install record in a consumer.
 
 ## Packaging
 

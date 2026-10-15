@@ -3,6 +3,7 @@ import hashlib
 import importlib
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -327,6 +328,7 @@ def test_invalid_invocations_and_truncation_return_two(project, monkeypatch, cap
     out = json.loads(proc.stdout)
     assert proc.returncode == 0 and out["schema_version"] == 1
     assert out["inspector"]["network"] == "off"
+    assert re.fullmatch(r"\d+\.\d+\.\d+", out["inspector"]["kit_version"] or ""), out["inspector"]
 
 
 def test_config_parser_splits_lines_like_the_shell(tmp_path):
@@ -373,6 +375,7 @@ def test_receipt_projects_and_brief_work_in_a_fresh_consumer(tmp_path, profile):
     row = json.loads(status.stdout)["projects"][0]
     assert row["kit"]["installed"] == "yes" and row["latest_receipt"]["task_id"] == task_id
     assert row["config"]["profile"] == profile
+    assert json.loads(status.stdout)["inspector"]["kit_version"] == row["kit"]["version"]
     assert row["git"]["dirty"] == "clean", "the receipt store must stay out of the working state"
     assert manage("receipt", "check", task_id, "--kind", "deploy").returncode == 2
     brief = manage("brief", "receipts", "--json")

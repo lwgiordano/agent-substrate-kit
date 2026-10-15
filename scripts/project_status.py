@@ -235,6 +235,16 @@ def _inspect(root: Path, row: dict) -> None:
     row["status"] = "error" if facts.get("status") != "ok" else "ok"
 
 
+def _inspector_version() -> str | None:
+    """This kit's own version: VERSION in the kit source, the install record in a
+    consumer (which has no VERSION file)."""
+    home = Path(__file__).resolve().parents[1]
+    raw = safe_read_bytes(home / "VERSION", home, max_bytes=64)
+    if raw is not None:
+        return _short(raw.decode("utf-8", "replace").strip())
+    return _kit(home, [])["version"]
+
+
 def report(roots: list[Path]) -> dict:
     harden_path()
     if not roots:
@@ -252,11 +262,8 @@ def report(roots: list[Path]) -> dict:
             continue
         seen.add(canonical)
         rows.append(inspect(canonical))
-    kit_version = (Path(__file__).resolve().parents[1] / "VERSION")
-    raw = safe_read_bytes(kit_version, kit_version.parent, max_bytes=64)
     out = {"schema_version": SCHEMA, "collected_at": now(),
-           "inspector": {"kit_version": raw.decode("utf-8", "replace").strip() if raw else None,
-                         "network": "off"},
+           "inspector": {"kit_version": _inspector_version(), "network": "off"},
            "projects": rows, "errors": sum(r["status"] == "error" for r in rows)}
     clean, _ = sanitize_report(out)
     return clean

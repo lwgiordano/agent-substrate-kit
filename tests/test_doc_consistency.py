@@ -56,6 +56,9 @@ KNOWLEDGE_ASSERTS = {
     "scripts/project_status.py::not checked",
     "scripts/project_status.py::inspection-failed",
     "scripts/check_substrate_config.py::def parse_config_text",
+    "scripts/substrate_audit.py::SUBSTRATE_AUDIT_PYTEST_TIMEOUT",
+    "scripts/substrate_audit.py::'TIMEOUT'",
+    "workflows/scheduled-audit.yml.template::issues: write",
     "scripts/check_lessons.py::evidence_exists",
     "scripts/memory_log.py::record_units",
     "scripts/memory_log.py::release_pass",
@@ -552,3 +555,28 @@ def test_consumer_workflow_templates_pin_the_same_action_versions_as_the_kit() -
             if ref != want:
                 drift.append(f"{action}@{ref} in {sorted(files)}; the kit uses @{want}")
     assert not drift, "consumer workflow templates drifted from the kit:\n" + "\n".join(drift)
+
+
+def test_scheduled_audit_can_open_its_failure_issue() -> None:
+    """v3.10.2: every failing scheduled audit then tried to open an issue and got HTTP
+    403 ('issues=write'), because the workflow declared no permissions and the label it
+    applied did not exist, so audit failures were silent. The kit's workflow and the
+    template consumers receive must grant exactly what the job uses, create the label if
+    missing, and pass the manual timeout input through env rather than into the shell."""
+    import yaml
+
+    for path in (KIT / ".github" / "workflows" / "scheduled-audit.yml",
+                 KIT / "workflows" / "scheduled-audit.yml.template"):
+        doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+        job = doc["jobs"]["scheduled-audit"]
+        assert job.get("permissions") == {"contents": "read", "issues": "write"}, path.name
+        steps = {s.get("name"): s for s in job["steps"]}
+        audit = steps["Write substrate audit report"]
+        assert "${{" not in audit["run"], f"{path.name}: input interpolated into the shell"
+        assert audit["env"]["SUBSTRATE_AUDIT_PYTEST_TIMEOUT"] == \
+            "${{ github.event.inputs.pytest_timeout }}", path.name
+        alert = steps["Open issue on audit failure"]
+        assert alert.get("if") == "failure()", path.name
+        script = alert["with"]["script"]
+        for call in ("getLabel", "createLabel", "issues.create(", "createComment"):
+            assert call in script, f"{path.name}: alert step lacks {call}"

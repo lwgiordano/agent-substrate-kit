@@ -14920,3 +14920,87 @@ def test_history_gate_fails_a_near_miss_outcome_label(tmp_path, line) -> None:
         encoding="utf-8")
     r = run("check_history_sha.py")
     assert r.returncode == 1 and "malformed outcome line" in r.stderr, r.stdout + r.stderr
+
+
+def _audit_module():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("substrate_audit_under_test",
+                                                  SCRIPTS / "substrate_audit.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_audit_timeout_is_its_own_status_and_never_a_pass() -> None:
+    """v3.10.2: the scheduled audit hit a fixed 300 s cap on `pytest tests/` (Oct 12 and
+    Oct 19, while the same commit passed Oct 5) and reported it as BLOCK, like a failing
+    test. A check that does not finish is TIMEOUT, keeps its partial output so the log
+    shows how far it got, and the audit's final result is never PASS."""
+    import time as _time
+    audit = _audit_module()
+    slow = [sys.executable, "-c",
+            "import time; print('progress 40%', flush=True); time.sleep(30)"]
+    started = _time.monotonic()
+    r = audit.run(slow, timeout=1)
+    assert _time.monotonic() - started < 20
+    assert (r["status"], r["returncode"], r["timeout_seconds"]) == ("TIMEOUT", 124, 1)
+    assert "progress 40%" in r["output"] and "did not finish within 1 s" in r["output"]
+    ok = audit.run([sys.executable, "-c", "pass"])
+    bad = audit.run([sys.executable, "-c", "raise SystemExit(3)"])
+    assert (ok["status"], bad["status"]) == ("PASS", "BLOCK")
+    assert audit.final_status([ok, r]) == "TIMEOUT"
+    assert audit.final_status([r, bad]) == "BLOCK"
+    skipped = {"cmd": ["skip"], "returncode": 0, "status": "SKIP"}
+    assert audit.final_status([ok, skipped]) == "PASS"
+
+
+def test_audit_pytest_limit_is_configurable_and_fails_closed(monkeypatch, capsys) -> None:
+    """The pytest limit has its own default above the old 300 s cap and can be set per
+    run; a value that is not whole seconds in range stops the audit instead of quietly
+    falling back to the default."""
+    audit = _audit_module()
+    monkeypatch.delenv(audit.PYTEST_TIMEOUT_ENV, raising=False)
+    assert audit.pytest_timeout() == audit.PYTEST_TIMEOUT_DEFAULT
+    assert audit.PYTEST_TIMEOUT_DEFAULT > audit.QUICK_TIMEOUT
+    monkeypatch.setenv(audit.PYTEST_TIMEOUT_ENV, "900")
+    assert audit.pytest_timeout() == 900
+    for bad in ("abc", "59", "3601", "12.5", "-5", "١٢٠٠"):
+        monkeypatch.setenv(audit.PYTEST_TIMEOUT_ENV, bad)
+        with pytest.raises(ValueError, match="whole seconds"):
+            audit.pytest_timeout()
+    monkeypatch.setattr(sys, "argv", ["substrate_audit.py", "--mode", "full"])
+    assert audit.main() == 2
+    assert "whole seconds" in capsys.readouterr().err
+
+
+def test_audit_runs_pytest_under_its_own_limit_and_names_the_slowest_tests(
+        tmp_path, monkeypatch, capsys) -> None:
+    """End to end through main(): the pytest check asks for slowest-test durations, runs
+    under the pytest limit (not the 300 s check limit), prints those durations when it
+    passes, and reports TIMEOUT with partial output when it does not finish."""
+    audit = _audit_module()
+    venv_bin = tmp_path / ".substrate" / "venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    fake = venv_bin / "pytest"
+    fake.write_text("#!/bin/sh\n"
+                    "echo '==== slowest 15 durations ===='\n"
+                    "echo '9.00s call     tests/test_x.py::test_slow'\n"
+                    "echo \"args: $*\"\n"
+                    "sleep \"${FAKE_SLEEP:-0}\"\n")
+    fake.chmod(0o755)
+    monkeypatch.setattr(audit, "ROOT", tmp_path)
+    pytest_only = [c for c in audit.plan("full") if Path(c[0]).name == "pytest"]
+    assert pytest_only and pytest_only[0][-1] == "--durations=15"
+    monkeypatch.setattr(audit, "plan", lambda mode: pytest_only)
+    monkeypatch.setattr(audit, "PYTEST_TIMEOUT_RANGE", (1, 3600))
+    monkeypatch.setattr(audit, "QUICK_TIMEOUT", 300)
+    monkeypatch.setattr(sys, "argv", ["substrate_audit.py", "--mode", "full"])
+    monkeypatch.setenv(audit.PYTEST_TIMEOUT_ENV, "1")
+    monkeypatch.setenv("FAKE_SLEEP", "5")
+    assert audit.main() == 1
+    out = capsys.readouterr().out
+    assert "TIMEOUT: " in out and "did not finish within 1 s" in out and "test_slow" in out
+    monkeypatch.setenv("FAKE_SLEEP", "0")
+    assert audit.main() == 0
+    out = capsys.readouterr().out
+    assert "PASS: " in out and "9.00s call     tests/test_x.py::test_slow" in out

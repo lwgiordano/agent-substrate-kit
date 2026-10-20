@@ -1236,6 +1236,26 @@
         "tests/test_doc_consistency.py::test_scheduled_audit_can_open_its_failure_issue"
       ],
       "why": "consumer audit failures are silent: the failure issue is refused with 403"
+    },
+    {
+      "id": "scheduled-audit-write-scope-only-in-alert-job",
+      "file": "workflows/scheduled-audit.yml.template",
+      "find": "    permissions:\n      contents: read\n    steps:\n",
+      "replace": "    permissions:\n      contents: read\n      issues: write\n    steps:\n",
+      "tests": [
+        "tests/test_doc_consistency.py::test_scheduled_audit_can_open_its_failure_issue"
+      ],
+      "why": "the job that runs repository code and tests also holds the issues write token"
+    },
+    {
+      "id": "scheduled-audit-alerts-when-cancelled",
+      "file": "workflows/scheduled-audit.yml.template",
+      "find": "    if: ${{ always() && needs.scheduled-audit.result != 'success' }}\n",
+      "replace": "    if: failure()\n",
+      "tests": [
+        "tests/test_doc_consistency.py::test_scheduled_audit_can_open_its_failure_issue"
+      ],
+      "why": "an audit cancelled by its time limit raises no alert"
     }
   ]
 }

@@ -44,7 +44,7 @@ bash /path/to/agent_substrate_kit_v3/bootstrap.sh --profile standard --lang auto
 
 ## Current status (v3.10.2)
 
-**v3.10.2** — the scheduled audit can alert, and a slow run is named as one. Its failure issue was refused (HTTP 403) on every failing run because the workflow declared no permissions; it now has `issues: write`, creates its label, and comments on an open issue instead of duplicating it. The audit's pytest run gets its own limit (1200 s by default, `SUBSTRATE_AUDIT_PYTEST_TIMEOUT`), a run that does not finish reports TIMEOUT rather than a test failure or a pass, and each report lists the slowest tests.
+**v3.10.2** — the scheduled audit can alert, and a slow run is named as one. Its failure issue was refused (HTTP 403) on every failing run because the workflow declared no permissions. A separate job that runs no repository code now holds the only `issues: write` scope, fires whenever the audit does not succeed (cancelled included), creates its label, and comments on its open issue instead of duplicating it; the audit job itself can only read. The audit's pytest run gets its own limit (1200 s by default, `SUBSTRATE_AUDIT_PYTEST_TIMEOUT`), a run that does not finish reports TIMEOUT rather than a test failure or a pass, and each report lists the slowest tests.
 
 **v3.10.1** — `./manage.sh projects` run inside an installed project now names its own kit version (read from the install record; consumers have no VERSION file) instead of `None`. Found by installing v3.10.0 from GitHub into an empty folder and running every new command.
 

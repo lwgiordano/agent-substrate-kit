@@ -14964,7 +14964,7 @@ def test_audit_pytest_limit_is_configurable_and_fails_closed(monkeypatch, capsys
     assert audit.PYTEST_TIMEOUT_DEFAULT > audit.QUICK_TIMEOUT
     monkeypatch.setenv(audit.PYTEST_TIMEOUT_ENV, "900")
     assert audit.pytest_timeout() == 900
-    for bad in ("abc", "59", "3601", "12.5", "-5", "١٢٠٠"):
+    for bad in ("abc", "59", "1801", "3600", "12.5", "-5","١٢٠٠"):
         monkeypatch.setenv(audit.PYTEST_TIMEOUT_ENV, bad)
         with pytest.raises(ValueError, match="whole seconds"):
             audit.pytest_timeout()

@@ -40,16 +40,20 @@ full pytest suite and `pre-commit run --all-files`. Each check reports PASS,
 BLOCK or TIMEOUT. TIMEOUT means the check did not finish: its partial output is
 kept, and the audit's final result is never PASS. Quick checks have 300 seconds
 each. The pytest run has its own limit, 1200 seconds by default, set with
-`SUBSTRATE_AUDIT_PYTEST_TIMEOUT` (whole seconds, 60 to 3600); any other value
+`SUBSTRATE_AUDIT_PYTEST_TIMEOUT` (whole seconds, 60 to 1800); any other value
 stops the audit rather than falling back to the default. The pytest check asks
 for the 15 slowest tests and prints them, so a report shows whether one test or
 the whole suite is slow.
 
 The scheduled-audit workflow (kit and consumer template) runs `full-audit`
 weekly and on manual dispatch, where an optional `pytest_timeout` input reaches
-the audit through the environment. Its token has only `contents: read` and
-`issues: write`. On failure it creates the `substrate-audit` label if missing
-and opens one issue, or comments on the open one, so a failure is never silent.
+the audit through the environment. The audit job runs repository code, so its
+token can only read and checkout does not keep it; its 45-minute limit leaves
+room for the longest pytest limit. A separate job with only `issues: write`,
+and no checkout, runs whenever the audit job does not succeed, including when
+it is cancelled: it creates the `substrate-audit` label if missing and comments
+on the open issue this workflow opened, or opens one, so a failure is never
+silent.
 
 ## Eval semantics
 

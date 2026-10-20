@@ -560,23 +560,36 @@ def test_consumer_workflow_templates_pin_the_same_action_versions_as_the_kit() -
 def test_scheduled_audit_can_open_its_failure_issue() -> None:
     """v3.10.2: every failing scheduled audit then tried to open an issue and got HTTP
     403 ('issues=write'), because the workflow declared no permissions and the label it
-    applied did not exist, so audit failures were silent. The kit's workflow and the
-    template consumers receive must grant exactly what the job uses, create the label if
-    missing, and pass the manual timeout input through env rather than into the shell."""
+    applied did not exist, so audit failures were silent. In the kit's workflow and the
+    template consumers receive, the only write scope sits in a job that runs no
+    repository code and fires whenever the audit does not succeed (cancelled included);
+    the audit job can only read, keeps no credentials, and outlasts its longest pytest
+    limit; the manual timeout input reaches the audit through env, not the shell."""
     import yaml
 
+    limit = re.search(r"PYTEST_TIMEOUT_RANGE=\((\d+),(\d+)\)",
+                      (KIT / "scripts" / "substrate_audit.py").read_text(encoding="utf-8"))
+    assert limit, "substrate_audit.py no longer declares PYTEST_TIMEOUT_RANGE"
     for path in (KIT / ".github" / "workflows" / "scheduled-audit.yml",
                  KIT / "workflows" / "scheduled-audit.yml.template"):
-        doc = yaml.safe_load(path.read_text(encoding="utf-8"))
-        job = doc["jobs"]["scheduled-audit"]
-        assert job.get("permissions") == {"contents": "read", "issues": "write"}, path.name
-        steps = {s.get("name"): s for s in job["steps"]}
+        jobs = yaml.safe_load(path.read_text(encoding="utf-8"))["jobs"]
+        audit_job, alert_job = jobs["scheduled-audit"], jobs["alert-on-failure"]
+        assert audit_job.get("permissions") == {"contents": "read"}, path.name
+        assert audit_job["timeout-minutes"] * 60 >= int(limit.group(2)) + 600, \
+            f"{path.name}: the job can be cancelled before the audit reports TIMEOUT"
+        steps = {s.get("name") or s.get("uses"): s for s in audit_job["steps"]}
+        checkout = next(s for s in audit_job["steps"] if "checkout" in s.get("uses", ""))
+        assert checkout["with"].get("persist-credentials") is False, path.name
         audit = steps["Write substrate audit report"]
         assert "${{" not in audit["run"], f"{path.name}: input interpolated into the shell"
         assert audit["env"]["SUBSTRATE_AUDIT_PYTEST_TIMEOUT"] == \
             "${{ github.event.inputs.pytest_timeout }}", path.name
-        alert = steps["Open issue on audit failure"]
-        assert alert.get("if") == "failure()", path.name
-        script = alert["with"]["script"]
-        for call in ("getLabel", "createLabel", "issues.create(", "createComment"):
+        assert alert_job.get("permissions") == {"issues": "write"}, path.name
+        assert alert_job.get("needs") == "scheduled-audit", path.name
+        assert "always()" in alert_job["if"] and "!= 'success'" in alert_job["if"], path.name
+        assert not any("checkout" in s.get("uses", "") or "run" in s
+                       for s in alert_job["steps"]), f"{path.name}: alert job runs code"
+        script = alert_job["steps"][0]["with"]["script"]
+        for call in ("getLabel", "createLabel", "issues.create(", "createComment",
+                     "pull_request", "github-actions[bot]"):
             assert call in script, f"{path.name}: alert step lacks {call}"

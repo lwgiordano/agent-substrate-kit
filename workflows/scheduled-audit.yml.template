@@ -5,22 +5,22 @@ on:
   workflow_dispatch:
     inputs:
       pytest_timeout:
-        description: "Seconds the audit's pytest run may take (60-3600; empty = default 1200). A small value forces a TIMEOUT to test the alert path."
+        description: "Seconds the audit's pytest run may take (60-1800; empty = default 1200). A small value forces a TIMEOUT to test the alert path."
         required: false
         default: ""
 jobs:
   scheduled-audit:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-    # GITHUB_TOKEN gets only what this job uses. Without `issues: write` the
-    # failure issue below was refused with HTTP 403 on every failing run, so
-    # audit failures were silent (v3.10.2).
+    # Room for the longest pytest limit (1800 s) plus setup and the other checks,
+    # so the audit reports TIMEOUT itself instead of being cancelled first.
+    timeout-minutes: 45
+    # This job runs repository code (setup, tests, hooks), so its token can only
+    # read, and checkout does not leave it on disk.
     permissions:
       contents: read
-      issues: write
     steps:
       - uses: actions/checkout@v7
-        with: {fetch-depth: 0}
+        with: {fetch-depth: 0, persist-credentials: false}
       - uses: actions/setup-python@v5
         with: {python-version: "3.11"}
       - name: Bootstrap toolchain
@@ -55,9 +55,23 @@ jobs:
           if-no-files-found: warn
       # Strict installs: surface a failed scheduled audit as an issue
       # instead of a silently-red cron run.
+
+  # A separate job holds the only write scope and runs no repository code: no
+  # checkout, just the GitHub API. Without `issues: write` this step was refused
+  # with HTTP 403 on every failing run, so audit failures were silent (v3.10.2).
+  # It also alerts when the audit job is cancelled (for example by its time limit).
+  alert-on-failure:
+    needs: scheduled-audit
+    if: ${{ always() && needs.scheduled-audit.result != 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
       - name: Open issue on audit failure
-        if: failure()
         uses: actions/github-script@v7
+        env:
+          AUDIT_RESULT: ${{ needs.scheduled-audit.result }}
         with:
           script: |
             // One open issue per failure streak: later failures comment on it.
@@ -70,13 +84,24 @@ jobs:
                 color: 'b60205', description: 'Scheduled substrate audit failed' });
             }
             const sha = context.sha.slice(0, 7);
-            const body = `The scheduled substrate audit failed on ${new Date().toISOString()} at ${sha}.\nRun: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}\nThe log names each check as PASS, BLOCK or TIMEOUT; download the \`substrate-audit-report\` artifact for the full report.`;
+            const body = `The scheduled substrate audit did not succeed (${process.env.AUDIT_RESULT}) on ${new Date().toISOString()} at ${sha}.\nRun: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}\nThe log names each check as PASS, BLOCK or TIMEOUT; download the \`substrate-audit-report\` artifact for the full report.`;
+            // Only an issue this workflow opened, never a pull request or an issue
+            // someone else labelled; if commenting fails (locked), open a new one.
             const open = await github.rest.issues.listForRepo({ ...context.repo,
-              state: 'open', labels: label, per_page: 1 });
-            if (open.data.length) {
-              await github.rest.issues.createComment({ ...context.repo,
-                issue_number: open.data[0].number, body });
-            } else {
+              state: 'open', labels: label, per_page: 50 });
+            const mine = open.data.find(i => !i.pull_request && i.user &&
+              i.user.login === 'github-actions[bot]');
+            let posted = false;
+            if (mine) {
+              try {
+                await github.rest.issues.createComment({ ...context.repo,
+                  issue_number: mine.number, body });
+                posted = true;
+              } catch (e) {
+                core.warning(`could not comment on #${mine.number}: ${e.message}`);
+              }
+            }
+            if (!posted) {
               await github.rest.issues.create({ ...context.repo,
                 title: `Scheduled substrate audit failed (${sha})`, body, labels: [label] });
             }

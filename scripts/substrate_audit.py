@@ -33,7 +33,7 @@ ROOT=Path.cwd()
 QUICK_TIMEOUT=300
 PYTEST_TIMEOUT_ENV='SUBSTRATE_AUDIT_PYTEST_TIMEOUT'
 PYTEST_TIMEOUT_DEFAULT=1200
-PYTEST_TIMEOUT_RANGE=(60,3600)
+PYTEST_TIMEOUT_RANGE=(60,1800)
 def pytest_timeout():
     """The pytest limit in seconds. An invalid value is an error, never a silent default."""
     raw=os.environ.get(PYTEST_TIMEOUT_ENV,'').strip()

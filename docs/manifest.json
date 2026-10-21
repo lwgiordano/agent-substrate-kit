@@ -97,7 +97,7 @@
         "scripts/setup_branch_protection.sh",
         "scripts/substrate_profile.py"
       ],
-      "last_human_reviewed": "2026-10-14",
+      "last_human_reviewed": "2026-10-21",
       "path": "docs/knowledge/04_policy_governance.md",
       "purpose": "Command policy, hooks, sandboxing, and local or remote governance."
     },

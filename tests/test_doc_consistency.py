@@ -56,6 +56,8 @@ KNOWLEDGE_ASSERTS = {
     "scripts/project_status.py::not checked",
     "scripts/project_status.py::inspection-failed",
     "scripts/check_substrate_config.py::def parse_config_text",
+    "scripts/check_substrate_config.py::def config_text_problem",
+    "scripts/lang_gate.sh::run_gate(){",
     "scripts/substrate_audit.py::SUBSTRATE_AUDIT_PYTEST_TIMEOUT",
     "scripts/substrate_audit.py::'TIMEOUT'",
     "scripts/substrate_audit.py::_redact(out)",

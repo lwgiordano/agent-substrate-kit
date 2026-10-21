@@ -335,14 +335,15 @@ def test_config_parser_splits_lines_like_the_shell(tmp_path):
     parse = api("check_substrate_config").parse_config_text
     hidden = "SUBSTRATE_PROFILE=standard\x0bSUBSTRATE_PROFILE=strict\n"
     vals, err = parse(hidden)
-    assert err and "invalid SUBSTRATE_PROFILE" in err
+    # v3.10.5: refused before any line is read, by both loaders alike.
+    assert err and "control character" in err
     cfg = tmp_path / "config"
     cfg.write_bytes(hidden.encode())
     shell = subprocess.run(["bash", "-c", f'source "{ROOT}/scripts/_substrate_config.sh"; '
                             f'load_substrate_config "{cfg}"'],
                            capture_output=True, text=True, timeout=30)
     assert shell.returncode == 2, "shell loader must reject what the Python parser rejects"
-    assert "invalid SUBSTRATE_PROFILE" in shell.stderr
+    assert "control character" in shell.stderr
     assert parse('SUBSTRATE_PROFILE="strict"  # pinned\nSUBSTRATE_LANG=python\n') == (
         {"SUBSTRATE_PROFILE": "strict", "SUBSTRATE_LANG": "python"}, None)
 

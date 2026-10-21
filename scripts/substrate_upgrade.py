@@ -245,7 +245,9 @@ def _parse_config_text(text: str) -> dict:
     `SUBSTRATE_REMOTE_GOVERNANCE="1"   # ...` parsed to `1"   # ...` and was treated as
     OFF — dropping the trusted-base workflow once live config became the render authority."""
     vals: dict[str, str] = {}
-    for raw in text.splitlines():
+    # Lines split on "\n" only, as the shell loader's `read` does: splitlines()
+    # also breaks on VT/FF/NEL/LS/PS (the round-39 parser divergence, v3.10.5).
+    for raw in text.split("\n"):
         line = raw
         if not line.strip() or line.lstrip().startswith("#"):
             continue

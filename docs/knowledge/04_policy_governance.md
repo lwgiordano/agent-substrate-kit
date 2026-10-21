@@ -2,7 +2,9 @@
 purpose: Command policy, hooks, sandboxing, and local or remote governance.
 asserts:
   - scripts/command_policy.py::looks_dangerous_command
-last_human_reviewed: 2026-10-14
+  - scripts/check_substrate_config.py::def config_text_problem
+  - scripts/lang_gate.sh::run_gate(){
+last_human_reviewed: 2026-10-21
 covers:
   - manage.sh
   - scripts/_substrate_config.sh
@@ -56,7 +58,12 @@ fails on any new reader that does not route here. The rest of the config
 grammar has one Python implementation too: `check_substrate_config.parse_config_text`
 (KEY=VALUE, key allowlist, no substitution, balanced quotes, enum and integer
 domains), split the same way and shared by the validator and `./manage.sh
-projects`.
+projects`. Before any line is read, both it and the shell loader refuse the same
+bytes (`config_text_problem`): control characters anywhere except tab, the line
+break and a CR right before it, and anything but printable ASCII outside comment
+lines. Bash `read` drops a NUL that Python keeps, so without that rule a command
+the validator saw as one harmless word could run in the shell as a download
+piped into a shell.
 
 `command_policy.looks_dangerous_command` is the shared policy seam for configured
 and interactive shell checks. The policy blocks destructive filesystem forms,
@@ -108,6 +115,12 @@ The policy-code integrity pin reads the target `command_policy.py` and
 tree, not through a multi-component string path. A symlinked parent, linked
 leaf, FIFO/special file, or post-read source swap is a pin failure even if the
 bytes available through the redirected path hash to the expected value.
+
+The language gate (`lang_gate.sh`) skips only when the repo has nothing for
+that gate: no npm script of that name, no Go source files, or no language. Once
+a gate applies, the command's exit status is the gate's: a failing lint or test,
+a sandbox refusal, a toolchain missing although the repo needs it, and an
+unreadable `package.json` all fail.
 
 Dependency cooldown and security scanner tiers are explicit. Offline or missing
 backend states report skipped or unavailable instead of false success, and a

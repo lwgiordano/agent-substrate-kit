@@ -1717,9 +1717,14 @@ def t_completion_gate_audited():
     with tempfile.TemporaryDirectory() as td:
         td = Path(td)
         _gate_repo(td)
-        subprocess.run([PY, "-I", "scripts/memory_log.py", "skill-run", "self-audit",
-                        "--result", "pass"], cwd=str(td), capture_output=True,
-                       text=True, timeout=20)
+        # A VERIFIED self-audit (v3.10.5: a self-asserted `--result pass` no longer
+        # counts). `--verify` runs the whole validator chain, which this staged repo
+        # does not carry, so the event `--verify` writes is appended directly.
+        subprocess.run([PY, "-I", "-c",
+                        "import sys; sys.path.insert(0, 'scripts'); import memory_log as m; "
+                        "sys.exit(m.append('skill-run', {'skill': 'self-audit', "
+                        "'result': 'pass', 'verified': True}))"],
+                       cwd=str(td), capture_output=True, text=True, timeout=20)
         # Deterministic: place the file change strictly BEFORE the recorded audit
         # ts via os.utime (no 1s sleep / boundary flakiness).
         evs = (td / ".substrate" / "memory" / "events.jsonl").read_text().splitlines()

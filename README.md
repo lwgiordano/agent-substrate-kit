@@ -42,7 +42,9 @@ bash /path/to/agent_substrate_kit_v3/bootstrap.sh --profile standard --lang auto
 | 4-field bug-fix commit protocol + postmortem-per-bugfix hooks | — | — | yes |
 | Extras (calibration, stale-phrases, license headers) | — | — | yes |
 
-## Current status (v3.10.4)
+## Current status (v3.10.5)
+
+**v3.10.5** — an adversarial review of v3.10.0–v3.10.4 found gates that read a failure as success, and fixed them. A failing `npm test`, `go vet` or `go test` in a consumer's language gate read as "skipped" with exit 0; it now fails with the command's status. The release smoke's strict-lock check had passed on a crash since v3.8.36; refusals now need their exact code and message. A NUL in `.substrate/config` let a command pass the validator and run differently in the shell; both loaders now refuse the same bytes. Work receipts no longer pass with an exported `SKIP`, flag gate files committed after the task started, and refuse task text instead of storing a placeholder; `projects` shows broken metadata as an error row; a forged `shipped-green` HISTORY entry committed on a branch no longer passes as imported. CI jobs that run repository code hold a read-only token, and slow regexes on hostile input are bounded.
 
 **v3.10.4** — hardening sweep. Every GitHub Action in the kit's workflows and the consumer templates is pinned to a commit SHA the kit's own CI has run (cosign-installer, which never runs here, is marked for the operator to pin), and Node jobs run Node 24. The session-start HISTORY summary no longer hides a line because it names an action such as `setup-node`; real command shapes are still withheld. Audit output is redacted before it reaches the CI log or the uploaded report. The kit repository has an active CODEOWNERS file. New tests run a real receipt check in a freshly installed project and build the real release zip to prove receipts and `.superpowers/` stay out of it.
 

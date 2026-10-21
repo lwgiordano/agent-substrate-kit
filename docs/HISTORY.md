@@ -467,3 +467,10 @@ This file is `merge=union` in `.gitattributes` so concurrent branch entries comb
 **Knowledge:** Measure a safety filter against real data in both directions: a false positive hides the very facts it guards, and a carve-out wide enough to fix one can reopen what it blocked. The command filter hid the v3.10.3 summary over the word setup-node; the first carve-out also admitted a leading hyphen or at-sign before a tool name, and review narrowed it to a hyphen between word characters.
 **Outcome:** shipped-green
 
+## 2026-10-21T17:47:44Z — NO_SESSION — 7e3d9a7
+**Summary:** v3.10.5: an adversarial review found gates that read failure as success; the language gate, release smoke, config loaders, receipts, projects and HISTORY provenance now fail honestly.
+**Files:** scripts/lang_gate.sh,scripts/_substrate_config.sh,scripts/check_substrate_config.py,scripts/substrate_upgrade.py,scripts/task_receipt.py,scripts/_task_evidence.py,scripts/project_status.py,scripts/task_brief.py,scripts/session_handoff.py,scripts/append_history.py,scripts/check_history_sha.py,scripts/run_substrate_evals.py,scripts/check_github_governance.py,scripts/completion_gate.py,scripts/recall.py,scripts/run_security_scanners.py,scripts/memory_log.py,package_release.sh,.github/workflows/*.yml,workflows/*.yml.template,tests/*,docs/knowledge/*,docs/postmortems/2026-10-21-failure-read-as-success.md,docs/lessons.jsonl
+**Intent:** Operator asked for an adversarial audit of v3.10.0-v3.10.4 and a fix for whatever else was off; a 7-lens ultrareview produced the findings, a synthesizer ranked them.
+**Knowledge:** A check that something fails or is refused must assert the exact exit code and message, because a crash or a timeout satisfies a test for any non-zero status. The release smoke's strict-lock step had passed on an import crash since v3.8.36, and the language gate turned failing node and go test runs into skips; the seven-lens review found both, and its synthesizer's priority order held up.
+**Outcome:** shipped-green
+

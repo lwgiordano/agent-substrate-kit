@@ -67,7 +67,7 @@ jobs:
       issues: write
     steps:
       - name: Open issue on audit failure
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         env:
           AUDIT_RESULT: ${{ needs.scheduled-audit.result }}
         with:

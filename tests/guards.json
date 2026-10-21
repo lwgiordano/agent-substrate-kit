@@ -1206,6 +1206,56 @@
         "tests/test_project_status.py::test_receipt_projects_and_brief_work_in_a_fresh_consumer"
       ],
       "why": "an installed project's status report names its own kit version as None"
+    },
+    {
+      "id": "audit-timeout-never-passes",
+      "file": "scripts/substrate_audit.py",
+      "find": "    if all(s in ('PASS','SKIP') for s in statuses): return 'PASS'\n",
+      "replace": "    if all(s in ('PASS','SKIP','TIMEOUT') for s in statuses): return 'PASS'\n",
+      "tests": [
+        "tests/test_hook_scripts.py::test_audit_timeout_is_its_own_status_and_never_a_pass"
+      ],
+      "why": "an audit whose pytest run never finished reports PASS"
+    },
+    {
+      "id": "audit-pytest-has-its-own-limit",
+      "file": "scripts/substrate_audit.py",
+      "find": "limit if is_pytest else QUICK_TIMEOUT",
+      "replace": "QUICK_TIMEOUT",
+      "tests": [
+        "tests/test_hook_scripts.py::test_audit_runs_pytest_under_its_own_limit_and_names_the_slowest_tests"
+      ],
+      "why": "the full suite is cut off by the 300 s check limit again"
+    },
+    {
+      "id": "scheduled-audit-can-open-its-issue",
+      "file": "workflows/scheduled-audit.yml.template",
+      "find": "      issues: write\n",
+      "replace": "",
+      "tests": [
+        "tests/test_doc_consistency.py::test_scheduled_audit_can_open_its_failure_issue"
+      ],
+      "why": "consumer audit failures are silent: the failure issue is refused with 403"
+    },
+    {
+      "id": "scheduled-audit-write-scope-only-in-alert-job",
+      "file": "workflows/scheduled-audit.yml.template",
+      "find": "    permissions:\n      contents: read\n    steps:\n",
+      "replace": "    permissions:\n      contents: read\n      issues: write\n    steps:\n",
+      "tests": [
+        "tests/test_doc_consistency.py::test_scheduled_audit_can_open_its_failure_issue"
+      ],
+      "why": "the job that runs repository code and tests also holds the issues write token"
+    },
+    {
+      "id": "scheduled-audit-alerts-when-cancelled",
+      "file": "workflows/scheduled-audit.yml.template",
+      "find": "    if: ${{ always() && needs.scheduled-audit.result != 'success' }}\n",
+      "replace": "    if: failure()\n",
+      "tests": [
+        "tests/test_doc_consistency.py::test_scheduled_audit_can_open_its_failure_issue"
+      ],
+      "why": "an audit cancelled by its time limit raises no alert"
     }
   ]
 }

@@ -118,7 +118,7 @@
         "scripts/prove_guards.py",
         "scripts/substrate_audit.py"
       ],
-      "last_human_reviewed": "2026-10-14",
+      "last_human_reviewed": "2026-10-20",
       "path": "docs/knowledge/05_evals_assurance.md",
       "purpose": "Behavioral evals, the malicious and benign corpus, and assurance limits."
     },

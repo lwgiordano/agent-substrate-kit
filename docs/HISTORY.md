@@ -446,3 +446,10 @@ This file is `merge=union` in `.gitattributes` so concurrent branch entries comb
 **Knowledge:** Consumers have no VERSION file; their kit version lives in .substrate/install.json, so any reader of the kit's own version needs that fallback. Running the published install path in an empty folder found what the in-repo suite did not, because every kit-side test had a VERSION file next to the scripts.
 **Outcome:** shipped-green
 
+## 2026-10-20T18:00:20Z — NO_SESSION — fd38c16
+**Summary:** v3.10.2: the scheduled audit can alert (least-privilege alert job, fires on failure or cancel) and a slow pytest run reports TIMEOUT under its own configurable limit instead of a test failure.
+**Files:** .github/workflows/scheduled-audit.yml,workflows/scheduled-audit.yml.template,scripts/substrate_audit.py,tests/test_hook_scripts.py,tests/test_doc_consistency.py,tests/guards.json,docs/knowledge/05_evals_assurance.md,docs/lessons.jsonl,VERSION,README.md,BENCHMARK.md
+**Intent:** Operator-approved fix for the failing scheduled audit (runs 39281571477 and 38289847594): its failure issue got HTTP 403 on every failing run, and pytest under a fixed 300 s cap passed or failed on runner speed alone.
+**Knowledge:** An alert path is part of the gate and must be proven to fire: the audit's issue step had no permission and was refused on every failure since September, so failures were silent. Keep the write scope out of the job that runs repository code, alert on cancellation as well as failure, and give a long suite its own limit with a TIMEOUT status that never reads as a pass.
+**Outcome:** shipped-green
+

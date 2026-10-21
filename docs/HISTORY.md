@@ -460,3 +460,10 @@ This file is `merge=union` in `.gitattributes` so concurrent branch entries comb
 **Knowledge:** Bump an action in the kit and its templates in the same commit, one action per commit, so CI isolates a breaking major; an action used only on a failure path (github-script in the alert job) needs a forced failure to be exercised at all. A check that could not run has verified nothing and must never count toward PASS.
 **Outcome:** shipped-green
 
+## 2026-10-21T12:46:20Z — NO_SESSION — 7bb7d0f
+**Summary:** v3.10.4: every GitHub Action in kit workflows and consumer templates is pinned to a commit SHA the kit's CI has run; audit output is redacted; the session-start sanitizer no longer hides a summary that names an action such as setup-node.
+**Files:** .github/CODEOWNERS,.github/workflows/*.yml,workflows/*.yml.template,scripts/session_handoff.py,scripts/substrate_audit.py,tests/test_hook_scripts.py,tests/test_doc_consistency.py,tests/test_project_status.py,tests/guards.json,docs/knowledge/01,02,03,05,06,07,08,09,10,VERSION,README.md,BENCHMARK.md
+**Intent:** Operator asked to fix every outstanding item from the v3.10.3 accounting: the sanitizer false positive, unpinned actions, end-of-life Node 20 in consumer CI, unredacted audit artifacts, 14 knowledge-narrative warnings, an inactive CODEOWNERS, and two end-to-end paths with no real test.
+**Knowledge:** Measure a safety filter against real data in both directions: a false positive hides the very facts it guards, and a carve-out wide enough to fix one can reopen what it blocked. The command filter hid the v3.10.3 summary over the word setup-node; the first carve-out also admitted a leading hyphen or at-sign before a tool name, and review narrowed it to a hyphen between word characters.
+**Outcome:** shipped-green
+

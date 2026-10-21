@@ -378,6 +378,14 @@ def test_receipt_projects_and_brief_work_in_a_fresh_consumer(tmp_path, profile):
     assert json.loads(status.stdout)["inspector"]["kit_version"] == row["kit"]["version"]
     assert row["git"]["dirty"] == "clean", "the receipt store must stay out of the working state"
     assert manage("receipt", "check", task_id, "--kind", "deploy").returncode == 2
+    # A real known check, end to end in the installed project: evals runs offline
+    # without setup and leaves the tree as it found it.
+    ran = manage("receipt", "check", task_id, "--kind", "evals", "--timeout", "600")
+    assert ran.returncode == 0, ran.stdout + ran.stderr
+    assert "evals passed (exit 0); state unchanged" in ran.stdout
+    evals = json.loads(manage("receipt", "show", task_id, "--json").stdout)["summary"]["checks"]
+    assert evals["evals"]["latest_outcome"] == "passed"
+    assert evals["evals"]["applies_to_current_state"] == "current"
     brief = manage("brief", "receipts", "--json")
     assert brief.returncode == 0, brief.stdout + brief.stderr
     assert json.loads(brief.stdout)["schema_version"] == 1
@@ -396,3 +404,37 @@ def test_release_package_excludes_every_local_state_store():
         assert f"/{store}/*'" in text, f"source hash includes {store}"
         assert f'"*/{store}/*"' in text, f"zip includes {store}"
         assert "/" + store.replace(".", "\\.") + "/" in hygiene, f"zip hygiene misses {store}"
+
+
+def test_release_package_really_leaves_out_local_state(tmp_path):
+    """v3.10.4: build a real package from a copy of the kit with a receipt and a
+    .superpowers note planted in it. Neither may be in the zip, and the recorded
+    source hash must equal the hash of a build without them."""
+    import shutil
+    import zipfile
+    if not (ROOT / "package_release.sh").exists():
+        pytest.skip("source-kit packaging")
+    if shutil.which("zip") is None:
+        pytest.skip("zip not installed")
+    kit = tmp_path / ROOT.name
+    shutil.copytree(ROOT, kit, ignore=shutil.ignore_patterns(
+        ".git", ".venv", "venv", "dist", "__pycache__", ".pytest_cache", ".ruff_cache",
+        "node_modules", "receipts", ".superpowers"))
+
+    def build():
+        proc = subprocess.run(["bash", "package_release.sh", "--smoke"], cwd=kit,
+                              capture_output=True, text=True, timeout=600)
+        assert proc.returncode == 0, proc.stdout[-2000:] + proc.stderr[-1000:]
+        manifest = json.loads((kit / "dist" / "RELEASE_MANIFEST.json").read_text())
+        [zip_path] = (kit / "dist").glob(f"{ROOT.name}-*.zip")
+        return manifest["source_tree_sha256"], zipfile.ZipFile(zip_path).namelist()
+
+    clean_hash, _ = build()
+    receipt = kit / ".substrate" / "receipts" / "11111111-1111-4111-8111-111111111111"
+    receipt.mkdir(parents=True)
+    (receipt / "task.json").write_text('{"planted": true}\n')
+    (kit / ".superpowers").mkdir()
+    (kit / ".superpowers" / "note.md").write_text("planted\n")
+    planted_hash, names = build()
+    assert not [n for n in names if ".substrate/receipts" in n or ".superpowers" in n]
+    assert planted_hash == clean_hash, "local state changed the release source hash"

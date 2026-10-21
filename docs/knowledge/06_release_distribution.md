@@ -1,6 +1,6 @@
 ---
 purpose: Release packaging, signing, manifests, and artifact verification.
-last_human_reviewed: 2026-10-14
+last_human_reviewed: 2026-10-21
 covers:
   - manage.sh
   - package_release.sh
@@ -12,6 +12,8 @@ covers:
   - scripts/update_manifest.py
   - scripts/verify_release.py
   - scripts/write_install_json.py
+asserts:
+  - workflows/release-keyless.yml.template::not SHA-verified
 ---
 
 # Release and distribution
@@ -31,6 +33,14 @@ tests remain in consumer repositories; `--dev-tests` opts into the full source
 self-test suite. Local state never ships: the memory chain, traces, work
 receipts (`.substrate/receipts/`) and execution scratch (`.superpowers/`) are
 left out of the source hash, the zip, and the zip-hygiene check.
+
+The kit's workflows and the consumer workflow templates pin every action to a
+full commit SHA, with its version as a comment (`uses: actions/checkout@<sha>
+# v7`), so moving a tag cannot change what a consumer's CI runs; Dependabot
+still proposes the bumps. Each pinned SHA is one the kit's own CI has run. The
+exception is `sigstore/cosign-installer` in the keyless release template: it
+never runs in the kit, so it stays on its tag, marked not SHA-verified, until
+an operator pins it to a commit they have checked. Node jobs run Node 24.
 
 `docs/manifest.json` is generated from source knowledge docs and ADRs. It is not
 hand-edited. `.substrate/install.json` is generated after render and records the
@@ -81,11 +91,11 @@ The gate's own trusted inputs are SNAPSHOTTED, not re-read. Comparing
 file for exactly as long as the loader reads, restore it, and both fingerprints
 match while the run carries the swapped values — so the gate copies the config to
 a private directory and loads FROM the copy. There is no window rather than a
-checked one. The config LOADER is treated the same way: it used to be sourced
-before any validator attested it, so a helper that acted during the trusted
-release and restored itself was clean by the time integrity checks looked. It is
-now copied, the validators run over the live tree, the live file is re-hashed to
-prove it is the one they saw, and the COPY is sourced. Memory presence is tested
+checked one. The config LOADER is treated the same way, because a loader sourced before
+any validator attests it could act during the trusted release and restore itself
+before integrity checks look. It is copied, the validators run over the live
+tree, the live file is re-hashed to prove it is the one they saw, and the COPY is
+sourced. Memory presence is tested
 with `-e`, not `-f`: `-f` is false for a FIFO, so a non-regular `events.jsonl`
 read as absent at both ends and every memory check was skipped while the gate
 passed. Present-but-not-regular is a refusal, as is a symlinked config.

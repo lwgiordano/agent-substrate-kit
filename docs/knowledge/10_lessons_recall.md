@@ -1,6 +1,6 @@
 ---
 purpose: Lessons with evidence, the record the chain attests, outcome labels, and recall.
-last_human_reviewed: 2026-10-14
+last_human_reviewed: 2026-10-21
 covers:
   - scripts/check_lessons.py
   - scripts/recall.py

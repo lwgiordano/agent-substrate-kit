@@ -58,6 +58,9 @@ KNOWLEDGE_ASSERTS = {
     "scripts/check_substrate_config.py::def parse_config_text",
     "scripts/substrate_audit.py::SUBSTRATE_AUDIT_PYTEST_TIMEOUT",
     "scripts/substrate_audit.py::'TIMEOUT'",
+    "scripts/substrate_audit.py::_redact(out)",
+    "scripts/session_handoff.py::(?<!\\w-)",
+    "workflows/release-keyless.yml.template::not SHA-verified",
     "workflows/scheduled-audit.yml.template::issues: write",
     "scripts/check_lessons.py::evidence_exists",
     "scripts/memory_log.py::record_units",
@@ -593,3 +596,37 @@ def test_scheduled_audit_can_open_its_failure_issue() -> None:
         for call in ("getLabel", "createLabel", "issues.create(", "createComment",
                      "pull_request", "github-actions[bot]"):
             assert call in script, f"{path.name}: alert step lacks {call}"
+
+
+def test_workflow_actions_are_pinned_to_commit_shas() -> None:
+    """v3.10.4: a tag such as `@v7` can be moved to different code by whoever controls
+    the action's repository. Every action the kit runs, and every action it installs in
+    consumers, is pinned to a full commit SHA with the version kept as a comment so
+    Dependabot can still propose updates. The one exception never runs in the kit, so
+    its SHA cannot be checked here; the template says so next to it."""
+    uses = re.compile(r"^[\s-]*uses:\s*(.*)$")
+    pinned = re.compile(r"""(["']?)[\w.-]+/[\w./-]+@[0-9a-f]{40}\1[ \t]+#[ \t]*v\d\S*""")
+    # Exactly this ref is exempt; any other ref of the same action is not.
+    unverifiable = {"sigstore/cosign-installer@v3"}
+    loose = []
+    paths = sorted([*(KIT / ".github" / "workflows").glob("*.yml"),
+                    *(KIT / ".github" / "workflows").glob("*.yaml"),
+                    *(KIT / "workflows").glob("*.template")])
+    assert len(paths) >= 10
+    seen = 0
+    for path in paths:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            m = uses.match(line)
+            if not m:
+                continue
+            seen += 1
+            value = m.group(1).strip()
+            if value.strip("\"'") in unverifiable:
+                continue
+            if not pinned.fullmatch(value):
+                loose.append(f"{path.name}: {value}")
+    assert seen >= 30
+    assert not loose, "actions not pinned to a commit SHA with a version comment:\n" + \
+        "\n".join(loose)
+    keyless = (KIT / "workflows" / "release-keyless.yml.template").read_text(encoding="utf-8")
+    assert "not SHA-verified" in keyless

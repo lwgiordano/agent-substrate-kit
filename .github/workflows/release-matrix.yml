@@ -20,8 +20,8 @@ jobs:
         profile: [starter, standard, strict]
         lang: [python, node, go, none]
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with: {python-version: "3.11"}
       - name: Bootstrap ${{ matrix.profile }}/${{ matrix.lang }}
         run: |
@@ -57,12 +57,12 @@ jobs:
           - {profile: strict,        lang: none}   # strict-LOCAL: check passes with NO CODEOWNERS (decoupled, v3.6.0)
           - {profile: strict+remote, lang: none}   # remote tier: CODEOWNERS coverage REQUIRED
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with: {python-version: "3.11"}
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         if: ${{ matrix.lang == 'node' }}
-        with: {node-version: "20"}
+        with: {node-version: "24"}
       - name: Bootstrap + setup + check
         run: |
           set -euo pipefail
@@ -107,7 +107,7 @@ jobs:
       pull-requests: write   # comment upsert only — no checkout, no code access
       checks: read           # report sibling check-run states as facts
     steps:
-      - uses: actions/github-script@v9
+      - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         with:
           script: |
             const marker = '<!-- pr-green-notify -->';

@@ -22,9 +22,8 @@ anchor is what bounds that — the chain head recorded in a git note
 recorded hash to be a MEMBER of the current, link-verified chain. Growth after
 anchoring passes; a chain replaced wholesale by a different valid chain, or
 truncated past the anchor, fails; no anchor anywhere in the ancestry fails
-closed with the remedy named. (It once demanded EQUALITY, so a single append
-read as "rewritten", and the gate hedged around that until absence failed
-open — found by being hit; see the postmortem.) Strict requires an anchor
+closed with the remedy named. (Requiring EQUALITY instead would read a
+single append as "rewritten"; see the postmortem.) Strict requires an anchor
 unconditionally, every release writes one, and the first strict release needs a
 one-time `./manage.sh memory anchor` as the human-established trust root.
 `substrate_doctor` delegates to the same verifier, so "anchor valid" has one

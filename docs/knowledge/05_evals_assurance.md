@@ -19,6 +19,7 @@ covers:
 asserts:
   - scripts/substrate_audit.py::SUBSTRATE_AUDIT_PYTEST_TIMEOUT
   - scripts/substrate_audit.py::'TIMEOUT'
+  - scripts/substrate_audit.py::_redact(out)
   - workflows/scheduled-audit.yml.template::issues: write
 ---
 
@@ -44,7 +45,10 @@ each. The pytest run has its own limit, 1200 seconds by default, set with
 `SUBSTRATE_AUDIT_PYTEST_TIMEOUT` (whole seconds, 60 to 1800); any other value
 stops the audit rather than falling back to the default. The pytest check asks
 for the 15 slowest tests and prints them, so a report shows whether one test or
-the whole suite is slow.
+the whole suite is slow. Each check's command line and output pass through
+`redact_secrets` before they are printed or stored, because the scheduled
+workflow prints them to the CI log and uploads the report. Redaction is
+pattern-based: a value in a shape it does not know still passes.
 
 The scheduled-audit workflow (kit and consumer template) runs `full-audit`
 weekly and on manual dispatch, where an optional `pytest_timeout` input reaches
@@ -167,10 +171,10 @@ the anchor-conflict semantics turned one setup into a non-conflict. Read the ski
 lines on any release that changes a semantic the corpus depends on.
 
 A detection task needs a companion asking whether the detection can be ERASED.
-`memory_anchor_mismatch_detected` proved a replaced memory chain was caught, and
-that stayed true while the finding could be undone by re-running the shipped
-`anchor` command over the replacement — the round-34 P1. `memory_anchor_relaunder_blocked`
-covers the escalation. Where a gate records its own verdict somewhere writable,
+`memory_anchor_mismatch_detected` proves a replaced memory chain is caught, and
+that alone stays true while the finding can be undone by re-running the shipped
+`anchor` command over the replacement. `memory_anchor_relaunder_blocked` covers
+that escalation. Where a gate records its own verdict somewhere writable,
 assume an attacker's next move is against the record, and put that move in the
 corpus too.
 

@@ -26,6 +26,12 @@ except Exception:  # pragma: no cover - stripped install
     def _safe_mkdir(*a, **k):
         raise OSError("safe_mkdir unavailable — refusing an unguarded mkdir")
 
+try:
+    from _doc_common import redact_secrets as _redact
+except Exception:  # pragma: no cover - stripped install
+    def _redact(text):
+        raise OSError("redact_secrets unavailable — refusing to store unredacted output")
+
 ROOT=Path.cwd()
 # Every check gets a bounded run. The full pytest suite runs close to five minutes
 # on a hosted runner, so a fixed 300 s cap turned ordinary runner variance into
@@ -57,7 +63,9 @@ def run(cmd,timeout=QUICK_TIMEOUT):
         out=f'did not finish within {timeout} s; partial output follows\n{partial}'.strip()
     except Exception as e: rc=1; status='BLOCK'; out=str(e)
     end=datetime.now(UTC).replace(microsecond=0).isoformat().replace('+00:00','Z')
-    return {'cmd':cmd,'returncode':rc,'status':status,'timeout_seconds':timeout,'output':out,'started':start,'finished':end}
+    # The output is printed to the CI log and stored in the uploaded report, so
+    # known key and token shapes are replaced before either sees it (v3.10.4).
+    return {'cmd':_redact(list(cmd)),'returncode':rc,'status':status,'timeout_seconds':timeout,'output':_redact(out),'started':start,'finished':end}
 def final_status(checks):
     """PASS only when every check ran and passed. A check that timed out or could not
     run (its tool is missing) is not verified, so it never reads as a pass."""
@@ -116,7 +124,7 @@ def main():
             # NOT-RUN, never a pass (it used to be SKIP with returncode 0).
             print('NOT-RUN: '+cmd[1]); checks.append({'cmd':['not-run'],'returncode':127,'status':'NOT-RUN','output':'not run: '+cmd[1],'started':'','finished':''}); continue
         is_pytest=Path(cmd[0]).name=='pytest'
-        r=run(cmd,limit if is_pytest else QUICK_TIMEOUT); checks.append(r); print(r['status']+': '+' '.join(cmd))
+        r=run(cmd,limit if is_pytest else QUICK_TIMEOUT); checks.append(r); print(r['status']+': '+' '.join(r['cmd']))
         if r['returncode'] and r['output']: print(r['output'][-2000:])
         elif is_pytest and _durations(r['output']): print(_durations(r['output']))
     final=final_status(checks); report={'mode':a.mode,'final':final,'generated_at':datetime.now(UTC).replace(microsecond=0).isoformat().replace('+00:00','Z'),'checks':checks}

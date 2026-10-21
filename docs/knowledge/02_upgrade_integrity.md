@@ -3,7 +3,7 @@ purpose: Upgrade provenance, authority floors, transactions, and postconditions.
 asserts:
   - scripts/substrate_upgrade.py::_exec_module_from_source
   - scripts/substrate_upgrade.py::_apply_capability_floor
-last_human_reviewed: 2026-10-14
+last_human_reviewed: 2026-10-21
 covers:
   - bootstrap.sh
   - manage.sh
@@ -36,7 +36,7 @@ dependency closure are pinned before use.
 Private loaders read, compile, and execute the verified source bytes directly.
 They do not use normal import bytecode lookup, so ignored unchecked `.pyc` files
 cannot substitute different executable code for a hashed source file. That read
-is itself guarded (v3.8.47): it is the highest-value read in the kit, because
+is itself guarded: it is the highest-value read in the kit, because
 the bytes it returns are compiled and RUN, so a symlinked or hard-linked engine
 module would execute outside code with the upgrader's privileges. An unsafe or
 unreadable source refuses rather than executing. Temporary module bindings and
@@ -96,7 +96,7 @@ answers. Render values come from that snapshot, not from agent-writable install
 provenance. Profile, sandbox, and remote-governance floors never move downward;
 language and runner come from validated live config.
 
-A profile RAISE rewrites every `SUBSTRATE_PROFILE` assignment in the config, not the first one. The loader takes the LAST assignment, so a first-match rewrite left a later duplicate winning and the raise silently not in force (v3.8.57). See [policy and governance](04_policy_governance.md) for the one canonical reader every consumer of that key uses.
+A profile RAISE rewrites every `SUBSTRATE_PROFILE` assignment in the config, not the first one. The loader takes the LAST assignment, so a first-match rewrite would leave a later duplicate winning and the raise silently not in force. See [policy and governance](04_policy_governance.md) for the one canonical reader every consumer of that key uses.
 
 Authority is re-read before mutation and after restore. A concurrent raise is
 preserved and makes the upgrade fail so the operator can rerun with a consistent

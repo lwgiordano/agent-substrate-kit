@@ -215,7 +215,9 @@ def _strip_quotes_checked(raw: str, key: str):
 # (other than tab, the line break and a CR right before it) are refused anywhere;
 # outside comment lines only printable ASCII is allowed. _substrate_config.sh
 # applies the same rule.
-_CONFIG_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+# NEL, LS and PS too: str.splitlines() readers break lines on them even inside a
+# comment, where the shell and this parser do not (v3.10.5 audit).
+_CONFIG_CONTROL = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\x85\u2028\u2029]")
 _CONFIG_DATA_LINE = re.compile(r"[\t\x20-\x7e]*\r?")
 
 

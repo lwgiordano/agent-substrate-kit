@@ -119,15 +119,23 @@ def _base_commit(git_try) -> tuple[str, str] | None:
     --no-verify passed as imported. An entry is imported only if the base branch
     already had it: the PR's base in Actions, else origin's default branch."""
     wanted = []
-    base_ref = os.environ.get("GITHUB_BASE_REF", "").strip()
-    if base_ref and re.fullmatch(r"[A-Za-z0-9._/-]{1,200}", base_ref) and ".." not in base_ref:
-        wanted.append(f"refs/remotes/origin/{base_ref}")
+    for name in (os.environ.get("SUBSTRATE_HISTORY_BASE", ""), os.environ.get("GITHUB_BASE_REF", "")):
+        name = name.strip()
+        if name and re.fullmatch(r"[A-Za-z0-9._/-]{1,200}", name) and ".." not in name \
+                and not name.startswith("-"):
+            wanted.append(f"refs/remotes/origin/{name}")
     wanted += ["refs/remotes/origin/HEAD", "refs/remotes/origin/main", "refs/remotes/origin/master"]
     for ref in wanted:
         tip = git_try("rev-parse", "--verify", "-q", f"{ref}^{{commit}}")
         if tip:
             base = git_try("merge-base", "HEAD", tip.strip())
-            return (base.strip(), ref) if base else None
+            if not base:
+                # Unknown is not "everything at HEAD is imported" (v3.10.5 audit).
+                raise ValueError(f"HEAD shares no history with {ref}")
+            return base.strip(), ref
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        raise ValueError("no base branch to compare HISTORY with in CI; "
+                         "set SUBSTRATE_HISTORY_BASE to the base branch name")
     return None
 
 
@@ -499,6 +507,7 @@ def main() -> int:
     # append_history still writes one on every entry.
     n_outcome = n_unverifiable = n_locally_verified = n_invalid = 0
     imported = at_head = base_ref = None
+    base_headers: set[str] = set()
     pending: list[str] = []
     has_chain = os.path.lexists(_REPO / ".substrate" / "memory" / "events.jsonl")
     units = _entry_units(text)
@@ -532,13 +541,23 @@ def main() -> int:
                     if imported is None:
                         try:
                             imported, at_head, base_ref = _committed_history_entries()
+                            base_headers = ({u.split("\n", 1)[0] for u in imported}
+                                            if at_head is not None else set())
                         except (OSError, ValueError, subprocess.SubprocessError) as exc:
                             print("check-history-sha: cannot read committed HISTORY provenance "
-                                  f"({type(exc).__name__})", file=sys.stderr)
+                                  f"({type(exc).__name__}: {str(exc)[:200]})".replace("::", ": :"),
+                                  file=sys.stderr)
                             return 2
                     if imported[units[i]] > 0:
                         imported[units[i]] -= 1
                         n_unverifiable += 1
+                        continue
+                    if units[i].split("\n", 1)[0] in base_headers:
+                        # HISTORY is append-only: the base already has an entry with
+                        # this header and different text (v3.10.5 audit).
+                        n_invalid += 1
+                        findings.append(f"{ts}: edits a shipped-green entry already on "
+                                        f"{base_ref}; HISTORY entries are never edited")
                         continue
                     if at_head is not None and at_head[units[i]] > 0 and not has_chain:
                         # New on this branch, in a checkout that cannot hold release

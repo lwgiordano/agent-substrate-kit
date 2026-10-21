@@ -167,7 +167,9 @@ default, and lock or I/O failure maps to each CLI's existing nonzero contract.
 
 The completion gate is opt-in. It compares the current repository state with the
 session-start baseline and checks whether a verified self-audit event occurred
-after the last project change. It warns by default; it does not turn an
+after the last project change: one written by `memory skill-run self-audit
+--verify`, which runs the validator chain itself. `skill-run` is a reserved
+event type, so `memory append` cannot write one. It warns by default; it does not turn an
 agent-authored note into proof or silently claim that unfinished work is done.
 Its evidence read is guarded like every other reader, because evidence sourced
 through a link is a gate bypass: a hard-linked `events.jsonl` pointing at an

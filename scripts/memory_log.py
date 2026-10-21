@@ -253,7 +253,10 @@ def append(etype: str, data) -> int:
 RECORD_FILES = ("docs/HISTORY.md", "docs/REJECTED.md", "docs/lessons.jsonl")
 # Written only by their own code paths; `append --type` refuses them so the CLI
 # cannot mint evidence the gates later read as authoritative.
-RESERVED_TYPES = frozenset({"record", "release-pass", "anchor-forced"})
+# skill-run is written only by `memory skill-run`, which computes `verified`
+# itself; a raw `append --type skill-run` could claim a verified self-audit and
+# silence the completion nudge (v3.10.5).
+RESERVED_TYPES = frozenset({"record", "release-pass", "anchor-forced", "skill-run"})
 
 
 def record_units(relpath: str, text: str) -> list[str]:

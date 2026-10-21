@@ -31,8 +31,10 @@ fingerprint from `_task_evidence.git_facts`. Task, note, author and review
 text pass the context filter that guards session start; text it would withhold
 (a shell tool name standing as a word of its own, `$(`, a backtick, an
 instruction-like lead) is refused with a request to rephrase, never stored as a
-placeholder. Paths and branch names are facts, not prose: they get the terminal
-and credential filters only, so a root under `.../node/` stays readable. Every
+placeholder. Paths and branch names are facts, not prose: they skip the
+command-word filter, so a root under `.../node/` stays readable, but the
+instruction and role filters still apply, and a path with a space in it reads
+as prose and gets the full filter. Every
 later record is a new file
 named `<time_ns>-<id>-<kind>.json`; nothing is overwritten, at most 1000 records
 fit one task, each record is capped at 64 KiB, and the store is reached through
@@ -55,8 +57,9 @@ variables are never stored, and the check runs without inherited `GIT_*`
 variables so it cannot be pointed at a different repository than the one
 fingerprinted, nor with `SKIP`, `PRE_COMMIT_ALLOW_NO_CONFIG`, `PYTEST_ADDOPTS` or
 `PYTEST_PLUGINS`, so the caller's shell cannot trim which hooks or tests run.
-The credential-line match reads the first 1000 characters of a line; the excerpt
-never shows more than 500. A timeout (1 to 7200 seconds, default 1800) sends TERM to the
+The credential-line match reads the first 1000 characters of a line as it will
+be displayed (invisible characters and markup removed, whitespace collapsed), so
+padding cannot push a value past it; the excerpt never shows more than 500. A timeout (1 to 7200 seconds, default 1800) sends TERM to the
 whole group, waits five seconds, then KILLs the whole group regardless, so
 children that ignore TERM die too. When the check exits on its own, group
 members it left behind are KILLed before the leader is reaped (where

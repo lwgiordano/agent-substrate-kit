@@ -39,6 +39,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _doc_common import GuardRefusal, open_dir_chain, safe_atomic_write, safe_read_bytes
 from _task_evidence import (clip_bytes, git, git_facts, harden_path, json_text, now, safe_fact,
                             safe_text, trusted_executable)
+from session_handoff import _INVISIBLE_CHARS, _strip_html
 from session_handoff import _STRIPPED_HISTORY as _STRIPPED
 
 SCHEMA = 1
@@ -65,9 +66,11 @@ _HARNESS_DIRS = ("scripts/", ".substrate/")
 # user:password part, HTTP authorization values, and everything inside a PEM
 # block. `::` is not an assignment, so pytest node ids stay visible.
 # Quantifiers are bounded and each line is matched on its first CREDENTIAL_SCAN
-# characters only (v3.10.5): unbounded `[a-z0-9_.-]*` runs were quadratic, and a
-# 64 KB minified line stalled `--excerpt` for minutes. The excerpt keeps at most
-# 500 characters of a line, so nothing past the scanned prefix is ever shown.
+# characters AS DISPLAYED (v3.10.5): invisible characters and markup removed and
+# whitespace collapsed, exactly as the sanitizer that shows it does, so padding
+# cannot push a value past the scanned prefix. Unbounded `[a-z0-9_.-]*` runs were
+# quadratic: a 64 KB minified line stalled `--excerpt` for minutes. The excerpt
+# shows at most 500 characters of a line.
 CREDENTIAL_SCAN = 1000
 _CREDENTIAL_LINE = re.compile(
     r"(?i)([\"']?[a-z0-9_.-]{0,64}(key|secret|token|passw(or)?d|passwd|pwd|credential|auth|cookie)"
@@ -260,7 +263,8 @@ def _excerpt(tail: bytes) -> str:
             in_pem = not _PEM_END.search(line)
             withheld += 1
             continue
-        if _CREDENTIAL_LINE.search(line[:CREDENTIAL_SCAN]):
+        shown = " ".join(_strip_html(_INVISIBLE_CHARS.sub("", line)).split())
+        if _CREDENTIAL_LINE.search(shown[:CREDENTIAL_SCAN]):
             withheld += 1
             continue
         clean = safe_text(line, 500) if line.strip() else ""

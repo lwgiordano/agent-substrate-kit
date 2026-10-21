@@ -1119,7 +1119,7 @@
     {
       "id": "receipt-reports-harness-changes",
       "file": "scripts/task_receipt.py",
-      "find": "    harness = _harness_changed(before)\n",
+      "find": "    harness = _harness_changed(before, since=start_head, root=root)\n",
       "replace": "    harness = []\n",
       "tests": [
         "tests/test_task_receipt.py::test_a_check_run_on_modified_gate_files_says_so"
@@ -1129,7 +1129,7 @@
     {
       "id": "receipt-withholds-credential-lines",
       "file": "scripts/task_receipt.py",
-      "find": "        if _CREDENTIAL_LINE.search(line):\n",
+      "find": "        if _CREDENTIAL_LINE.search(shown[:CREDENTIAL_SCAN]):\n",
       "replace": "        if False:\n",
       "tests": [
         "tests/test_task_receipt.py::test_credential_shaped_lines_and_key_blocks_are_withheld_from_excerpts"
@@ -1333,8 +1333,8 @@
     {
       "id": "shell-loader-refuses-control-bytes",
       "file": "scripts/_substrate_config.sh",
-      "find": "  if [ \"$(LC_ALL=C tr -d '\\11\\12\\15\\40-\\176\\200-\\377' < \"$cfg\" | wc -c | tr -d ' ')\" != \"0\" ]; then\n",
-      "replace": "  if false; then\n",
+      "find": "  if [ \"$(LC_ALL=C tr -d '\\11\\12\\15\\40-\\176\\200-\\377' < \"$cfg\" | wc -c | tr -d ' ')\" != \"0\" ] \\\n",
+      "replace": "  if false \\\n",
       "tests": [
         "tests/test_hook_scripts.py::test_config_loaders_accept_and_refuse_the_same_bytes"
       ],

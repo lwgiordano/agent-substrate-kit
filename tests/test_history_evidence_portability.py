@@ -224,7 +224,8 @@ def test_without_a_chain_a_new_claim_is_named_for_review_not_imported(tmp_path, 
     import os as _os
     result = subprocess.run([sys.executable, "-I", str(root / "scripts" / "check_history_sha.py")],
                             cwd=root, capture_output=True, text=True, timeout=60,
-                            env={**{k: v for k, v in _os.environ.items() if not k.startswith("GIT_")},
+                            env={**{k: v for k, v in _os.environ.items()
+                                    if not k.startswith("GIT_")},
                                  "SUBSTRATE_PROJECT_DIR": str(root)})
     assert result.returncode == 0, result.stdout + result.stderr
     assert "1 imported-unverified" in result.stdout and "1 new-unverified" in result.stdout
@@ -254,3 +255,41 @@ def test_a_release_pass_on_a_dirty_tree_cannot_claim_a_clean_start(tmp_path):
     result = run("append_history.py", *_hist_args(sha, "shipped-green"))
     assert result.returncode == 1 and "DIRTY tree" in result.stderr
 
+
+def test_a_verified_self_audit_cannot_be_appended_by_hand(tmp_path):
+    """v3.10.5 audit: `memory append --type skill-run` wrote a verified self-audit
+    and silenced the completion nudge."""
+    root, git, memory, run = _record_repo(tmp_path)
+    result = memory("append", "--type", "skill-run", "--message", "audited")
+    assert result.returncode != 0 and "reserved" in (result.stdout + result.stderr).lower()
+
+
+def test_an_unrelated_or_missing_base_is_an_error_not_an_import(tmp_path, monkeypatch):
+    """v3.10.5 audit: a merge-base failure, or no base in CI, fell back to "everything
+    committed at HEAD is imported"."""
+    root, git, memory, run, path, original, sha = _imported(tmp_path)
+    branch = git("rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+    assert git("checkout", "-q", "--orphan", "other").returncode == 0
+    assert git("commit", "-qm", "unrelated root").returncode == 0
+    assert git("update-ref", "refs/remotes/origin/main", "HEAD").returncode == 0
+    assert git("checkout", "-q", branch).returncode == 0
+    result = run("check_history_sha.py")
+    assert result.returncode == 2 and "shares no history" in result.stderr
+    assert git("update-ref", "-d", "refs/remotes/origin/main").returncode == 0
+    import os as _os
+    env = {**{k: v for k, v in _os.environ.items() if not k.startswith("GIT_")},
+           "SUBSTRATE_PROJECT_DIR": str(root), "GITHUB_ACTIONS": "true"}
+    result = subprocess.run([sys.executable, "-I", str(root / "scripts" / "check_history_sha.py")],
+                            cwd=root, capture_output=True, text=True, timeout=60, env=env)
+    assert result.returncode == 2 and "SUBSTRATE_HISTORY_BASE" in result.stderr
+
+
+def test_editing_an_entry_already_on_the_base_is_a_finding_even_without_a_chain(tmp_path):
+    """v3.10.5 audit: an edited OLD shipped-green entry only drew a new-unverified
+    warning in CI; HISTORY is append-only."""
+    root, git, memory, run, path, original, sha = _imported(tmp_path)
+    assert git("update-ref", "refs/remotes/origin/main", "HEAD").returncode == 0
+    path.write_text(original.replace("imported release", "a rewritten release"), encoding="utf-8")
+    assert git("commit", "-qam", "edit an old entry").returncode == 0
+    result = run("check_history_sha.py")
+    assert result.returncode == 1 and "never edited" in result.stderr

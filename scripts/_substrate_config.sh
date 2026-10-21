@@ -61,7 +61,9 @@ load_substrate_config() {
   # comment lines only printable ASCII. One grep per check on the file itself — no
   # pipe, so an early `grep -q` exit can never be lost to pipefail.
   local _cr; _cr="$(printf '\r')"
-  if [ "$(LC_ALL=C tr -d '\11\12\15\40-\176\200-\377' < "$cfg" | wc -c | tr -d ' ')" != "0" ]; then
+  if [ "$(LC_ALL=C tr -d '\11\12\15\40-\176\200-\377' < "$cfg" | wc -c | tr -d ' ')" != "0" ] \
+     || LC_ALL=C grep -q -e "$(printf '\302\205')" -e "$(printf '\342\200\250')" \
+                         -e "$(printf '\342\200\251')" "$cfg"; then
     echo "substrate-config: control character in $cfg" >&2; return 2
   fi
   if LC_ALL=C grep -q -e "^[[:blank:]]*[^#[:blank:]].*[^[:print:][:blank:]$_cr]" \

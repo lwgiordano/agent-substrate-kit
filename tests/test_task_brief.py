@@ -110,8 +110,8 @@ def test_malformed_local_lesson_yields_diagnostic_not_brief_crash(project, trigg
     report = api().build(project, "receipts", ["scripts/storage.py"], 6000)
     assert any(x.get("id") == "L1" for x in report["evidence"])
     # v3.10.5: the bad record is reported; the good one is not dropped with it.
-    assert any("Keep the good lesson" in x["body"] for x in api("recall").collect(project)
-               for x in [dict(zip(("path", "line", "title", "body"), x))])
+    assert any("Keep the good lesson" in body
+               for _path, _line, _title, body in api("recall").collect(project))
     assert any(x["code"] == "malformed-source" and x["path"] == "docs/lessons.jsonl"
                for x in report["diagnostics"])
     assert api("recall").collect(project)  # legacy renderer shares the safe collector

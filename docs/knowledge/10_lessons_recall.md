@@ -119,7 +119,10 @@ request's base in Actions (`GITHUB_BASE_REF`), else origin's default branch,
 taken at its merge-base with HEAD and, during a merge, with each resolved
 MERGE_HEAD parent; a clone with no origin falls back to what HEAD commits. In
 CI, HEAD contains the pull request itself, so "committed" alone let a forged
-entry pass. Shared entries cannot authorize extra duplicates. Git failures refuse
+entry pass. A base that shares no history with HEAD, or no base at all in
+Actions, is an error (exit 2), never a fallback; `SUBSTRATE_HISTORY_BASE` names
+a base branch that is not `main` or `master`. A committed entry whose header is
+already on the base with different text is an edit and fails. Shared entries cannot authorize extra duplicates. Git failures refuse
 the comparison. This is provenance for a reported historical claim, not proof
 that the claim was true or reviewed. A new or edited success entry needs local
 proof wherever a chain exists, even once committed. A checkout with no chain at

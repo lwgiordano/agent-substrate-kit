@@ -1210,12 +1210,13 @@
     {
       "id": "audit-timeout-never-passes",
       "file": "scripts/substrate_audit.py",
-      "find": "    if all(s in ('PASS','SKIP') for s in statuses): return 'PASS'\n",
-      "replace": "    if all(s in ('PASS','SKIP','TIMEOUT') for s in statuses): return 'PASS'\n",
+      "find": "    if all(s=='PASS' for s in statuses): return 'PASS'\n",
+      "replace": "    if all(s in ('PASS','TIMEOUT','NOT-RUN') for s in statuses): return 'PASS'\n",
       "tests": [
-        "tests/test_hook_scripts.py::test_audit_timeout_is_its_own_status_and_never_a_pass"
+        "tests/test_hook_scripts.py::test_audit_timeout_is_its_own_status_and_never_a_pass",
+        "tests/test_hook_scripts.py::test_full_audit_without_its_test_tools_is_not_a_pass"
       ],
-      "why": "an audit whose pytest run never finished reports PASS"
+      "why": "an audit whose pytest run timed out or never ran reports PASS"
     },
     {
       "id": "audit-pytest-has-its-own-limit",

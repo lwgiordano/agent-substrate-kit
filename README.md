@@ -42,7 +42,9 @@ bash /path/to/agent_substrate_kit_v3/bootstrap.sh --profile standard --lang auto
 | 4-field bug-fix commit protocol + postmortem-per-bugfix hooks | — | — | yes |
 | Extras (calibration, stale-phrases, license headers) | — | — | yes |
 
-## Current status (v3.10.2)
+## Current status (v3.10.3)
+
+**v3.10.3** — current GitHub Actions in the kit and in what it installs: github-script 9, setup-python 7 and setup-node 7, bumped in the kit's workflows and the consumer templates together. `./manage.sh full-audit` without pytest or pre-commit in `.substrate/venv` now reports NOT-RUN and fails, where it used to skip them and pass having run no tests.
 
 **v3.10.2** — the scheduled audit can alert, and a slow run is named as one. Its failure issue was refused (HTTP 403) on every failing run because the workflow declared no permissions. A separate job that runs no repository code now holds the only `issues: write` scope, fires whenever the audit does not succeed (cancelled included), creates its label, and comments on its open issue instead of duplicating it; the audit job itself can only read. The audit's pytest run gets its own limit (1200 s by default, `SUBSTRATE_AUDIT_PYTEST_TIMEOUT`), a run that does not finish reports TIMEOUT rather than a test failure or a pass, and each report lists the slowest tests.
 

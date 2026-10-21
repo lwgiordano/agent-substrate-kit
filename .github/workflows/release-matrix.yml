@@ -107,7 +107,7 @@ jobs:
       pull-requests: write   # comment upsert only — no checkout, no code access
       checks: read           # report sibling check-run states as facts
     steps:
-      - uses: actions/github-script@v7
+      - uses: actions/github-script@v9
         with:
           script: |
             const marker = '<!-- pr-green-notify -->';

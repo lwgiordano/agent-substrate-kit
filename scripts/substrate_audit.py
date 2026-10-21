@@ -59,10 +59,13 @@ def run(cmd,timeout=QUICK_TIMEOUT):
     end=datetime.now(UTC).replace(microsecond=0).isoformat().replace('+00:00','Z')
     return {'cmd':cmd,'returncode':rc,'status':status,'timeout_seconds':timeout,'output':out,'started':start,'finished':end}
 def final_status(checks):
-    """PASS only when every check passed or was skipped; a timeout never reads as a pass."""
+    """PASS only when every check ran and passed. A check that timed out or could not
+    run (its tool is missing) is not verified, so it never reads as a pass."""
     statuses=[c.get('status','PASS' if c['returncode']==0 else 'BLOCK') for c in checks]
-    if all(s in ('PASS','SKIP') for s in statuses): return 'PASS'
-    return 'BLOCK' if 'BLOCK' in statuses else 'TIMEOUT'
+    if all(s=='PASS' for s in statuses): return 'PASS'
+    for s in ('BLOCK','TIMEOUT','NOT-RUN'):
+        if s in statuses: return s
+    return 'BLOCK'
 def _durations(output):
     """The slowest-tests block pytest prints, so every report says whether one
     test or the whole suite is slow."""
@@ -87,9 +90,9 @@ def plan(mode):
     full=list(quick)
     pt=_subvenv_bin('pytest'); pc=_subvenv_bin('pre-commit')
     if pt: full.append([pt,'tests/','-q','--durations=15'])
-    else: full.append(['__skip__','pytest not in .substrate/venv — run ./manage.sh setup'])
+    else: full.append(['__not_run__','pytest not in .substrate/venv — run ./manage.sh setup'])
     if pc: full.append([pc,'run','--all-files','--show-diff-on-failure'])
-    else: full.append(['__skip__','pre-commit not in .substrate/venv — run ./manage.sh setup'])
+    else: full.append(['__not_run__','pre-commit not in .substrate/venv — run ./manage.sh setup'])
     return full
 def write_report(report):
     stamp=datetime.now(UTC).strftime('%Y-%m-%dT%H%M%SZ'); outdir=ROOT/'ai'/'audits'/stamp; _safe_mkdir(outdir, ROOT)
@@ -108,8 +111,10 @@ def main():
         print(f'substrate-audit: {e}', file=sys.stderr); return 2
     checks=[]
     for cmd in plan(a.mode):
-        if cmd and cmd[0]=='__skip__':
-            print('SKIP: '+cmd[1]); checks.append({'cmd':['skip'],'returncode':0,'status':'SKIP','output':'skipped: '+cmd[1],'started':'','finished':''}); continue
+        if cmd and cmd[0]=='__not_run__':
+            # A full audit without its test tools has verified nothing about tests:
+            # NOT-RUN, never a pass (it used to be SKIP with returncode 0).
+            print('NOT-RUN: '+cmd[1]); checks.append({'cmd':['not-run'],'returncode':127,'status':'NOT-RUN','output':'not run: '+cmd[1],'started':'','finished':''}); continue
         is_pytest=Path(cmd[0]).name=='pytest'
         r=run(cmd,limit if is_pytest else QUICK_TIMEOUT); checks.append(r); print(r['status']+': '+' '.join(cmd))
         if r['returncode'] and r['output']: print(r['output'][-2000:])

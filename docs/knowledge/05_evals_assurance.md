@@ -1,6 +1,6 @@
 ---
 purpose: Behavioral evals, the malicious and benign corpus, and assurance limits.
-last_human_reviewed: 2026-10-20
+last_human_reviewed: 2026-10-21
 covers:
   - manage.sh
   - extras/calibrate_diy_ultrareview.py
@@ -37,8 +37,9 @@ and any required containment task actually runs.
 
 `manage.sh audit` runs the quick validators; `manage.sh full-audit` adds the
 full pytest suite and `pre-commit run --all-files`. Each check reports PASS,
-BLOCK or TIMEOUT. TIMEOUT means the check did not finish: its partial output is
-kept, and the audit's final result is never PASS. Quick checks have 300 seconds
+BLOCK, TIMEOUT or NOT-RUN. TIMEOUT means the check did not finish: its partial
+output is kept. NOT-RUN means its tool is missing from `.substrate/venv` (run
+`./manage.sh setup`). Either way the audit's final result is never PASS. Quick checks have 300 seconds
 each. The pytest run has its own limit, 1200 seconds by default, set with
 `SUBSTRATE_AUDIT_PYTEST_TIMEOUT` (whole seconds, 60 to 1800); any other value
 stops the audit rather than falling back to the default. The pytest check asks

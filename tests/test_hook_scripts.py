@@ -14950,8 +14950,10 @@ def test_audit_timeout_is_its_own_status_and_never_a_pass() -> None:
     assert (ok["status"], bad["status"]) == ("PASS", "BLOCK")
     assert audit.final_status([ok, r]) == "TIMEOUT"
     assert audit.final_status([r, bad]) == "BLOCK"
-    skipped = {"cmd": ["skip"], "returncode": 0, "status": "SKIP"}
-    assert audit.final_status([ok, skipped]) == "PASS"
+    assert audit.final_status([ok, ok]) == "PASS"
+    not_run = {"cmd": ["not-run"], "returncode": 127, "status": "NOT-RUN"}
+    assert audit.final_status([ok, not_run]) == "NOT-RUN"
+    assert audit.final_status([not_run, r]) == "TIMEOUT"
 
 
 def test_audit_pytest_limit_is_configurable_and_fails_closed(monkeypatch, capsys) -> None:
@@ -15004,3 +15006,22 @@ def test_audit_runs_pytest_under_its_own_limit_and_names_the_slowest_tests(
     assert audit.main() == 0
     out = capsys.readouterr().out
     assert "PASS: " in out and "9.00s call     tests/test_x.py::test_slow" in out
+
+
+def test_full_audit_without_its_test_tools_is_not_a_pass(tmp_path, monkeypatch, capsys) -> None:
+    """v3.10.3: with no pytest or pre-commit in .substrate/venv, full-audit used to print
+    SKIP with returncode 0 and finish PASS, a green audit that ran no tests. Each missing
+    tool is now NOT-RUN and the audit fails."""
+    audit = _audit_module()
+    monkeypatch.setattr(audit, "ROOT", tmp_path)
+    monkeypatch.delenv(audit.PYTEST_TIMEOUT_ENV, raising=False)
+    missing = [c for c in audit.plan("full") if c and c[0] == "__not_run__"]
+    assert len(missing) == 2, missing
+    monkeypatch.setattr(audit, "plan", lambda mode: missing)
+    monkeypatch.setattr(sys, "argv", ["substrate_audit.py", "--mode", "full", "--json"])
+    assert audit.main() == 1
+    out = capsys.readouterr().out
+    assert out.count("NOT-RUN: ") == 2
+    report = json.loads(out[out.index("{"):])
+    assert report["final"] == "NOT-RUN"
+    assert {c["status"] for c in report["checks"]} == {"NOT-RUN"}

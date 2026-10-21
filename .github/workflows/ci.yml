@@ -14,7 +14,7 @@ jobs:
         with: {fetch-depth: 0}
       # The substrate's own validators are Python (stdlib + PyYAML),
       # regardless of the project's primary language.
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with: {python-version: "3.11"}
       - name: Bootstrap toolchain (python)
         run: |
@@ -27,7 +27,7 @@ jobs:
           fi
       - name: Node toolchain
         if: hashFiles('package.json') != ''
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with: {node-version: "20"}
       - name: Node install
         if: hashFiles('package.json') != ''

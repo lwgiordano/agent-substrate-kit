@@ -453,3 +453,10 @@ This file is `merge=union` in `.gitattributes` so concurrent branch entries comb
 **Knowledge:** An alert path is part of the gate and must be proven to fire: the audit's issue step had no permission and was refused on every failure since September, so failures were silent. Keep the write scope out of the job that runs repository code, alert on cancellation as well as failure, and give a long suite its own limit with a TIMEOUT status that never reads as a pass.
 **Outcome:** shipped-green
 
+## 2026-10-21T01:39:00Z — NO_SESSION — e5a8954
+**Summary:** v3.10.3: github-script 9, setup-python 7 and setup-node 7 in kit workflows and consumer templates together; full-audit without pytest or pre-commit reports NOT-RUN instead of passing.
+**Files:** .github/workflows/agent-config-audit.yml,.github/workflows/ci.yml,.github/workflows/release-matrix.yml,.github/workflows/scheduled-audit.yml,workflows/*.yml.template,scripts/substrate_audit.py,tests/test_hook_scripts.py,tests/guards.json,docs/knowledge/05_evals_assurance.md,VERSION,README.md,BENCHMARK.md
+**Intent:** Operator approved resolving Dependabot #13, #14 and #15 (red by design because the templates also need the bump) and the pre-existing audit gap where a missing test tool still read PASS.
+**Knowledge:** Bump an action in the kit and its templates in the same commit, one action per commit, so CI isolates a breaking major; an action used only on a failure path (github-script in the alert job) needs a forced failure to be exercised at all. A check that could not run has verified nothing and must never count toward PASS.
+**Outcome:** shipped-green
+

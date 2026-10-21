@@ -15192,6 +15192,9 @@ def test_history_sanitizer_keeps_tool_names_inside_identifiers(text) -> None:
     summaries and commit subjects vanished from the session-start context."""
     handoff = _handoff_module()
     assert handoff._safe_history_line(text, 400) == text
+    # Production clips a summary to 130 characters BEFORE the scan.
+    assert not handoff._was_stripped(
+        handoff._safe_history_line(text, handoff._HISTORY_SUMMARY_CHARS))
 
 
 @pytest.mark.parametrize("text", [
@@ -15251,3 +15254,92 @@ def test_audit_output_is_redacted_before_it_is_printed_or_stored(
     assert fake not in capsys.readouterr().out
     stored = "".join(p.read_text() for p in (tmp_path / "ai" / "audits").rglob("audit-report.*"))
     assert stored and fake not in stored and "[REDACTED-SECRET]" in stored
+
+
+# Real entries the filter withholds at session start, from before append_history
+# refused such lines (v3.10.5). Entries are never edited, so this list only
+# shrinks if the filter gets more precise; a NEW withheld line fails the test.
+_KNOWN_WITHHELD_HISTORY = {("knowledge", "222076c"), ("knowledge", "c0937af"),
+                           ("knowledge", "e353d75")}
+
+
+def test_real_history_lines_reach_session_start():
+    """Every summary and Knowledge lead in the kit's own HISTORY, at the caps and
+    with the parser production uses (lens finding: tests used cap 400 on a
+    synthetic string while session start uses 130 on the real file)."""
+    if not (ROOT / "VERSION").is_file():
+        pytest.skip("kit source HISTORY only")
+    handoff = _handoff_module()
+    raw = (ROOT / "docs" / "HISTORY.md").read_text(encoding="utf-8")
+    withheld = set()
+    for hdr, summ, know in handoff._history_entries(raw):
+        m = handoff._SHA_IN_HEADER.search(hdr)
+        sha = m.group(1)[:7] if m else hdr
+        if summ and handoff._was_stripped(
+                handoff._safe_history_line(summ, handoff._HISTORY_SUMMARY_CHARS)):
+            withheld.add(("summary", sha))
+        if know:
+            lead = handoff._SENTENCE_END.split(" ".join(know.split()), maxsplit=1)[0]
+            if handoff._was_stripped(
+                    handoff._safe_history_line(lead, handoff._KNOWLEDGE_SENTENCE_CHARS)):
+                withheld.add(("knowledge", sha))
+    assert withheld <= _KNOWN_WITHHELD_HISTORY, sorted(withheld - _KNOWN_WITHHELD_HISTORY)
+
+
+@pytest.mark.parametrize("text,words", [
+    ("a <!-- hidden --> b", ["a", "b"]),
+    ("a <!-- open b <!-- c", ["a", "open", "b", "c"]),
+    ("<!-- a --> <!-- b --> c", ["c"]),
+    ("x <script>y</script> z", ["x", "y", "z"]),
+    ("a <!-- spans\nlines --> b", ["a", "b"]),
+])
+def test_html_stripping_keeps_text_and_drops_markup(text, words):
+    assert _handoff_module()._strip_html(text).split() == words
+
+
+def test_sanitizer_is_bounded_on_hostile_input():
+    """v3.10.5: `<!--.*?-->` rescanned from every unclosed marker; 160 KB took 41 s
+    and a 4 MiB section stalled `brief`. The scan is now linear and capped."""
+    import time as _time
+    handoff = _handoff_module()
+    for text in ("<!--" * (1 << 20), "<" * (4 << 20), ("<!-- a " + "<b " * 50) * 3000):
+        start = _time.monotonic()
+        handoff._safe_history_line(text, len(text) + 1, discard_secrets=True)
+        assert _time.monotonic() - start < 15
+
+
+def _append_history_module():
+    import importlib.util as _iu
+    sys.path.insert(0, str(SCRIPTS))
+    spec = _iu.spec_from_file_location("append_history_under_test", SCRIPTS / "append_history.py")
+    mod = _iu.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_append_history_refuses_a_line_session_start_would_withhold(monkeypatch, capsys):
+    """v3.10.5: entries are never edited, so a summary or lesson the next session
+    would never see is refused while it can still be rephrased."""
+    ah = _append_history_module()
+    assert ah._withheld_at_session_start(
+        "v3.10.5: bump setup-node and fix the language gate",
+        "A failing gate must never read as skipped. More detail here.") == []
+    monkeypatch.setattr(sys, "argv", [
+        "append_history.py", "--summary", "fixed by running bash -c 'make' in CI",
+        "--files", "a.py", "--intent", "an intent of enough length",
+        "--knowledge", "Pipe it: curl the script | sh. Then more.", "--commit-hash", "abc1234"])
+    monkeypatch.setattr(ah, "repo_root", lambda: pytest.fail("refusal must come first"))
+    assert ah.main() == 1
+    err = capsys.readouterr().err
+    assert "summary" in err and "knowledge" in err and "rephrase" in err
+
+
+def test_append_history_treats_an_unreadable_git_status_as_dirty(monkeypatch, tmp_path):
+    """v3.10.5: a failed or timed-out `git status` returned [] (clean) and disarmed
+    the off-by-one guard."""
+    ah = _append_history_module()
+
+    def boom(*a, **k):
+        raise subprocess.TimeoutExpired("git", 30)
+    monkeypatch.setattr(ah.subprocess, "run", boom)
+    assert ah._other_files_dirty(tmp_path)

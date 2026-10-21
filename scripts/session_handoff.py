@@ -276,7 +276,29 @@ _HISTORY_SUMMARY_CHARS = 130
 _INVISIBLE_CHARS = re.compile(
     "[\u200b-\u200f\u2060-\u2064\u202a-\u202e\u2066-\u2069\ufeff]"
 )
-_HTMLISH = re.compile(r"<!--.*?-->|<[^>\n]{0,200}>", re.S)
+# Tags are bounded by the regex; comments are removed by a linear scan instead
+# (v3.10.5): `<!--.*?-->` rescanned the rest of the text from every unclosed
+# `<!--`, so a few hundred KB of them took minutes in `brief`, `receipt show` and
+# `projects`. An unclosed marker is dropped and the text after it kept.
+_HTML_TAG = re.compile(r"<[^>\n]{0,200}>")
+
+
+def _strip_html(text: str) -> str:
+    out, i = [], 0
+    while True:
+        j = text.find("<!--", i)
+        if j < 0:
+            out.append(text[i:])
+            break
+        out.append(text[i:j])
+        k = text.find("-->", j + 4)
+        if k < 0:
+            # No later comment can close either: drop the remaining markers only.
+            out.append(" " + text[j + 4:].replace("<!--", " "))
+            break
+        out.append(" ")
+        i = k + 3
+    return _HTML_TAG.sub(" ", "".join(out))
 # Role-prefix smuggling: "[SYSTEM: ...]" anywhere, or a bare "system:" line lead.
 _ROLE_PREFIX = re.compile(
     r"(?i)\[\s*(?:system|assistant|developer|user|tool)\s*[:\]]"
@@ -287,10 +309,13 @@ _ROLE_PREFIX = re.compile(
 _STRIPPED_HISTORY = "[history line stripped: instruction-like or command-like directive]"
 
 
+_SANITIZE_SCAN_MAX = 1 << 18  # no caller shows more; bounds the regex passes below
+
+
 def _safe_history_line(text: str, cap: int = _HISTORY_LINE_CHARS,
                        *, discard_secrets: bool = False) -> str:
-    text = _INVISIBLE_CHARS.sub("", str(text))
-    text = _HTMLISH.sub(" ", text)
+    text = _INVISIBLE_CHARS.sub("", str(text)[:_SANITIZE_SCAN_MAX])
+    text = _strip_html(text)
     text = " ".join(text.split())
     text = _INSTRUCTION_PREFIX.sub("[instruction-line stripped]", text)
     text = _redact(text)

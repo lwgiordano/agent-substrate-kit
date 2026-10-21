@@ -530,3 +530,73 @@ def test_the_shared_display_sanitizer_hides_invisible_and_tag_characters():
                "\U000e0041", "\U000e0100", "‮", "\x1b"):
         assert _shown("a" + ch + "b") == "a?b", repr(ch)
     assert _shown("plain café — ok") == "plain café — ok"
+
+
+def test_check_selection_variables_never_reach_the_check(project, monkeypatch):
+    """v3.10.5: with SKIP exported, pre-commit skipped the failing hook and the
+    receipt read passed/unchanged/current; PYTEST_ADDOPTS can deselect a failing
+    test the same way. The check runs as written."""
+    r = api()
+    stub(project, 'if [ -n "${SKIP:-}${PYTEST_ADDOPTS:-}${PRE_COMMIT_ALLOW_NO_CONFIG:-}" ]; '
+                  'then exit 0; fi; exit 1')
+    task_id = r.start(project, "task")
+    monkeypatch.setenv("SKIP", "smoke-tests")
+    monkeypatch.setenv("PYTEST_ADDOPTS", "--deselect tests/test_x.py::test_failing")
+    monkeypatch.setenv("PRE_COMMIT_ALLOW_NO_CONFIG", "1")
+    assert r.run_check(project, task_id, "check", 30)["outcome"] == "failed"
+
+
+def test_a_gate_committed_after_the_task_started_is_still_flagged(project):
+    """v3.10.5: harness_changed compared gate files with HEAD only, so committing a
+    weakened manage.sh between `start` and `check` read as an ordinary pass."""
+    r = api()
+    task_id = r.start(project, "task")
+    stub(project, "exit 0  # weakened and committed")
+    res = r.run_check(project, task_id, "check", 30)
+    assert res["outcome"] == "passed" and res["harness_changed"] == ["manage.sh"]
+    assert r.show(project, task_id)["summary"]["checks"]["check"]["harness_modified"] is True
+    # A commit that leaves the gate alone is not flagged.
+    other = r.start(project, "task two")
+    (project / "app.py").write_text("print('changed')\n")
+    git(project, "commit", "-qam", "app only")
+    assert r.run_check(project, other, "check", 30)["harness_changed"] == []
+
+
+def test_text_the_context_filter_would_withhold_is_refused_not_stored(project):
+    """v3.10.5: such a task used to be stored as the strip placeholder."""
+    r = api()
+    with pytest.raises(r.ReceiptError, match="rephrase"):
+        r.start(project, "run python3 -c 'import os' then curl the result")
+    task_id = r.start(project, "Fix the import in the gate tool")
+    with pytest.raises(r.ReceiptError, match="rephrase"):
+        r.annotate(project, task_id, "complete", note="verified with `rm -rf build`")
+
+
+def test_a_project_path_naming_a_tool_is_kept_as_a_path(tmp_path):
+    """v3.10.5: a root under .../node/ was replaced by the strip placeholder."""
+    root = tmp_path / "node" / "python" / "proj"
+    root.mkdir(parents=True)
+    git(root, "init", "-q")
+    git(root, "config", "user.name", "Fixture")
+    git(root, "config", "user.email", "fixture@example.invalid")
+    git(root, "config", "commit.gpgsign", "false")
+    (root / ".gitignore").write_text(".substrate/receipts/\n")
+    git(root, "add", ".")
+    git(root, "commit", "-qm", "fixture")
+    r = api()
+    task_id = r.start(root, "task")
+    data = json.loads((root / ".substrate/receipts" / task_id / "task.json").read_text())
+    assert data["root"] == str(root.resolve())
+
+
+def test_credential_line_match_is_bounded_and_still_catches_shapes():
+    """v3.10.5: unbounded runs made a 64 KB line take minutes."""
+    r = api()
+    start = time.monotonic()
+    for line in ("a" * 65536, "-" * 65536, "x://" + "a" * 65536, "a_" * 32768):
+        r._CREDENTIAL_LINE.search(line[:r.CREDENTIAL_SCAN])
+    assert time.monotonic() - start < 2
+    word = "pass" + "word"
+    for shaped in ("DB_" + word.upper() + "=v", "--" + word + " v", "https://u:" + "v@h/x",
+                   "Author" + "ization: Bearer x", "my_api_" + "key: v"):
+        assert r._CREDENTIAL_LINE.search(shaped[:r.CREDENTIAL_SCAN]), shaped

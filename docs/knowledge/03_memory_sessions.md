@@ -7,6 +7,7 @@ asserts:
   - scripts/session_handoff.py::_safe_history_line
   - scripts/session_handoff.py::_rejected_block
   - scripts/session_handoff.py::(?<!\w-)
+  - scripts/append_history.py::def _withheld_at_session_start
 last_human_reviewed: 2026-10-21
 covers:
   - manage.sh
@@ -83,7 +84,11 @@ tool name joined to a word by an ASCII `-` or `_` (`setup-node`,
 release summary that names an action still reaches the next session. A
 leading `-` (`-curl`) and `@` (`user@bash -c id`) are not joiners, and a script name such as
 `release_gate.sh` is still withheld: a mention cannot be told apart from
-running it, and only `manage.sh` is exempt. Task reports additionally use
+running it, and only `manage.sh` is exempt. Because entries are never edited,
+`append_history` refuses a summary or Knowledge lead sentence this filter would
+withhold, while it can still be rephrased. HTML comments are removed by a linear
+scan and at most 256 KiB of any input is read, so hostile text cannot make the
+filter slow. Task reports additionally use
 the bus display sanitizer for terminal controls. The new
 blocks drop a stripped line rather than spend budget on a marker. Every block
 fits newest-first — a blind slice cut the newest entry, the one most needed.

@@ -1,6 +1,6 @@
 ---
 purpose: Work receipts and read-only multi-project status.
-last_human_reviewed: 2026-10-15
+last_human_reviewed: 2026-10-21
 covers:
   - scripts/task_receipt.py
   - scripts/project_status.py
@@ -13,6 +13,8 @@ asserts:
   - scripts/project_status.py::inspection-failed
   - scripts/check_substrate_config.py::def parse_config_text
   - scripts/_task_evidence.py::def trusted_executable
+  - scripts/task_receipt.py::_CHECK_SELECTION_ENV = frozenset
+  - scripts/project_status.py::profile-below-lock
 ---
 
 # Work receipts and project status
@@ -25,7 +27,13 @@ this set, are in [lessons, records, and recall](10_lessons_recall.md).
 `./manage.sh receipt start --task "<outcome>"` records a task under
 `.substrate/receipts/<uuid4>/` (Git-ignored in the kit and in every consumer):
 the requested outcome, repository root, HEAD, branch, dirty state and the raw
-fingerprint from `_task_evidence.git_facts`. Every later record is a new file
+fingerprint from `_task_evidence.git_facts`. Task, note, author and review
+text pass the context filter that guards session start; text it would withhold
+(a shell tool name standing as a word of its own, `$(`, a backtick, an
+instruction-like lead) is refused with a request to rephrase, never stored as a
+placeholder. Paths and branch names are facts, not prose: they get the terminal
+and credential filters only, so a root under `.../node/` stays readable. Every
+later record is a new file
 named `<time_ns>-<id>-<kind>.json`; nothing is overwritten, at most 1000 records
 fit one task, each record is capped at 64 KiB, and the store is reached through
 the guarded directory walk, so a symlinked store is refused.
@@ -45,7 +53,10 @@ excerpt is trimmed so the record stays under its cap even when every character
 escapes. Redaction covers known shapes, not every possible value. Environment
 variables are never stored, and the check runs without inherited `GIT_*`
 variables so it cannot be pointed at a different repository than the one
-fingerprinted. A timeout (1 to 7200 seconds, default 1800) sends TERM to the
+fingerprinted, nor with `SKIP`, `PRE_COMMIT_ALLOW_NO_CONFIG`, `PYTEST_ADDOPTS` or
+`PYTEST_PLUGINS`, so the caller's shell cannot trim which hooks or tests run.
+The credential-line match reads the first 1000 characters of a line; the excerpt
+never shows more than 500. A timeout (1 to 7200 seconds, default 1800) sends TERM to the
 whole group, waits five seconds, then KILLs the whole group regardless, so
 children that ignore TERM die too. When the check exits on its own, group
 members it left behind are KILLed before the leader is reaped (where
@@ -56,9 +67,12 @@ control the command refuses to run. A child that starts its own session
 escapes the group kill; the three checks do not.
 
 An attempt run while its own gate (`manage.sh`, `scripts/`, `.substrate/`, the
-pre-commit config) differs from HEAD lists those paths as `harness_changed`,
-and `show` flags the check with a warning: a pass from a locally weakened gate
-is not an ordinary pass.
+pre-commit config) differs from HEAD, or after gate files were committed since
+the task started, lists those paths as `harness_changed`, and `show` and
+`projects` flag the check with a warning: a pass from a weakened gate is not an
+ordinary pass. The check runs the toolchain the project has installed (its
+Git-ignored virtualenvs); a receipt does not fingerprint that toolchain, so a
+replaced test runner is outside what it can see.
 
 The fingerprint is taken before and after the run. Equal means `unchanged`;
 different means `state-changed-during-check`, even when the exit code is 0;
@@ -81,7 +95,8 @@ state that differs from the one its own before/after fingerprints give. Hashes m
 be hashes, and stored text is re-sanitized on read, so a hand-edited record
 cannot inject terminal controls or a known credential pattern. Error messages
 quote file names only through the same sanitizer. A hand-edit that stays
-internally consistent cannot be detected: receipts are unsigned. A `running` record with no
+internally consistent cannot be detected: receipts are unsigned, and records
+are not chained, so deleting an attempt's two records removes it from `show`. A `running` record with no
 result reads `incomplete`; a result with no `running` record is listed as
 `result-without-start` and not counted. For each check kind the summary shows
 the latest outcome, how many attempts passed, and whether the latest attempt's
@@ -114,8 +129,13 @@ receipt (newest by creation time, ties ordered by a nanosecond stamp) with
 per-check applicability, labelled unsigned and recorded by that project. Hook
 files that exist mean configured, never that the host runs them. Branch protection, rulesets and
 memory-anchor publication read `not checked`: this command makes no network
-calls. Missing, non-Git and unborn roots, unsafe or malformed metadata, and Git
-failures are diagnostics on an error row. Any other failure inside one project
+calls. Missing, non-Git and unborn roots, unsafe or malformed metadata (an
+invalid config or lock, malformed settings JSON, a profile below its
+`required_profile` lock, `disableAllHooks`), unreadable receipts and Git
+failures are diagnostics on an error row; only a tracked file the fingerprint
+cannot read (`unsupported-input`, such as a symlink) is listed without making
+the row an error. The text view shows each receipt check's state and flags gate
+changes. Any other failure inside one project
 becomes an `inspection-failed` row, so one hostile project never aborts or hides
 the others; the report finishes and exits 2. Target values are bounded: version
 and install time over 40 characters read as unknown, a hook path with `..`, an

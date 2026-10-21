@@ -23,8 +23,8 @@ from pathlib import Path
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _doc_common import open_dir_chain, read_lock, safe_read_bytes, substrate_profile
-from _task_evidence import (clip_bytes, git, git_facts, harden_path, json_text, now, safe_text,
-                            sanitize_report)
+from _task_evidence import (clip_bytes, git, git_facts, harden_path, json_text, now, safe_fact,
+                            safe_text, sanitize_report)
 
 SCHEMA = 1
 MAX_ROOTS = 100
@@ -34,6 +34,12 @@ MAX_HOOK_EVENTS, MAX_HOOK_REF = 30, 300
 _LOCKS = {"required_profile": {"starter", "standard", "strict"},
           "required_sandbox": {"0", "1"}, "required_remote_governance": {"0", "1"}}
 _GIT_HOOKS = ("pre-commit", "pre-push", "commit-msg")
+_PROFILE_RANK = {"starter": 0, "standard": 1, "strict": 2}
+# Diagnostics that limit what a row can say without meaning anything is wrong: a
+# tracked symlink leaves the fingerprint unknown. Every other diagnostic makes
+# the row an error (v3.10.5: invalid config, unsafe locks and malformed settings
+# were listed under a row that still read `ok`).
+_INFO_CODES = frozenset({"unsupported-input"})
 
 
 def _diag(code: str, path: str = ".", **extra) -> dict:
@@ -104,6 +110,9 @@ def _config(root: Path, diags: list) -> dict:
         if state == "bad":
             diags.append(_diag("unsafe-lock", f".substrate/{name}"))
     out["locks"] = locks
+    want = locks.get("required_profile")
+    if out["status"] == "ok" and _PROFILE_RANK.get(out["profile"], 0) < _PROFILE_RANK.get(want, 0):
+        diags.append(_diag("profile-below-lock", rel, profile=out["profile"], required=want))
     return out
 
 
@@ -134,6 +143,8 @@ def _is_regular(root: Path, rel: str) -> str:
 def _hooks(root: Path, diags: list) -> dict:
     settings = _read_json(root, ".claude/settings.json", 1 << 20, diags)
     declared = {}
+    if isinstance(settings, dict) and settings.get("disableAllHooks") is True:
+        diags.append(_diag("hooks-disabled", ".claude/settings.json"))
     if settings is not None and isinstance(settings.get("hooks"), dict):
         for event, groups in list(settings["hooks"].items())[:MAX_HOOK_EVENTS]:
             scripts = set()
@@ -149,7 +160,7 @@ def _hooks(root: Path, diags: list) -> dict:
             # Keys are target text too: sanitized here, since the report
             # sanitizer only cleans values.
             declared[safe_text(str(event), 40)] = {
-                safe_text(ref, MAX_HOOK_REF): _is_regular(root, ref)
+                safe_fact(ref, MAX_HOOK_REF): _is_regular(root, ref)
                 for ref in sorted(scripts)[:20]}
     git_hooks, location = {}, "unknown"
     try:
@@ -232,7 +243,8 @@ def _inspect(root: Path, row: dict) -> None:
     row["latest_receipt"] = _receipt(root, diags, facts) if facts.get("status") == "ok" else None
     row["remote"] = {"branch_protection": "not checked", "rulesets": "not checked",
                      "memory_anchor_publication": "not checked"}
-    row["status"] = "error" if facts.get("status") != "ok" else "ok"
+    problems = [d for d in diags if d.get("code") not in _INFO_CODES]
+    row["status"] = "error" if facts.get("status") != "ok" or problems else "ok"
 
 
 def _inspector_version() -> str | None:
@@ -294,8 +306,11 @@ def render_text(rep: dict) -> str:
             if not rec:
                 lines.append("  receipt: none")
             else:
-                checks = "; ".join(f"{k2} {v['latest_outcome']} (applies: {v['applies_to_current_state']})"
-                                   for k2, v in rec["checks"].items()) or "no checks run"
+                checks = "; ".join(
+                    f"{k2} {v['latest_outcome']} ({v.get('latest_state')}; applies: "
+                    f"{v['applies_to_current_state']})"
+                    + ("; WARNING: gate files modified" if v.get("harness_modified") else "")
+                    for k2, v in rec["checks"].items()) or "no checks run"
                 lines.append(f"  receipt: {rec['task_id'][:8]} completion {rec['completion']}; "
                              f"{checks} (unsigned, recorded by that project)")
             lines.append("  remote: branch protection, rulesets, anchor publication — not checked")

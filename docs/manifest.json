@@ -212,7 +212,7 @@
         "scripts/task_receipt.py",
         "scripts/project_status.py"
       ],
-      "last_human_reviewed": "2026-10-15",
+      "last_human_reviewed": "2026-10-21",
       "path": "docs/knowledge/11_receipts_projects.md",
       "purpose": "Work receipts and read-only multi-project status."
     }

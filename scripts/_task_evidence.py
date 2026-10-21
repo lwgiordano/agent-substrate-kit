@@ -211,24 +211,41 @@ def safe_text(value: str, limit: int = 2000) -> str:
     return _shown(_safe_history_line(value, limit, discard_secrets=True))
 
 
+# Report fields that are filesystem or git facts, not prose (v3.10.5). They get the
+# terminal and credential filters but not the context filter for command words and
+# instructions, which read a project under .../python/ or a branch named fix-node
+# as a shell command and printed every such row as the same strip placeholder.
+FACT_KEYS = frozenset({"root", "path", "branch", "worktree"})
+
+
+def safe_fact(value: str, limit: int = 2000) -> str:
+    from bus_claims import _shown
+    from session_handoff import _INVISIBLE_CHARS, _clip_words, _redact
+    text = _redact(" ".join(_INVISIBLE_CHARS.sub("", str(value)).split()))
+    if "[REDACTED-SECRET]" in text:
+        text = "[REDACTED-SECRET]"
+    return _shown(_clip_words(text, limit))
+
+
 def clip_bytes(value: str, limit: int) -> str:
     raw = value.encode("utf-8")
     return value if len(raw) <= limit else raw[:max(0, limit - 3)].decode("utf-8", "ignore") + "…"
 
 
-def sanitize_report(value) -> tuple[object, int]:
+def sanitize_report(value, key: str | None = None) -> tuple[object, int]:
     """Display strings only; never mutate source bytes or authentication inputs.
 
     Fields are schema-owned; user text only appears in values, not dictionary
-    keys. Known-pattern redaction is not universal credential detection.
+    keys. Known-pattern redaction is not universal credential detection. FACT_KEYS
+    values are paths and git names and get safe_fact; everything else safe_text.
     """
     if isinstance(value, str):
-        clean = safe_text(value, len(value) + 1)
+        clean = (safe_fact if key in FACT_KEYS else safe_text)(value, len(value) + 1)
         return clean, int(clean != value)
     if isinstance(value, dict):
         out, changed = {}, 0
-        for key, item in value.items():
-            out[key], count = sanitize_report(item)
+        for name, item in value.items():
+            out[name], count = sanitize_report(item, name)
             changed += count
         return out, changed
     if isinstance(value, list):

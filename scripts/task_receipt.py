@@ -37,8 +37,9 @@ from pathlib import Path
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _doc_common import GuardRefusal, open_dir_chain, safe_atomic_write, safe_read_bytes
-from _task_evidence import (clip_bytes, git_facts, harden_path, json_text, now, safe_text,
-                            trusted_executable)
+from _task_evidence import (clip_bytes, git, git_facts, harden_path, json_text, now, safe_fact,
+                            safe_text, trusted_executable)
+from session_handoff import _STRIPPED_HISTORY as _STRIPPED
 
 SCHEMA = 1
 STORE = Path(".substrate") / "receipts"
@@ -63,11 +64,16 @@ _HARNESS_DIRS = ("scripts/", ".substrate/")
 # "db_password": ..., Cookie: ...), flags such as --password VALUE, URLs with a
 # user:password part, HTTP authorization values, and everything inside a PEM
 # block. `::` is not an assignment, so pytest node ids stay visible.
+# Quantifiers are bounded and each line is matched on its first CREDENTIAL_SCAN
+# characters only (v3.10.5): unbounded `[a-z0-9_.-]*` runs were quadratic, and a
+# 64 KB minified line stalled `--excerpt` for minutes. The excerpt keeps at most
+# 500 characters of a line, so nothing past the scanned prefix is ever shown.
+CREDENTIAL_SCAN = 1000
 _CREDENTIAL_LINE = re.compile(
-    r"(?i)([\"']?[a-z0-9_.-]*(key|secret|token|passw(or)?d|passwd|pwd|credential|auth|cookie)"
-    r"[a-z0-9_.-]*[\"']?\s*(=|:(?!:)))"
-    r"|--?[a-z0-9-]*(passw(or)?d|passwd|pwd|token|secret|api-?key)[a-z0-9-]*([ =]|$)"
-    r"|[a-z][a-z0-9+.-]*://[^/\s:@]+:[^/\s@]+@"
+    r"(?i)([\"']?[a-z0-9_.-]{0,64}(key|secret|token|passw(or)?d|passwd|pwd|credential|auth|cookie)"
+    r"[a-z0-9_.-]{0,64}[\"']?\s{0,16}(=|:(?!:)))"
+    r"|--?[a-z0-9-]{0,64}(passw(or)?d|passwd|pwd|token|secret|api-?key)[a-z0-9-]{0,64}([ =]|$)"
+    r"|[a-z][a-z0-9+.-]{0,64}://[^/\s:@]{1,256}:[^/\s@]{1,256}@"
     r"|\bbearer\s+\S|\bauthorization\s*:")
 _PEM_BEGIN = re.compile(r"-----BEGIN [A-Z0-9 ]+-----")
 _PEM_END = re.compile(r"-----END [A-Z0-9 ]+-----")
@@ -93,6 +99,13 @@ def _text(value, limit: int, field: str, required: bool = False) -> str:
     clean = safe_text(value, limit) if value.strip() else ""
     if required and not clean:
         raise ReceiptError(f"{field} is required")
+    if clean == _STRIPPED:
+        # Refuse rather than store the placeholder: a receipt whose task reads
+        # "[history line stripped ...]" records nothing (v3.10.5).
+        raise ReceiptError(
+            f"{field} reads as a command or an instruction to the context filter (for example "
+            "a shell tool name such as node or python3 standing as a word of its own); "
+            "rephrase it")
     return clean
 
 
@@ -101,10 +114,23 @@ def _state(facts: dict) -> dict:
         "diagnostics": [d.get("code") for d in facts.get("diagnostics", [])][:20]}
 
 
-def _harness_changed(facts: dict) -> list[str]:
-    paths = [p for p in facts.get("changed_paths", [])
-             if p in _HARNESS or p.startswith(_HARNESS_DIRS)]
-    return [safe_text(p, 200) for p in paths[:50]]
+def _is_harness(path: str) -> bool:
+    return path in _HARNESS or path.startswith(_HARNESS_DIRS)
+
+
+def _harness_changed(facts: dict, since: str | None = None, root: Path | None = None) -> list[str]:
+    """Gate files that differ from HEAD, and (v3.10.5) gate files committed since
+    the task started: committing a weakened gate first used to clear the warning."""
+    paths = {p for p in facts.get("changed_paths", []) if _is_harness(p)}
+    head = facts.get("head")
+    if since and head and since != head and root is not None:
+        try:
+            out = git(root, "diff", "--name-only", "-z", "--no-renames", since, head, "--")
+            paths.update(p for p in (os.fsdecode(x) for x in out.split(b"\0") if x)
+                         if _is_harness(p))
+        except (OSError, ValueError, subprocess.SubprocessError):
+            paths.add("(gate changes since the task started could not be read)")
+    return [safe_fact(p, 200) for p in sorted(paths)[:50]]
 
 
 def _task_dir(root: Path, task_id: str) -> Path:
@@ -166,7 +192,7 @@ def start(root: Path, task: str) -> str:
     task_id = str(uuid.uuid4())
     facts = git_facts(root)
     record = dict(schema_version=SCHEMA, kind="task", task_id=task_id, task=text,
-                  created_at=now(), created_ns=time.time_ns(), root=safe_text(str(root), 1000),
+                  created_at=now(), created_ns=time.time_ns(), root=safe_fact(str(root), 1000),
                   start_state=_state(facts))
     _write(root, STORE / task_id / "task.json", record)
     return task_id
@@ -234,7 +260,7 @@ def _excerpt(tail: bytes) -> str:
             in_pem = not _PEM_END.search(line)
             withheld += 1
             continue
-        if _CREDENTIAL_LINE.search(line):
+        if _CREDENTIAL_LINE.search(line[:CREDENTIAL_SCAN]):
             withheld += 1
             continue
         clean = safe_text(line, 500) if line.strip() else ""
@@ -250,10 +276,19 @@ class _Interrupted(Exception):
     pass
 
 
+# Variables that choose which hooks or tests a check runs (v3.10.5): with SKIP
+# exported, pre-commit skipped the failing hook and the receipt read `passed`;
+# PYTEST_ADDOPTS can deselect a failing test the same way. The check runs as
+# written, never as the caller's environment trims it.
+_CHECK_SELECTION_ENV = frozenset({"SKIP", "PRE_COMMIT_ALLOW_NO_CONFIG", "PYTEST_ADDOPTS",
+                                  "PYTEST_PLUGINS"})
+
+
 def _spawn(argv: list[str], root: Path):
     # Inherited GIT_DIR/GIT_INDEX_FILE/... would point the check at a different
     # repository than the one the fingerprints describe.
-    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith("GIT_") and k not in _CHECK_SELECTION_ENV}
     return subprocess.Popen(argv, cwd=root, env=env, stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             start_new_session=True)
@@ -301,8 +336,9 @@ def run_check(root: Path, task_id: str, kind: str, timeout: int = DEFAULT_TIMEOU
     bash = trusted_executable("bash")
     argv = [bash or "bash", "./manage.sh", kind]
     attempt = str(uuid.uuid4())
+    start_head = _valid_state(_load(root, STORE / task_id / "task.json").get("start_state")).get("head")
     before = git_facts(root)
-    harness = _harness_changed(before)
+    harness = _harness_changed(before, since=start_head, root=root)
     _append(root, task_id, "running", attempt, dict(
         schema_version=SCHEMA, kind="running", task_id=task_id, attempt_id=attempt,
         check=kind, argv=argv, timeout_seconds=int(timeout), started_at=now(),
@@ -407,7 +443,8 @@ def _valid_state(value) -> dict:
         if key in ("head", "fingerprint"):
             out[key] = item if isinstance(item, str) and _HEX.fullmatch(item) else None
         else:
-            out[key] = safe_text(item, 200) if isinstance(item, str) else None
+            clean = safe_fact if key == "branch" else safe_text
+            out[key] = clean(item, 200) if isinstance(item, str) else None
     return out
 
 
@@ -471,7 +508,7 @@ def show(root: Path, task_id: str, current: dict | None = None) -> dict:
     for attempt_id, (_, start_rec) in sorted(running.items(), key=lambda kv: kv[1][0]):
         before = _valid_state(start_rec.get("before"))
         harness = start_rec.get("harness_changed")
-        harness = [safe_text(str(p), 200) for p in harness[:50]] if isinstance(harness, list) else []
+        harness = [safe_fact(str(p), 200) for p in harness[:50]] if isinstance(harness, list) else []
         entry = dict(attempt_id=attempt_id, check=start_rec["check"],
                      started_at=_resanitize(start_rec.get("started_at"), 40), before=before,
                      harness_changed=harness)

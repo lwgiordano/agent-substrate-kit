@@ -1,6 +1,6 @@
 ---
 purpose: Agent context inventory, harness scanning, budgets, and doc drift.
-last_human_reviewed: 2026-10-14
+last_human_reviewed: 2026-10-21
 covers:
   - agentsync.sh
   - manage.sh
@@ -73,8 +73,8 @@ skill root (`.agents/skills`, `.claude/skills`, `.github/skills`) too. The walk
 covers `_SKILL_ROOTS` explicitly so a linked skill root cannot slip the
 per-file scan by being neither followed nor flagged. A NON-REGULAR surface
 (FIFO, socket, device) is blocked for the same reason: being neither a symlink
-nor a regular file, it used to drop silently out of the inventory and lower the
-count while the run still reported ok.
+nor a regular file, it would otherwise drop silently out of the inventory and
+lower the count while the run still reports ok.
 
 The scan result is itself a trust signal. The scanner resolves its root through
 a helper it cannot verify before it has scanned anything, so a poisoned helper
@@ -190,4 +190,4 @@ hanging on a FIFO, collapses newlines so a multiline message cannot forge extra
 lease lines, and propagates commit/push failure so a message is never reported
 "synced" when it did not land on the remote.
 
-`_doc_common` also carries the canonical `SUBSTRATE_PROFILE` parser. It lives there because the module is never stripped from any profile, so every Python reader can route through one implementation instead of keeping a private copy that drifts — which four of them had (v3.8.57).
+`_doc_common` also carries the canonical `SUBSTRATE_PROFILE` parser. It lives there because the module is never stripped from any profile, so every Python reader can route through one implementation instead of keeping a private copy that drifts.

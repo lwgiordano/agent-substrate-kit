@@ -6,7 +6,8 @@ asserts:
   - scripts/_doc_common.py::locked_atomic_append
   - scripts/session_handoff.py::_safe_history_line
   - scripts/session_handoff.py::_rejected_block
-last_human_reviewed: 2026-10-14
+  - scripts/session_handoff.py::(?<!\w-)
+last_human_reviewed: 2026-10-21
 covers:
   - manage.sh
   - scripts/_doc_common.py
@@ -74,7 +75,15 @@ compaction); the last five HISTORY summaries; the lead sentence of each recent
 entry's **Knowledge:** field, tagged with its sha (the lesson, not the
 narrative); and the newest rejected approaches. `_safe_history_line` strips
 selected control characters, markup, and role-like prefixes and cuts at a word
-boundary; it is not a terminal-control filter. Task reports additionally use
+boundary; it is not a terminal-control filter. A summary that names a shell
+tool as a word of its own (`curl`, `bash`, `python3`, `node`, also by path or
+with a version suffix), or contains `$(` or a backtick, is withheld whole. A
+tool name joined to a word by an ASCII `-` or `_` (`setup-node`,
+`actions/setup-python@v7`, `node_modules`) is not a command and is kept, so a
+release summary that names an action still reaches the next session. A
+leading `-` (`-curl`) and `@` (`user@bash -c id`) are not joiners, and a script name such as
+`release_gate.sh` is still withheld: a mention cannot be told apart from
+running it, and only `manage.sh` is exempt. Task reports additionally use
 the bus display sanitizer for terminal controls. The new
 blocks drop a stripped line rather than spend budget on a marker. Every block
 fits newest-first — a blind slice cut the newest entry, the one most needed.

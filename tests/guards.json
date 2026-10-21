@@ -1257,6 +1257,57 @@
         "tests/test_doc_consistency.py::test_scheduled_audit_can_open_its_failure_issue"
       ],
       "why": "an audit cancelled by its time limit raises no alert"
+    },
+    {
+      "id": "history-sanitizer-identifier-carveout",
+      "file": "scripts/session_handoff.py",
+      "find": "    r\"(?is)(?<!\\w-)\\b(?:curl|wget|bash|sh|python3?|node|ruby|perl|nc|ncat|socat|scp|\"\n",
+      "replace": "    r\"(?is)\\b(?:curl|wget|bash|sh|python3?|node|ruby|perl|nc|ncat|socat|scp|\"\n",
+      "tests": [
+        "tests/test_hook_scripts.py::test_history_sanitizer_keeps_tool_names_inside_identifiers"
+      ],
+      "why": "a HISTORY summary naming setup-node or setup-python vanishes from the session start"
+    },
+    {
+      "id": "history-sanitizer-carveout-excludes-paths",
+      "file": "scripts/session_handoff.py",
+      "find": "(?<!\\w-)",
+      "replace": "(?<![-@/.])",
+      "tests": [
+        "tests/test_hook_scripts.py::test_history_sanitizer_still_strips_command_shapes"
+      ],
+      "why": "a flag-like '-curl', a path (/usr/bin/python3 -m ...) or '@' (user@bash -c ...) survives into session context"
+    },
+    {
+      "id": "audit-output-redacted",
+      "file": "scripts/substrate_audit.py",
+      "find": "'output':_redact(out)",
+      "replace": "'output':out",
+      "tests": [
+        "tests/test_hook_scripts.py::test_audit_output_is_redacted_before_it_is_printed_or_stored"
+      ],
+      "why": "a key printed by a check lands in the CI log and the uploaded audit report"
+    },
+    {
+      "id": "consumer-actions-pinned-to-shas",
+      "file": "workflows/ci.yml.template",
+      "find": "      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7\n",
+      "replace": "      - uses: actions/checkout@v7\n",
+      "tests": [
+        "tests/test_doc_consistency.py::test_workflow_actions_are_pinned_to_commit_shas",
+        "tests/test_doc_consistency.py::test_consumer_workflow_templates_pin_the_same_action_versions_as_the_kit"
+      ],
+      "why": "a consumer workflow runs whatever code a movable tag points at"
+    },
+    {
+      "id": "package-zip-excludes-receipts",
+      "file": "package_release.sh",
+      "find": "\"*/.substrate/receipts/*\" \"*/.superpowers/*\" )",
+      "replace": "\"*/.substrate/receipts-never/*\" \"*/.superpowers-never/*\" )",
+      "tests": [
+        "tests/test_project_status.py::test_release_package_really_leaves_out_local_state"
+      ],
+      "why": "a maintainer's receipts and execution scratch ship inside the release zip"
     }
   ]
 }

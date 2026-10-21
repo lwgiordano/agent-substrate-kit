@@ -1,6 +1,6 @@
 ---
 purpose: Deterministic validator layers, pinned copies, and append-only gates.
-last_human_reviewed: 2026-10-14
+last_human_reviewed: 2026-10-21
 covers:
   - extras/check_license_headers.py
   - extras/check_stale_phrases.py
@@ -30,10 +30,10 @@ randomized encoded families and runs the actual scanner against disposable
 context. Each governed surface must block independently so a working root scan
 cannot mask an ignored sibling.
 
-The credential-pattern scanner is `check_leaks.py` (v3.9.1). Its old name matched
-the substrate's own read deny rule and the exfil guard's sensitive-path pattern,
-so an agent could not read or run the kit's scanner source; the file was
-renamed rather than either guard weakened. The old path is a `runpy` shim so
+The credential-pattern scanner is `check_leaks.py`. A name matching the
+substrate's own read deny rule or the exfil guard's sensitive-path pattern would
+stop an agent reading or running the kit's scanner source, so the scanner's name
+avoids both rather than either guard being weakened. The old path is a `runpy` shim so
 configs that still name it keep working, and a test derives the protected
 names from the deny rules and the command policy so no substrate file wears
 one again. The scan skips nested session worktrees.
@@ -53,20 +53,19 @@ stripped install — `substrate_doctor.py`, `write_install_json.py`, and
 documented divergence, enforced by a discovery test that fails on an unclassified
 copy. The same lock-down now covers the `_doc_common` safety primitives: every
 `except: def _safe_*` fallback behind a `from _doc_common import` must be a
-fail-closed stub (return None, or raise), never a reimplementation. Two "same
-algorithm" mirrors — `memory_log._safe_read_text` and
-`session_handoff._safe_atomic_write` — were found two fixes behind the primitive
-they copied, still opening the parent by multi-component path (the v3.8.44
-window) with no post-op liveness check (v3.8.45). `_doc_common` is never stripped,
-so those fallbacks were dead code in every profile; a fallback that runs an OLDER
-guard is the fail-open shape a dropped guard has, only slower to notice.
+fail-closed stub (return None, or raise), never a reimplementation. A "same
+algorithm" mirror drifts behind the primitive it copies: a fallback that opens
+the parent by multi-component path, or skips the post-op liveness check, runs an
+OLDER guard, which is the fail-open shape a dropped guard has, only slower to
+notice. `_doc_common` is never stripped, so such fallbacks would be dead code in
+every profile anyway.
 
 A gate over an APPEND-ONLY record needs an additive remedy that the gate
 actually implements. `check_history_sha.py` requires local proof for new or
 modified `shipped-green` claims, reports unchanged committed imports with
 unavailable proof as unverified-here, and still refuses invalid local evidence.
 It reads a missing label as
-`unverified` (v3.9.3: requiring one was not clearable after a union merge), and
+`unverified` (a required label could not be cleared after a union merge), and
 `check_lessons.py` requires every test or gate lesson's evidence to exist
 ([lessons, records, and recall](10_lessons_recall.md)). `check_history_sha.py` validates `docs/HISTORY.md`, which
 must never be edited, so the only permitted fix for a wrong SHA is a further
@@ -79,8 +78,8 @@ deliberately narrow: it never silences the future-dated finding, a correction
 naming a SHA no EARLIER entry references is itself drift, and a correction
 naming a SHA that resolves is itself drift. Superseding is bound to entry
 ORDER — a correction clears only entries written above it. Keying the hatch by
-SHA alone (v3.8.49) let a correction pre-forgive a bad SHA not yet recorded, and
-let a corrected SHA appended again reuse the same retirement. In a SHALLOW clone
+SHA alone would let a correction pre-forgive a bad SHA not yet recorded, and let
+a corrected SHA appended again reuse the same retirement. In a SHALLOW clone
 the gate refuses to judge at all (exit 2, naming `git fetch --unshallow`): every
 SHA older than the fetch boundary is an absent object, not drift, and printing the
 append-a-Correction remedy there would corrupt HISTORY permanently once a full

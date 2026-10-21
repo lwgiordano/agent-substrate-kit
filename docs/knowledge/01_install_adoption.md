@@ -4,7 +4,7 @@ asserts:
   - bootstrap.sh::_safe_mkdir_p
   - bootstrap.sh::wappend
   - scripts/run_python_gate.sh::_ruff_args
-last_human_reviewed: 2026-10-14
+last_human_reviewed: 2026-10-21
 covers:
   - bootstrap.sh
   - manage.sh
@@ -56,7 +56,7 @@ substrate-owned and replaced.
 Bootstrap copies every `tests/*.py` except the kit self-tests named by
 `_substrate_surfaces.py --consumer-strip-tests`. Those shipped files must pass the
 kit's own ruff rule set with no local config, because a consumer may lint `tests/`
-even though the kit's default `pyproject.toml` excludes it (v3.9.2).
+even though the kit's default `pyproject.toml` excludes it.
 
 ## Existing repositories
 
@@ -109,9 +109,9 @@ disagrees with the remote.
 
 
 A present-but-unusable `.substrate/config` is tampering, not an absent config.
-`is_file()` is false for a FIFO, a socket, and a dangling symlink, so such a
-file used to fall into the "missing config" branch and let every default
-through; the gate now distinguishes absent from unreadable and fails closed on
-the latter, matching how the frozen `required_*` locks already behave.
+`is_file()` is false for a FIFO, a socket, and a dangling symlink, so treating
+such a file as missing would let every default through; the gate distinguishes
+absent from unreadable and fails closed on the latter, matching how the frozen
+`required_*` locks behave.
 
-`manage.sh enable profile <tier>` rewrites EVERY `SUBSTRATE_PROFILE` line in `.substrate/config`. Rewriting only the first left a later duplicate winning, so the command printed success over a config that still resolved to the old tier (v3.8.57); the doctor's reported profile comes from the same canonical parser every other reader uses.
+`manage.sh enable profile <tier>` rewrites EVERY `SUBSTRATE_PROFILE` line in `.substrate/config`. Rewriting only the first would leave a later duplicate winning, so the command would print success over a config that still resolves to the old tier; the doctor's reported profile comes from the same canonical parser every other reader uses.

@@ -42,7 +42,9 @@ bash /path/to/agent_substrate_kit_v3/bootstrap.sh --profile standard --lang auto
 | 4-field bug-fix commit protocol + postmortem-per-bugfix hooks | — | — | yes |
 | Extras (calibration, stale-phrases, license headers) | — | — | yes |
 
-## Current status (v3.10.3)
+## Current status (v3.10.4)
+
+**v3.10.4** — hardening sweep. Every GitHub Action in the kit's workflows and the consumer templates is pinned to a commit SHA the kit's own CI has run (cosign-installer, which never runs here, is marked for the operator to pin), and Node jobs run Node 24. The session-start HISTORY summary no longer hides a line because it names an action such as `setup-node`; real command shapes are still withheld. Audit output is redacted before it reaches the CI log or the uploaded report. The kit repository has an active CODEOWNERS file. New tests run a real receipt check in a freshly installed project and build the real release zip to prove receipts and `.superpowers/` stay out of it.
 
 **v3.10.3** — current GitHub Actions in the kit and in what it installs: github-script 9, setup-python 7 and setup-node 7, bumped in the kit's workflows and the consumer templates together. `./manage.sh full-audit` without pytest or pre-commit in `.substrate/venv` now reports NOT-RUN and fails, where it used to skip them and pass having run no tests.
 

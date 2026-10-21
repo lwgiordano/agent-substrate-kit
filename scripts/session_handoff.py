@@ -197,9 +197,18 @@ _TODO_INJECTION = re.compile(
     r"(?is)\b(?:ignore|disregard|forget|override|bypass|disable|jailbreak)\b"
     r".{0,120}\b(?:instructions?|rules?|policy|guardrails?|system|developer|hooks?|checks?)\b"
 )
+# A tool name joined to a word by '-' is an identifier, not a command: setup-node,
+# actions/setup-python@v7, python-version, node-gyp. Matching those hid ordinary
+# HISTORY summaries (v3.10.4). The '-' must sit BETWEEN word characters, so a flag-
+# like '-curl' still reads as a command. '_' needs no lookaround: it is a word
+# character, so \b already fails beside it (node_modules). Nothing else is carved
+# out: '@' ('user@bash -c id'), a path prefix ('/usr/bin/python3'), a version suffix
+# ('python3.11'), a non-ASCII hyphen, and a file name ending in '.sh' (a mention
+# cannot be told apart from running it) all still read as commands.
 _TODO_SHELLISH = re.compile(
-    r"(?is)\b(?:curl|wget|bash|sh|python3?|node|ruby|perl|nc|ncat|socat|scp|rsync|"
-    r"rm\s+-rf|chmod|base64|openssl)\b|--dangerously-|os\.system|\$\(|`"
+    r"(?is)(?<!\w-)\b(?:curl|wget|bash|sh|python3?|node|ruby|perl|nc|ncat|socat|scp|"
+    r"rsync|chmod|base64|openssl)\b(?!-\w)"
+    r"|\brm\s+-rf\b|--dangerously-|os\.system|\$\(|`"
 )
 
 

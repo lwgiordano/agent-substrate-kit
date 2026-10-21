@@ -1,0 +1,61 @@
+# CODEOWNERS for the kit repository itself (v3.10.4). Consumers receive
+# .github/CODEOWNERS.suggested instead, with placeholder teams to fill in.
+# Same layout as the suggested file; every governed surface is owned by the
+# maintainer. GitHub uses the LAST matching rule.
+
+# ---------- Default owner (catches everything not matched below) ----
+*                               @lwgiordano
+
+# ORDER MATTERS: GitHub uses the LAST matching rule. Broad rules go
+# FIRST; the specific substrate rules below come LAST so they win for
+# the agent/hook surfaces. (If you move the broad `/.github/` rule below
+# `/.github/hooks/`, devops would silently own the hooks — a footgun.)
+
+# ---------- CI / infra (broad — placed FIRST so specifics win) ------
+/.github/                       @lwgiordano
+/Dockerfile                     @lwgiordano
+/docker-compose.yml             @lwgiordano
+
+# ---------- Decisions + postmortems — architectural review ---------
+/docs/decisions/                @lwgiordano
+/docs/postmortems/              @lwgiordano
+
+# ---------- Substrate — change reviews (LAST so they override broad) -
+# The substrate is load-bearing for every commit. Edits to it should
+# get reviewed by the team that owns the discipline + at least one
+# operator who runs the pipeline daily. Directory rules end in `/` so
+# they cover nested files recursively (GitHub semantics).
+/scripts/                       @lwgiordano
+/tests/                         @lwgiordano
+# Auditor-reference + architecture docs are agent-facing (read by the
+# checklist-auditor, ultrareview, and on architecture work).
+/docs/blind-spot-checklists/    @lwgiordano
+/docs/templates/                @lwgiordano
+/docs/ARCHITECTURE.md           @lwgiordano
+/docs/INTENT.md                 @lwgiordano
+/docs/README.md                 @lwgiordano
+# UI design system — agent reads it on UI work (only if --ui yes).
+/design-system/                 @lwgiordano
+# manage.sh is privileged: CI runs `./manage.sh setup|doctor|check`.
+/manage.sh                      @lwgiordano
+/pytest.ini                     @lwgiordano
+/.pre-commit-config.yaml        @lwgiordano
+/.gitattributes                 @lwgiordano
+/.gitignore                     @lwgiordano
+/.github/dependabot.yml         @lwgiordano
+/AGENTS.md                      @lwgiordano
+/CLAUDE.md                      @lwgiordano
+# Agent-config + privileged-execution surfaces (hooks run with user perms).
+/.substrate/                    @lwgiordano
+/.claude/                       @lwgiordano
+/.codex/                        @lwgiordano
+/.agents/                       @lwgiordano
+/.github/hooks/                 @lwgiordano
+/.github/instructions/          @lwgiordano
+/.github/workflows/             @lwgiordano
+/.github/copilot-instructions.md @lwgiordano
+/.github/CODEOWNERS             @lwgiordano
+# HISTORY is append-only (merge=union), but agents READ it at startup —
+# so it is an agent-context surface and MUST be owned (an ownerless line
+# here would override the catch-all via last-match and leave it unowned).
+/docs/HISTORY.md                @lwgiordano

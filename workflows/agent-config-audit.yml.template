@@ -8,12 +8,18 @@ on:
   schedule:
     - cron: "30 9 * * 1"
   workflow_dispatch:
+# Read-only token; checkout keeps no credentials on disk. These jobs run the
+# repository's own code (tests, hooks, evals), which must not be able to write
+# with the job's token (v3.10.5).
+permissions:
+  contents: read
 jobs:
   agent-config-audit:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with: {persist-credentials: false}
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with: {python-version: "3.11"}
       # The FULL policy-integrity chain — kit's own local validators, no

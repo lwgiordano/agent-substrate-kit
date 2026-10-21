@@ -49,7 +49,8 @@ each. The pytest run has its own limit, 1200 seconds by default, set with
 `SUBSTRATE_AUDIT_PYTEST_TIMEOUT` (whole seconds, 60 to 1800); any other value
 stops the audit rather than falling back to the default. The pytest check asks
 for the 15 slowest tests and prints them, so a report shows whether one test or
-the whole suite is slow. Each check's command line and output pass through
+the whole suite is slow. A run killed at its limit never reaches that summary:
+a TIMEOUT report keeps only the tail of the partial output. Each check's command line and output pass through
 `redact_secrets` before they are printed or stored, because the scheduled
 workflow prints them to the CI log and uploads the report. Redaction is
 pattern-based: a value in a shape it does not know still passes.

@@ -14,8 +14,12 @@ Project documentation index.
   [memory](knowledge/03_memory_sessions.md),
   [policy](knowledge/04_policy_governance.md),
   [assurance](knowledge/05_evals_assurance.md),
-  [release](knowledge/06_release_distribution.md), or
-  [agent context](knowledge/07_agent_context_governance.md).
+  [release](knowledge/06_release_distribution.md),
+  [agent context](knowledge/07_agent_context_governance.md),
+  [memory anchor](knowledge/08_memory_anchor.md),
+  [validators](knowledge/09_deterministic_validators.md),
+  [lessons and recall](knowledge/10_lessons_recall.md), or
+  [receipts and projects](knowledge/11_receipts_projects.md).
 - [`decisions/0001-substrate-knowledge-boundaries.md`](decisions/0001-substrate-knowledge-boundaries.md)
   — why the source uses a stable entry point plus source-only functional docs.
 - [`HISTORY.md`](HISTORY.md) and [`../CHANGES_V3.md`](../CHANGES_V3.md) — v3.8+

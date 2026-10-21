@@ -201,7 +201,8 @@ Known limitations, by design:
   / FP-rate over staged states), NOT a hosted longitudinal observability or
   trend-reporting system — pair with one for long-running high-stakes agents.
 
-See `CHANGES_V3.md` for the full per-version remediation history (v3.2.0–v3.5.10).
+See `CHANGES_V3.md` for the per-version remediation history up to v3.7.x, and
+`docs/HISTORY.md` for v3.8 onward.
 See `BENCHMARK.md` for the reproducible block-rate / false-positive-rate result
 (regenerate with `./manage.sh evals --report`).
 

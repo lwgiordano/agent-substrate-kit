@@ -51,8 +51,6 @@ jobs:
           path: ai/audits/**
           retention-days: 30
           if-no-files-found: warn
-      # Strict installs: surface a failed scheduled audit as an issue
-      # instead of a silently-red cron run.
 
   # A separate job holds the only write scope and runs no repository code: no
   # checkout, just the GitHub API. Without `issues: write` this step was refused
@@ -82,7 +80,7 @@ jobs:
                 color: 'b60205', description: 'Scheduled substrate audit failed' });
             }
             const sha = context.sha.slice(0, 7);
-            const body = `The scheduled substrate audit did not succeed (${process.env.AUDIT_RESULT}) on ${new Date().toISOString()} at ${sha}.\nRun: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}\nThe log names each check as PASS, BLOCK or TIMEOUT; download the \`substrate-audit-report\` artifact for the full report.`;
+            const body = `The scheduled substrate audit did not succeed (${process.env.AUDIT_RESULT}) on ${new Date().toISOString()} at ${sha}.\nRun: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}\nThe log names each check as PASS, BLOCK, TIMEOUT or NOT-RUN; download the \`substrate-audit-report\` artifact for the full report.`;
             // Only an issue this workflow opened, never a pull request or an issue
             // someone else labelled; if commenting fails (locked), open a new one.
             const open = await github.rest.issues.listForRepo({ ...context.repo,

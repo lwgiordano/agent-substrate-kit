@@ -192,7 +192,7 @@ echo "==> Smoke: strict profile-lock blocks a downgrade (minimal stage)"
 TREPO="$(mktemp -d)"
 echo "    strict smoke step: stage"
 mkdir -p "$TREPO/scripts" "$TREPO/.substrate"
-for f in check_substrate_config.py command_policy.py harness_patterns.json _substrate_root.py; do
+for f in check_substrate_config.py command_policy.py harness_patterns.json _substrate_root.py _doc_common.py; do
   cp "$APP/scripts/$f" "$TREPO/scripts/$f"
 done
 printf 'strict\n' > "$TREPO/.substrate/required_profile"

@@ -13957,7 +13957,11 @@ def _record_repo(tmp_path):
     # record_in_chain pins the root it was given.
     decoy = tmp_path / "decoy"
     (decoy / ".substrate" / "memory").mkdir(parents=True)
-    env = {k: v for k, v in os.environ.items() if k != "SUBSTRATE_PROJECT_DIR"}
+    # GITHUB_* and SUBSTRATE_HISTORY_BASE choose check_history_sha's base branch: the
+    # fixture never inherits them, so the suite behaves the same under Actions.
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("SUBSTRATE_PROJECT_DIR", "SUBSTRATE_HISTORY_BASE")
+           and not k.startswith("GITHUB_")}
     env["CLAUDE_PROJECT_DIR"] = str(decoy)
 
     def run(script, *a):

@@ -20,8 +20,11 @@ def _record_repo(tmp_path):
         (scripts / name).write_bytes((source / name).read_bytes())
     (root / "docs").mkdir()
     (root / ".substrate").mkdir()
+    # GITHUB_* and SUBSTRATE_HISTORY_BASE choose the HISTORY base; a test that wants
+    # CI behaviour sets them itself, so the suite behaves the same under Actions.
     env = {k: v for k, v in os.environ.items()
-           if not k.startswith("GIT_") and k != "CLAUDE_PROJECT_DIR"}
+           if not k.startswith(("GIT_", "GITHUB_"))
+           and k not in ("CLAUDE_PROJECT_DIR", "SUBSTRATE_HISTORY_BASE")}
     env["SUBSTRATE_PROJECT_DIR"] = str(root)
 
     def git(*args):
@@ -212,21 +215,23 @@ def test_a_committed_claim_not_on_the_base_needs_local_proof(tmp_path):
     assert "1 imported" not in result.stdout
 
 
+def _clean_env(root, **extra):
+    """The caller's GitHub variables never leak in: run under Actions, an inherited
+    GITHUB_ACTIONS turned these fixtures into CI runs."""
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith(("GIT_", "GITHUB_")) and k != "SUBSTRATE_HISTORY_BASE"}
+    return {**env, "SUBSTRATE_PROJECT_DIR": str(root), **extra}
+
+
 @pytest.mark.parametrize("actions", [False, True])
-def test_without_a_chain_a_new_claim_is_named_for_review_not_imported(tmp_path, monkeypatch,
-                                                                      actions):
+def test_without_a_chain_a_new_claim_is_named_for_review_not_imported(tmp_path, actions):
     """CI has no memory chain, so a release PR's own entry cannot be proven there;
     it passes, but is named as new and unverified instead of counted as imported."""
     root, _, run = _branch_with_forged_claim(tmp_path, local_chain=False)
-    if actions:
-        monkeypatch.setenv("GITHUB_ACTIONS", "true")
-        monkeypatch.setenv("GITHUB_BASE_REF", "main")
-    import os as _os
+    extra = {"GITHUB_ACTIONS": "true", "GITHUB_BASE_REF": "main"} if actions else {}
     result = subprocess.run([sys.executable, "-I", str(root / "scripts" / "check_history_sha.py")],
                             cwd=root, capture_output=True, text=True, timeout=60,
-                            env={**{k: v for k, v in _os.environ.items()
-                                    if not k.startswith("GIT_")},
-                                 "SUBSTRATE_PROJECT_DIR": str(root)})
+                            env=_clean_env(root, **extra))
     assert result.returncode == 0, result.stdout + result.stderr
     assert "1 imported-unverified" in result.stdout and "1 new-unverified" in result.stdout
     marker = "::warning title=Unverified shipped-green::" if actions else "WARNING"
@@ -276,11 +281,9 @@ def test_an_unrelated_or_missing_base_is_an_error_not_an_import(tmp_path, monkey
     result = run("check_history_sha.py")
     assert result.returncode == 2 and "shares no history" in result.stderr
     assert git("update-ref", "-d", "refs/remotes/origin/main").returncode == 0
-    import os as _os
-    env = {**{k: v for k, v in _os.environ.items() if not k.startswith("GIT_")},
-           "SUBSTRATE_PROJECT_DIR": str(root), "GITHUB_ACTIONS": "true"}
     result = subprocess.run([sys.executable, "-I", str(root / "scripts" / "check_history_sha.py")],
-                            cwd=root, capture_output=True, text=True, timeout=60, env=env)
+                            cwd=root, capture_output=True, text=True, timeout=60,
+                            env=_clean_env(root, GITHUB_ACTIONS="true"))
     assert result.returncode == 2 and "SUBSTRATE_HISTORY_BASE" in result.stderr
 
 

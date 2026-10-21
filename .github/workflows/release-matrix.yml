@@ -21,7 +21,7 @@ jobs:
         lang: [python, node, go, none]
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with: {python-version: "3.11"}
       - name: Bootstrap ${{ matrix.profile }}/${{ matrix.lang }}
         run: |
@@ -58,7 +58,7 @@ jobs:
           - {profile: strict+remote, lang: none}   # remote tier: CODEOWNERS coverage REQUIRED
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with: {python-version: "3.11"}
       - uses: actions/setup-node@v6
         if: ${{ matrix.lang == 'node' }}

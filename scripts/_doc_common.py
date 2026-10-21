@@ -140,7 +140,7 @@ def _code_suffixes() -> tuple[str, ...]:
                           | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
             if _st_early.S_ISREG(os.fstat(_fd).st_mode):
                 _raw = os.read(_fd, 1 << 20)
-                for line in _raw.decode("utf-8", errors="replace").splitlines():
+                for line in _raw.decode("utf-8", errors="replace").split("\n"):
                     if line.strip().startswith("SUBSTRATE_CODE_SUFFIXES="):
                         override = line.split("=", 1)[1].strip().strip("\"'")
                         break

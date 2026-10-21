@@ -208,6 +208,33 @@ def _strip_quotes_checked(raw: str, key: str):
     return v, None
 
 
+# Bytes both parsers read the same way, and nothing else (v3.10.5). Bash `read`
+# drops a NUL that Python keeps, so `TEST_CMD=cu<NUL>rl ... | sh` passed this
+# validator as one harmless word and ran as curl; Python's isdigit() and strip()
+# also accept non-ASCII digits and spaces the shell does not. Control characters
+# (other than tab, the line break and a CR right before it) are refused anywhere;
+# outside comment lines only printable ASCII is allowed. _substrate_config.sh
+# applies the same rule.
+# NEL, LS and PS too: str.splitlines() readers break lines on them even inside a
+# comment, where the shell and this parser do not (v3.10.5 audit).
+_CONFIG_CONTROL = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\x85\u2028\u2029]")
+_CONFIG_DATA_LINE = re.compile(r"[\t\x20-\x7e]*\r?")
+
+
+def config_text_problem(text: str) -> str | None:
+    """Why `text` is not a `.substrate/config` both loaders read alike, or None."""
+    m = _CONFIG_CONTROL.search(text)
+    if m:
+        return f"control character {m.group()!r} in .substrate/config"
+    for n, line in enumerate(text.split("\n"), 1):
+        if line.lstrip(" \t").startswith("#"):
+            continue
+        if not _CONFIG_DATA_LINE.fullmatch(line):
+            return (f".substrate/config line {n}: only printable ASCII is allowed "
+                    "outside comments (and a CR only at the end of a line)")
+    return None
+
+
 def parse_config_text(text: str) -> tuple[dict, str | None]:
     """The `.substrate/config` DATA grammar, as a pure function: (values, error).
 
@@ -220,6 +247,9 @@ def parse_config_text(text: str) -> tuple[dict, str | None]:
     round 39). Policy checks (locks, dangerous commands) stay in main().
     """
     vals: dict[str, str] = {}
+    problem = config_text_problem(text)
+    if problem:
+        return vals, problem
     for raw in text.split("\n"):
         line = raw
         # drop full-line comments / blanks

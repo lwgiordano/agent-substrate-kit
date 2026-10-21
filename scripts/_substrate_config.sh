@@ -54,6 +54,23 @@ _subcfg_strip_quotes() {
 load_substrate_config() {
   local cfg="${1:-.substrate/config}" line key raw val
   [ -f "$cfg" ] || return 0
+  # Bytes both loaders read the same way, and nothing else (v3.10.5): `read` drops
+  # a NUL that check_substrate_config.py keeps, so `cu<NUL>rl ... | sh` passed the
+  # validator as one harmless word and ran here as curl. Control characters (other
+  # than tab, the line break and a CR right before it) are refused anywhere; outside
+  # comment lines only printable ASCII. One grep per check on the file itself — no
+  # pipe, so an early `grep -q` exit can never be lost to pipefail.
+  local _cr; _cr="$(printf '\r')"
+  if [ "$(LC_ALL=C tr -d '\11\12\15\40-\176\200-\377' < "$cfg" | wc -c | tr -d ' ')" != "0" ] \
+     || LC_ALL=C grep -q -e "$(printf '\302\205')" -e "$(printf '\342\200\250')" \
+                         -e "$(printf '\342\200\251')" "$cfg"; then
+    echo "substrate-config: control character in $cfg" >&2; return 2
+  fi
+  if LC_ALL=C grep -q -e "^[[:blank:]]*[^#[:blank:]].*[^[:print:][:blank:]$_cr]" \
+                      -e "^[[:blank:]]*[^#[:blank:][:print:]$_cr]" \
+                      -e "^[[:blank:]]*[^#[:blank:]].*$_cr." -e "^[[:blank:]]*$_cr." "$cfg"; then
+    echo "substrate-config: only printable ASCII is allowed outside comments in $cfg (and a CR only at the end of a line)" >&2; return 2
+  fi
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
       ''|\#*|[[:space:]]*\#*) continue;;       # blank / comment line

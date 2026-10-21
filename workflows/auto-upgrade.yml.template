@@ -19,18 +19,22 @@ jobs:
   upgrade:
     runs-on: ubuntu-latest
     steps:
+      # No credentials on disk while the upgrade engine runs; only the last step
+      # pushes, with the token passed to it alone (v3.10.5).
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with: {fetch-depth: 0}
+        with: {fetch-depth: 0, persist-credentials: false}
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with: {python-version: "3.11"}
       - name: Fetch the latest signed release
         env: {GH_TOKEN: "${{ github.token }}"}
         run: |
           mkdir -p _upgrade && cd _upgrade
-          gh release download --repo "$KIT_REPO" --pattern '*.zip' --pattern '*.minisig' --pattern '*.sigstore' --pattern '*.sha256' || true
+          # Assets a release does not carry are skipped by gh; any other failure
+          # fails the job rather than letting the upgrade run on nothing.
+          gh release download --repo "$KIT_REPO" --pattern '*.zip' --pattern '*.minisig' --pattern '*.sigstore' --pattern '*.sha256'
       - name: Upgrade in place (the engine verifies the signature itself, fail-closed)
         run: |
-          python3 -m pip install --quiet cryptography
+          python3 -m pip install --quiet cryptography==50.0.2
           ZIP="$(ls _upgrade/*.zip | grep -v -- '-review-bundle' | head -1)"
           # `upgrade` runs the SAME multi-backend verifier internally (fail-closed), so the
           # consume path never bypasses the engine's own trust check (v3.7.19).
@@ -43,5 +47,5 @@ jobs:
           BR="substrate-upgrade-$(date -u +%Y%m%d)"
           git config user.name "substrate-bot"; git config user.email "substrate-bot@users.noreply.github.com"
           git checkout -b "$BR" && git add -A && git commit -qm "chore: substrate upgrade (verified release)"
-          git push -u origin "$BR"
-          gh pr create --title "Substrate upgrade (verified)" --body "Automated: verified the signed kit release and applied \`manage.sh upgrade\`. Review the diff before merging." --head "$BR" || true
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$BR"
+          gh pr create --title "Substrate upgrade (verified)" --body "Automated: verified the signed kit release and applied \`manage.sh upgrade\`. Review the diff before merging." --head "$BR"

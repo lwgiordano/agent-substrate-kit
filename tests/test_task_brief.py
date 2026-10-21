@@ -103,9 +103,15 @@ def test_brief_reads_current_docs_but_only_committed_lessons(project):
 @pytest.mark.parametrize("triggers", [None, 42, [None]])
 def test_malformed_local_lesson_yields_diagnostic_not_brief_crash(project, triggers):
     malformed = {"id": "L99", "rule": "local draft", "triggers": triggers}
-    (project / "docs/lessons.jsonl").write_text(json.dumps(malformed) + "\n")
+    good = {"id": "L98", "rule": "Keep the good lesson.", "status": "test",
+            "triggers": ["scripts/storage.py"]}
+    (project / "docs/lessons.jsonl").write_text(json.dumps(malformed) + "\n"
+                                                 + json.dumps(good) + "\n")
     report = api().build(project, "receipts", ["scripts/storage.py"], 6000)
     assert any(x.get("id") == "L1" for x in report["evidence"])
+    # v3.10.5: the bad record is reported; the good one is not dropped with it.
+    assert any("Keep the good lesson" in body
+               for _path, _line, _title, body in api("recall").collect(project))
     assert any(x["code"] == "malformed-source" and x["path"] == "docs/lessons.jsonl"
                for x in report["diagnostics"])
     assert api("recall").collect(project)  # legacy renderer shares the safe collector

@@ -78,7 +78,7 @@ def _remote_governance():
     strict-LOCAL or standard+remote."""
     cfg=ROOT/'.substrate/config'
     if True:
-        for line in (_safe_read_text(cfg, ROOT, max_bytes=1 << 20) or '').splitlines():
+        for line in (_safe_read_text(cfg, ROOT, max_bytes=1 << 20) or '').split('\n'):
             if line.split('#',1)[0].strip().startswith('SUBSTRATE_REMOTE_GOVERNANCE='):
                 return line.split('=',1)[1].split('#',1)[0].strip().strip('"\'')
     return '0'
@@ -87,7 +87,7 @@ def _dep_cooldown_days():
     cooldown deep tier. go-live reports it OFFLINE (never runs the networked check)."""
     cfg=ROOT/'.substrate/config'
     if True:
-        for line in (_safe_read_text(cfg, ROOT, max_bytes=1 << 20) or '').splitlines():
+        for line in (_safe_read_text(cfg, ROOT, max_bytes=1 << 20) or '').split('\n'):
             if line.split('#',1)[0].strip().startswith('SUBSTRATE_DEP_COOLDOWN='):
                 v=line.split('=',1)[1].split('#',1)[0].strip().strip('"\'')
                 return int(v) if v.isdigit() else 0
@@ -259,7 +259,7 @@ def _config_tool_warns():
     cfg=ROOT/'.substrate/config'
     if not cfg.exists(): return []
     vals={}
-    for line in (_safe_read_text(cfg, ROOT, max_bytes=1 << 20) or '').splitlines():
+    for line in (_safe_read_text(cfg, ROOT, max_bytes=1 << 20) or '').split('\n'):
         line=line.split('#',1)[0].strip()
         if '=' in line:
             k,v=line.split('=',1); vals[k.strip()]=v.strip().strip('"\'')
@@ -300,7 +300,7 @@ def _operational_findings():
     # Configured language commands must resolve (empty is fine = gate skipped).
     cfg=ROOT/'.substrate/config'; vals={}
     if cfg.exists():
-        for line in (_safe_read_text(cfg, ROOT, max_bytes=1 << 20) or '').splitlines():
+        for line in (_safe_read_text(cfg, ROOT, max_bytes=1 << 20) or '').split('\n'):
             line=line.split('#',1)[0].strip()
             if '=' in line:
                 k,v=line.split('=',1); vals[k.strip()]=v.strip().strip('"\'')

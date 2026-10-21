@@ -32,9 +32,12 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with: {python-version: "3.11"}
       - name: Freeze guard — a PR may not modify trusted policy/validator code
+        # Expressions go through env, never into the script text (v3.10.5).
+        env:
+          BASE_REF: ${{ github.base_ref }}
         run: |
           set -euo pipefail
-          git fetch --no-tags --depth=1 origin "${{ github.base_ref }}"
+          git fetch --no-tags --depth=1 origin "$BASE_REF"
           # Freeze ALL code that enforces policy OR runs CI: every validator and
           # gate (scripts/ — strict mode RESERVES scripts/ for substrate; put
           # project scripts elsewhere), the runner (manage.sh), the pre-commit
@@ -48,7 +51,7 @@ jobs:
           TRUSTED="scripts manage.sh .pre-commit-config.yaml .github/workflows .substrate/required_profile .substrate/required_sandbox .substrate/required_remote_governance .substrate/required_dep_cooldown .substrate/required_security_scanners .substrate/trust installer/substrate-init/src/substrate_init/trust .substrate/trusted-base-audit.yml.template"
           # carve the one DATA file back out of scripts/ (PRs may extend it; the
           # frozen check_harness_patterns.py validates it against pinned hashes).
-          changed="$(git diff --name-only "origin/${{ github.base_ref }}...HEAD" -- $TRUSTED \
+          changed="$(git diff --name-only "origin/$BASE_REF...HEAD" -- $TRUSTED \
                       | grep -v '^scripts/harness_patterns\.json$' || true)"
           if [ -n "$changed" ]; then
             echo "::error::This PR modifies frozen policy/validator/CI code:"
@@ -61,7 +64,7 @@ jobs:
           # Profile authority: even though .substrate/config is editable DATA
           # (command values), the PROFILE within it is frozen — a PR must not
           # flip strict->standard/starter to disable strict-only behavior.
-          if git diff "origin/${{ github.base_ref }}...HEAD" -- .substrate/config \
+          if git diff "origin/$BASE_REF...HEAD" -- .substrate/config \
                | grep -Eq '^[+-]\s*SUBSTRATE_PROFILE='; then
             echo "::error::This PR changes SUBSTRATE_PROFILE in .substrate/config."
             echo "::error::The profile is frozen in strict mode (.substrate/required_profile)."
@@ -71,7 +74,7 @@ jobs:
           # Sandbox authority (v3.5.1): when containment is a required minimum
           # (.substrate/required_sandbox=1), the SUBSTRATE_SANDBOX flag is frozen too
           # — a PR must not disable egress containment while keeping strict governance.
-          if git diff "origin/${{ github.base_ref }}...HEAD" -- .substrate/config \
+          if git diff "origin/$BASE_REF...HEAD" -- .substrate/config \
                | grep -Eq '^[+-]\s*SUBSTRATE_SANDBOX='; then
             echo "::error::This PR changes SUBSTRATE_SANDBOX in .substrate/config."
             echo "::error::Sandbox enablement is frozen when .substrate/required_sandbox=1."
@@ -82,7 +85,7 @@ jobs:
           # minimum (.substrate/required_remote_governance=1), the SUBSTRATE_REMOTE_GOVERNANCE
           # flag is frozen too — a PR must not silently drop CODEOWNERS coverage / trusted-base
           # authority while keeping the rest of the governance posture.
-          if git diff "origin/${{ github.base_ref }}...HEAD" -- .substrate/config \
+          if git diff "origin/$BASE_REF...HEAD" -- .substrate/config \
                | grep -Eq '^[+-]\s*SUBSTRATE_REMOTE_GOVERNANCE='; then
             echo "::error::This PR changes SUBSTRATE_REMOTE_GOVERNANCE in .substrate/config."
             echo "::error::Remote governance is frozen when .substrate/required_remote_governance=1."
@@ -91,7 +94,7 @@ jobs:
           fi
           # Dependency-cooldown authority (v3.7.2): frozen when required_dep_cooldown=1 —
           # a PR must not silently disable the fresh-version risk signal.
-          if git diff "origin/${{ github.base_ref }}...HEAD" -- .substrate/config \
+          if git diff "origin/$BASE_REF...HEAD" -- .substrate/config \
                | grep -Eq '^[+-]\s*SUBSTRATE_DEP_COOLDOWN='; then
             echo "::error::This PR changes SUBSTRATE_DEP_COOLDOWN in .substrate/config."
             echo "::error::Dependency cooldown is frozen when .substrate/required_dep_cooldown=1."
@@ -100,7 +103,7 @@ jobs:
           fi
           # Security-scanner authority (v3.7.17): frozen when required_security_scanners=1 —
           # a PR must not silently disable the composed scanner tier.
-          if git diff "origin/${{ github.base_ref }}...HEAD" -- .substrate/config \
+          if git diff "origin/$BASE_REF...HEAD" -- .substrate/config \
                | grep -Eq '^[+-]\s*SUBSTRATE_SECURITY_SCANNERS='; then
             echo "::error::This PR changes SUBSTRATE_SECURITY_SCANNERS in .substrate/config."
             echo "::error::The scanner tier is frozen when .substrate/required_security_scanners=1."
@@ -109,7 +112,7 @@ jobs:
           fi
           # Release-backend authority (v3.7.18): the release/signing posture is maintainer-owned
           # — a PR must not silently downgrade it (e.g. keyless -> local) to weaken release trust.
-          if git diff "origin/${{ github.base_ref }}...HEAD" -- .substrate/config \
+          if git diff "origin/$BASE_REF...HEAD" -- .substrate/config \
                | grep -Eq '^[+-]\s*SUBSTRATE_RELEASE_BACKEND='; then
             echo "::error::This PR changes SUBSTRATE_RELEASE_BACKEND in .substrate/config."
             echo "::error::The release/signing posture is frozen — change it through the release process."
@@ -138,9 +141,10 @@ jobs:
       - name: Verify GitHub branch protection enforces the root of trust
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BASE_REF: ${{ github.base_ref }}
         # Advisory by default: the default GITHUB_TOKEN usually cannot read
         # branch protection (needs admin), so this SKIPS rather than fails for
-        # a permissions reason. To ENFORCE, give it an admin-scoped token and
-        # add `--require` so a branch lacking required-check / code-owner-review
-        # protection fails the audit.
-        run: python3 -I scripts/check_github_governance.py --branch "${{ github.base_ref }}"
+        # a permissions reason, and raises a warning annotation when it does. To
+        # ENFORCE, give it an admin-scoped token and add `--require` so a branch
+        # lacking required-check / code-owner-review protection fails the audit.
+        run: python3 -I scripts/check_github_governance.py --branch "$BASE_REF"

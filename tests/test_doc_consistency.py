@@ -53,9 +53,14 @@ KNOWLEDGE_ASSERTS = {
     "scripts/task_receipt.py::digest-only",
     "scripts/task_receipt.py::result-without-start",
     "scripts/task_receipt.py::harness_changed",
+    "scripts/task_receipt.py::_CHECK_SELECTION_ENV = frozenset",
+    "scripts/project_status.py::profile-below-lock",
+    "scripts/append_history.py::def _withheld_at_session_start",
     "scripts/project_status.py::not checked",
     "scripts/project_status.py::inspection-failed",
     "scripts/check_substrate_config.py::def parse_config_text",
+    "scripts/check_substrate_config.py::def config_text_problem",
+    "scripts/lang_gate.sh::run_gate(){",
     "scripts/substrate_audit.py::SUBSTRATE_AUDIT_PYTEST_TIMEOUT",
     "scripts/substrate_audit.py::'TIMEOUT'",
     "scripts/substrate_audit.py::_redact(out)",
@@ -589,13 +594,32 @@ def test_scheduled_audit_can_open_its_failure_issue() -> None:
             "${{ github.event.inputs.pytest_timeout }}", path.name
         assert alert_job.get("permissions") == {"issues": "write"}, path.name
         assert alert_job.get("needs") == "scheduled-audit", path.name
-        assert "always()" in alert_job["if"] and "!= 'success'" in alert_job["if"], path.name
+        # Exact, not substrings: `&& result != 'cancelled'` appended to a correct
+        # condition survived the substring checks (v3.10.5 review).
+        assert alert_job["if"] == "${{ always() && needs.scheduled-audit.result != 'success' }}", \
+            path.name
+        assert "continue-on-error" not in audit_job and not any(
+            "continue-on-error" in s for s in audit_job["steps"]), \
+            f"{path.name}: a failing audit step must fail the job, or the alert never fires"
+        dispatch = yaml.safe_load(path.read_text(encoding="utf-8"))[True]["workflow_dispatch"]
+        described = dispatch["inputs"]["pytest_timeout"]["description"]
+        default = re.search(r"PYTEST_TIMEOUT_DEFAULT=(\d+)",
+                            (KIT / "scripts" / "substrate_audit.py").read_text(encoding="utf-8"))
+        assert f"({limit.group(1)}-{limit.group(2)}; empty = default {default.group(1)})" \
+            in described, f"{path.name}: the input description disagrees with substrate_audit.py"
         assert not any("checkout" in s.get("uses", "") or "run" in s
                        for s in alert_job["steps"]), f"{path.name}: alert job runs code"
         script = alert_job["steps"][0]["with"]["script"]
         for call in ("getLabel", "createLabel", "issues.create(", "createComment",
                      "pull_request", "github-actions[bot]"):
             assert call in script, f"{path.name}: alert step lacks {call}"
+        # Whole statements, so a flipped comparison or a dropped label is caught.
+        for statement in ("if (e.status !== 404) throw e;",
+                          "i => !i.pull_request && i.user &&",
+                          "i.user.login === 'github-actions[bot]'",
+                          "body, labels: [label] });",
+                          "PASS, BLOCK, TIMEOUT or NOT-RUN"):
+            assert statement in script, f"{path.name}: alert step lacks {statement!r}"
 
 
 def test_workflow_actions_are_pinned_to_commit_shas() -> None:
@@ -626,7 +650,76 @@ def test_workflow_actions_are_pinned_to_commit_shas() -> None:
             if not pinned.fullmatch(value):
                 loose.append(f"{path.name}: {value}")
     assert seen >= 30
+    # The parsed YAML too: a flow-style `- {uses: actions/checkout@v4}` step has no
+    # `uses:` at the start of its line (v3.10.5 review).
+    import yaml
+    for path in paths:
+        jobs = (yaml.safe_load(path.read_text(encoding="utf-8")) or {}).get("jobs") or {}
+        for job in jobs.values():
+            for step in job.get("steps") or []:
+                ref = step.get("uses")
+                if ref and ref not in unverifiable:
+                    assert re.fullmatch(r"[\w.-]+/[\w./-]+@[0-9a-f]{40}", ref), \
+                        f"{path.name}: {ref}"
     assert not loose, "actions not pinned to a commit SHA with a version comment:\n" + \
         "\n".join(loose)
     keyless = (KIT / "workflows" / "release-keyless.yml.template").read_text(encoding="utf-8")
     assert "not SHA-verified" in keyless
+
+
+def test_knowledge_doc_counts_in_prose_match_the_directory() -> None:
+    """The entry doc and the install doc state how many knowledge docs the source kit
+    has; adding 11_receipts_projects.md left both one short (v3.10.5)."""
+    words = {10: "ten", 11: "eleven", 12: "twelve", 13: "thirteen", 14: "fourteen",
+             15: "fifteen", 16: "sixteen"}
+    docs = sorted(p.name for p in (KIT / "docs" / "knowledge").glob("[0-9][0-9]_*.md"))
+    assert set(docs) == set(KNOWLEDGE_DOCS)
+    total, siblings = words[len(docs)], words[len(docs) - 1]
+    entry = (KIT / "docs/knowledge/00_substrate.md").read_text(encoding="utf-8")
+    install = (KIT / "docs/knowledge/01_install_adoption.md").read_text(encoding="utf-8")
+    assert f"{total} documents belong to the source kit" in entry
+    assert f"The {siblings} source siblings" in entry
+    assert f"holds {total} functional knowledge documents" in install
+    assert f"the {siblings} source-only documents" in install
+
+
+def test_consumer_ci_runs_the_same_supported_node_as_the_kit() -> None:
+    """v3.10.4 moved consumer CI off end-of-life Node 20; nothing pinned it, so a
+    revert to "20" left every test green (v3.10.5 review)."""
+    import yaml
+
+    def node_versions(path):
+        found = []
+        for job in yaml.safe_load(path.read_text(encoding="utf-8"))["jobs"].values():
+            for step in job.get("steps") or []:
+                if "setup-node" in (step.get("uses") or ""):
+                    found.append(str(step["with"]["node-version"]))
+        return found
+
+    kit = node_versions(KIT / ".github" / "workflows" / "ci.yml")
+    consumer = node_versions(KIT / "workflows" / "ci.yml.template")
+    assert kit and kit == consumer
+    assert all(int(v) >= 22 for v in kit), kit
+
+
+def test_workflows_that_run_repository_code_hold_a_read_only_token() -> None:
+    """v3.10.5: CI and agent-config-audit ran PR code with the default token and kept
+    checkout credentials in .git/config."""
+    import yaml
+    for path in (KIT / ".github/workflows/ci.yml", KIT / "workflows/ci.yml.template",
+                 KIT / ".github/workflows/agent-config-audit.yml",
+                 KIT / "workflows/agent-config-audit.yml.template",
+                 KIT / ".github/workflows/release-matrix.yml"):
+        doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+        assert doc.get("permissions") == {"contents": "read"}, path.name
+        for name, job in doc["jobs"].items():
+            for step in job.get("steps") or []:
+                if "actions/checkout" in (step.get("uses") or ""):
+                    assert (step.get("with") or {}).get("persist-credentials") is False, \
+                        f"{path.name}:{name}"
+    for path in (KIT / "workflows").glob("*.template"):
+        for job in (yaml.safe_load(path.read_text(encoding="utf-8")) or {}).get("jobs", {}).values():
+            for step in job.get("steps") or []:
+                assert "${{" not in (step.get("run") or "").replace("${{ matrix.", ""), \
+                    f"{path.name}: an expression is interpolated into a run script; use env"
+

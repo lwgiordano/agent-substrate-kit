@@ -111,12 +111,43 @@ def _entry_units(text: str) -> list[str]:
             .rstrip("\n") for i, m in enumerate(headers)]
 
 
-def _committed_history_entries() -> Counter:
+def _base_commit(git_try) -> tuple[str, str] | None:
+    """(merge-base of HEAD with the upstream base branch, its ref), or None.
+
+    v3.10.5: "imported" meant "committed at HEAD", and in CI HEAD contains the
+    pull request itself, so a forged shipped-green entry committed with
+    --no-verify passed as imported. An entry is imported only if the base branch
+    already had it: the PR's base in Actions, else origin's default branch."""
+    wanted = []
+    for name in (os.environ.get("SUBSTRATE_HISTORY_BASE", ""), os.environ.get("GITHUB_BASE_REF", "")):
+        name = name.strip()
+        if name and re.fullmatch(r"[A-Za-z0-9._/-]{1,200}", name) and ".." not in name \
+                and not name.startswith("-"):
+            wanted.append(f"refs/remotes/origin/{name}")
+    wanted += ["refs/remotes/origin/HEAD", "refs/remotes/origin/main", "refs/remotes/origin/master"]
+    for ref in wanted:
+        tip = git_try("rev-parse", "--verify", "-q", f"{ref}^{{commit}}")
+        if tip:
+            base = git_try("merge-base", "HEAD", tip.strip())
+            if not base:
+                # Unknown is not "everything at HEAD is imported" (v3.10.5 audit).
+                raise ValueError(f"HEAD shares no history with {ref}")
+            return base.strip(), ref
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        raise ValueError("no base branch to compare HISTORY with in CI; "
+                         "set SUBSTRATE_HISTORY_BASE to the base branch name")
+    return None
+
+
+def _committed_history_entries() -> tuple[Counter, Counter | None, str | None]:
     """Reported provenance, NEVER release proof. Fail if Git cannot answer.
 
-    A merge can bring unchanged entries from either parent. Counter union takes
-    the maximum multiplicity across parents, not their sum: the common ancestor
-    must not authorize an extra identical success entry.
+    Returns (imported, at_head, base_ref). With an upstream base branch, imported
+    entries are those the base already had and at_head holds what HEAD commits;
+    with none (a clone without origin), imported is what HEAD commits and at_head
+    is None. A merge can bring unchanged entries from either parent. Counter union
+    takes the maximum multiplicity across parents, not their sum: the common
+    ancestor must not authorize an extra identical success entry.
     """
     from memory_log import _clean_env
     env = _clean_env()
@@ -126,6 +157,11 @@ def _committed_history_entries() -> Counter:
         p = subprocess.run(["git", "-c", "core.fsmonitor=false", *args], cwd=_REPO,
                            env=env, capture_output=True, timeout=30, check=True)
         return p.stdout.decode("utf-8")
+
+    def git_try(*args):
+        p = subprocess.run(["git", "-c", "core.fsmonitor=false", *args], cwd=_REPO,
+                           env=env, capture_output=True, timeout=30, check=False)
+        return p.stdout.decode("utf-8") if p.returncode == 0 else None
 
     refs = [git("rev-parse", "--verify", "HEAD^{commit}").strip()]
     # git worktrees keep MERGE_HEAD in their own administration directory.
@@ -139,20 +175,31 @@ def _committed_history_entries() -> Counter:
             if not re.fullmatch(r"[0-9a-f]{40,64}", sha):
                 raise ValueError("malformed MERGE_HEAD")
             refs.append(git("rev-parse", "--verify", f"{sha}^{{commit}}").strip())
-    entries = Counter()
-    for ref in refs:
-        listing = git("ls-tree", "-z", ref, "--", "docs/HISTORY.md")
-        if not listing:
-            continue
-        metadata, path = listing.rstrip("\0").split("\t", 1)
-        mode, kind, oid = metadata.split()
-        if mode not in ("100644", "100755") or kind != "blob" or path != "docs/HISTORY.md":
-            raise ValueError("committed HISTORY is not a regular blob")
-        size = int(git("cat-file", "-s", oid).strip())
-        if size > 64 << 20:
-            raise ValueError("committed HISTORY exceeds read limit")
-        entries |= Counter(_entry_units(git("cat-file", "blob", oid)))
-    return entries
+
+    def entries_at(commits):
+        entries = Counter()
+        for ref in commits:
+            listing = git("ls-tree", "-z", ref, "--", "docs/HISTORY.md")
+            if not listing:
+                continue
+            metadata, path = listing.rstrip("\0").split("\t", 1)
+            mode, kind, oid = metadata.split()
+            if mode not in ("100644", "100755") or kind != "blob" or path != "docs/HISTORY.md":
+                raise ValueError("committed HISTORY is not a regular blob")
+            size = int(git("cat-file", "-s", oid).strip())
+            if size > 64 << 20:
+                raise ValueError("committed HISTORY exceeds read limit")
+            entries |= Counter(_entry_units(git("cat-file", "blob", oid)))
+        return entries
+
+    at_head = entries_at(refs)
+    base = _base_commit(git_try)
+    if base is None:
+        return at_head, None, None
+    # Each parent of an in-progress merge counts only for what it shares with the base.
+    bases = [base[0]] + [mb.strip() for mb in (git_try("merge-base", r, base[0]) for r in refs[1:])
+                         if mb]
+    return entries_at(bases), at_head, base[1]
 
 
 def _all_commits() -> dict[str, str]:
@@ -459,7 +506,10 @@ def main() -> int:
     # Leaving a label off gains nothing: only a label can claim success.
     # append_history still writes one on every entry.
     n_outcome = n_unverifiable = n_locally_verified = n_invalid = 0
-    imported = None
+    imported = at_head = base_ref = None
+    base_headers: set[str] = set()
+    pending: list[str] = []
+    has_chain = os.path.lexists(_REPO / ".substrate" / "memory" / "events.jsonl")
     units = _entry_units(text)
     unlabelled: list[str] = []
     bodies = [text[m.end():(headers[i + 1].start() if i + 1 < len(headers) else len(text))]
@@ -490,14 +540,30 @@ def main() -> int:
                 if state == "unavailable":
                     if imported is None:
                         try:
-                            imported = _committed_history_entries()
+                            imported, at_head, base_ref = _committed_history_entries()
+                            base_headers = ({u.split("\n", 1)[0] for u in imported}
+                                            if at_head is not None else set())
                         except (OSError, ValueError, subprocess.SubprocessError) as exc:
                             print("check-history-sha: cannot read committed HISTORY provenance "
-                                  f"({type(exc).__name__})", file=sys.stderr)
+                                  f"({type(exc).__name__}: {str(exc)[:200]})".replace("::", ": :"),
+                                  file=sys.stderr)
                             return 2
                     if imported[units[i]] > 0:
                         imported[units[i]] -= 1
                         n_unverifiable += 1
+                        continue
+                    if units[i].split("\n", 1)[0] in base_headers:
+                        # HISTORY is append-only: the base already has an entry with
+                        # this header and different text (v3.10.5 audit).
+                        n_invalid += 1
+                        findings.append(f"{ts}: edits a shipped-green entry already on "
+                                        f"{base_ref}; HISTORY entries are never edited")
+                        continue
+                    if at_head is not None and at_head[units[i]] > 0 and not has_chain:
+                        # New on this branch, in a checkout that cannot hold release
+                        # proof (CI, a fresh clone): named for review, never imported.
+                        at_head[units[i]] -= 1
+                        pending.append(f"{ts} ({entry_shas[i]})")
                         continue
                     problem = "new or modified shipped-green entry needs local proof: " + problem
                 elif state == "verified":
@@ -515,7 +581,9 @@ def main() -> int:
         print("check-history-sha: HISTORY SHA DRIFT DETECTED", file=sys.stderr)
         print("=" * 72, file=sys.stderr)
         for f in findings:
-            print(f"  {f}", file=sys.stderr)
+            # HISTORY text is repository data: `::` would start a workflow
+            # command in an Actions log (v3.10.5).
+            print(f"  {f}".replace("::", ": :"), file=sys.stderr)
         print(
             f"\n{len(findings)} drift issue(s) "
             f"({n_sha} sha-verified / {n_working} bootstrap / "
@@ -531,8 +599,18 @@ def main() -> int:
         f"({n_sha} sha-resolved / {n_working} bootstrap / "
         f"{n_correction} correction; {n_outcome} outcome-labelled; "
         f"{n_unverifiable} imported-unverified / {n_locally_verified} locally-verified / "
-        f"{n_invalid} invalid outcome)."
+        f"{len(pending)} new-unverified / {n_invalid} invalid outcome)."
     )
+    if pending:
+        where = f"not on {base_ref}" if base_ref else "new"
+        for item in pending:
+            line = (f"shipped-green entry {item} is {where} and this checkout has no memory "
+                    "chain to prove it: a reviewer must confirm the release gate passed on "
+                    "that commit").replace("::", ": :")
+            if os.environ.get("GITHUB_ACTIONS") == "true":
+                print(f"::warning title=Unverified shipped-green::{line}")
+            else:
+                print(f"check-history-sha: WARNING — {line}")
     if unlabelled:
         print(f"check-history-sha: WARNING — {len(unlabelled)} entr"
               f"{'y' if len(unlabelled) == 1 else 'ies'} after the first labelled one "

@@ -1,6 +1,6 @@
 ---
 purpose: The memory trust anchor — monotonic advance, remote confirmation, and limits.
-last_human_reviewed: 2026-09-28
+last_human_reviewed: 2026-10-21
 covers:
   - scripts/memory_log.py
   - scripts/release_gate.sh
@@ -89,7 +89,11 @@ the note itself and, when refused, prints the payload plus the `git notes
 payload travels in text where the ref does not.
 
 The gate records its `release-pass` event BEFORE writing the note, so the
-anchor covers that evidence. The gate certifies the END state. Its memory check runs before the fresh note is
+anchor covers that evidence. The event's `clean_start` needs both the gate's
+start-of-run observation and a tracked tree that is clean when the event is
+written: `memory release-pass` can be run by hand, and its caller's word alone
+must not mint the evidence `shipped-green` needs. That bounds a careless claim,
+not a deliberate one (ADR 0002). The gate certifies the END state. Its memory check runs before the fresh note is
 written, so announcing success there described the state the release started in:
 a refused push left a strict release green over a repo whose next
 `verify --anchor` failed outright. The anchor is written, published, and

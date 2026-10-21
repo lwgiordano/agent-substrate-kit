@@ -41,6 +41,11 @@ still proposes the bumps. Each pinned SHA is one the kit's own CI has run. The
 exception is `sigstore/cosign-installer` in the keyless release template: it
 never runs in the kit, so it stays on its tag, marked not SHA-verified, until
 an operator pins it to a commit they have checked. Node jobs run Node 24.
+Jobs that run repository code hold a read-only token and check out without
+persisting credentials; workflow expressions reach scripts through `env`, never
+the script text. The release templates pin the Python package they install
+next to the signing key or OIDC identity; the kit's own CI installs its test
+tools unpinned, in jobs that hold no secret on pull requests.
 
 `docs/manifest.json` is generated from source knowledge docs and ADRs. It is not
 hand-edited. `.substrate/install.json` is generated after render and records the

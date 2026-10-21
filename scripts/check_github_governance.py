@@ -56,6 +56,12 @@ def _skip(msg: str, require: bool) -> int:
     stream = sys.stderr if require else sys.stdout
     tag = "BLOCK" if require else "SKIP"
     print(f"check-github-governance: {tag} ({msg})", file=stream)
+    if not require and os.environ.get("GITHUB_ACTIONS") == "true":
+        # A skip is not a pass: a 401/403/404 must show on the run summary, not
+        # only in a log line nobody opens (v3.10.5; the v3.10.2 alert was refused
+        # with HTTP 403 for weeks without anyone seeing it).
+        print("::warning title=Branch protection not verified::"
+              + msg.replace("::", ": :").replace("\n", " "))
     return 1 if require else 0
 
 

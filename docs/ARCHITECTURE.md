@@ -1,7 +1,7 @@
 # Architecture
 
 Component map, data flow, trust boundaries, threat model, and the
-host-capability matrix. Contracts live in `docs/knowledge/01–07`; this file
+host-capability matrix. Contracts live in `docs/knowledge/01–11`; this file
 is the system-level view that connects them.
 
 ## Components
@@ -16,6 +16,7 @@ is the system-level view that connects them.
 | Evals | `scripts/run_substrate_evals.py` | Behavioral proof: malicious tasks must be blocked, benign tasks must pass, in kit and installed layouts |
 | Release / upgrade | `package_release.sh`, `scripts/release_gate.sh`, `scripts/substrate_upgrade.py` | Artifact packaged (signed when a maintainer key is present, else honestly unsigned), gate re-run from the built artifact, verified in-place upgrade with ownership migration |
 | Coordination | `AGENT_BUS.md`, `docs/HISTORY.md`, `docs/REJECTED.md` | Append-only, git-carried records for multi-agent claims, history, and rejected designs |
+| Task evidence | `manage.sh brief`, `manage.sh receipt`, `manage.sh projects` | Read-only task brief, local unsigned work receipts (what ran, on which tree, whether it still applies), read-only multi-project status |
 
 ## Data flow
 

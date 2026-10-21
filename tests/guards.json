@@ -1104,7 +1104,7 @@
       "tests": [
         "tests/test_project_status.py::test_config_parser_splits_lines_like_the_shell"
       ],
-      "why": "a value hidden after VT/FF reads as a separate assignment to Python but not to the shell"
+      "why": "text after a CR inside a comment reads as a live assignment to Python but stays comment to the shell"
     },
     {
       "id": "projects-uses-kit-parser-not-target",
@@ -1119,7 +1119,7 @@
     {
       "id": "receipt-reports-harness-changes",
       "file": "scripts/task_receipt.py",
-      "find": "    harness = _harness_changed(before)\n",
+      "find": "    harness = _harness_changed(before, since=start_head, root=root)\n",
       "replace": "    harness = []\n",
       "tests": [
         "tests/test_task_receipt.py::test_a_check_run_on_modified_gate_files_says_so"
@@ -1129,7 +1129,7 @@
     {
       "id": "receipt-withholds-credential-lines",
       "file": "scripts/task_receipt.py",
-      "find": "        if _CREDENTIAL_LINE.search(line):\n",
+      "find": "        if _CREDENTIAL_LINE.search(shown[:CREDENTIAL_SCAN]):\n",
       "replace": "        if False:\n",
       "tests": [
         "tests/test_task_receipt.py::test_credential_shaped_lines_and_key_blocks_are_withheld_from_excerpts"
@@ -1308,6 +1308,139 @@
         "tests/test_project_status.py::test_release_package_really_leaves_out_local_state"
       ],
       "why": "a maintainer's receipts and execution scratch ship inside the release zip"
+    },
+    {
+      "id": "lang-gate-command-status-is-the-gate",
+      "file": "scripts/lang_gate.sh",
+      "find": "  maybe_sandbox \"$@\" || rc=$?\n",
+      "replace": "  maybe_sandbox \"$@\" || skip \"command failed\"\n",
+      "tests": [
+        "tests/test_hook_scripts.py::test_lang_gate_failure_is_never_a_skip",
+        "tests/test_hook_scripts.py::test_lang_gate_sandbox_refusal_fails_the_gate"
+      ],
+      "why": "a failing npm test or go test reads as skipped and the gate passes"
+    },
+    {
+      "id": "config-validator-refuses-control-bytes",
+      "file": "scripts/check_substrate_config.py",
+      "find": "    problem = config_text_problem(text)\n    if problem:\n        return vals, problem\n",
+      "replace": "",
+      "tests": [
+        "tests/test_hook_scripts.py::test_config_loaders_accept_and_refuse_the_same_bytes"
+      ],
+      "why": "a NUL hides a download piped into a shell from the validator"
+    },
+    {
+      "id": "shell-loader-refuses-control-bytes",
+      "file": "scripts/_substrate_config.sh",
+      "find": "  if [ \"$(LC_ALL=C tr -d '\\11\\12\\15\\40-\\176\\200-\\377' < \"$cfg\" | wc -c | tr -d ' ')\" != \"0\" ] \\\n",
+      "replace": "  if false \\\n",
+      "tests": [
+        "tests/test_hook_scripts.py::test_config_loaders_accept_and_refuse_the_same_bytes"
+      ],
+      "why": "the shell runs a command the validator read differently"
+    },
+    {
+      "id": "receipt-drops-check-selection-env",
+      "file": "scripts/task_receipt.py",
+      "find": "           if not k.startswith(\"GIT_\") and k not in _CHECK_SELECTION_ENV}\n",
+      "replace": "           if not k.startswith(\"GIT_\")}\n",
+      "tests": [
+        "tests/test_task_receipt.py::test_check_selection_variables_never_reach_the_check"
+      ],
+      "why": "an exported SKIP makes a failing check read as passed"
+    },
+    {
+      "id": "receipt-flags-gate-committed-after-start",
+      "file": "scripts/task_receipt.py",
+      "find": "    harness = _harness_changed(before, since=start_head, root=root)\n",
+      "replace": "    harness = _harness_changed(before)\n",
+      "tests": [
+        "tests/test_task_receipt.py::test_a_gate_committed_after_the_task_started_is_still_flagged"
+      ],
+      "why": "committing a weakened gate first clears the warning"
+    },
+    {
+      "id": "receipt-refuses-withheld-text",
+      "file": "scripts/task_receipt.py",
+      "find": "    if clean == _STRIPPED:\n",
+      "replace": "    if False:\n",
+      "tests": [
+        "tests/test_task_receipt.py::test_text_the_context_filter_would_withhold_is_refused_not_stored"
+      ],
+      "why": "a task is stored as the strip placeholder and records nothing"
+    },
+    {
+      "id": "projects-row-errors-on-diagnostics",
+      "file": "scripts/project_status.py",
+      "find": "    row[\"status\"] = \"error\" if facts.get(\"status\") != \"ok\" or problems else \"ok\"\n",
+      "replace": "    row[\"status\"] = \"error\" if facts.get(\"status\") != \"ok\" else \"ok\"\n",
+      "tests": [
+        "tests/test_project_status.py::test_project_without_kit_and_with_unsafe_metadata_is_shown_accurately",
+        "tests/test_project_status.py::test_a_profile_below_its_lock_or_disabled_hooks_is_an_error_row"
+      ],
+      "why": "a project with invalid config or unsafe locks reads ok"
+    },
+    {
+      "id": "fact-fields-skip-command-word-filter",
+      "file": "scripts/_task_evidence.py",
+      "find": "        clean = (safe_fact if key in FACT_KEYS else safe_text)(value, len(value) + 1)\n",
+      "replace": "        clean = safe_text(value, len(value) + 1)\n",
+      "tests": [
+        "tests/test_project_status.py::test_a_root_naming_a_tool_is_shown_as_its_path"
+      ],
+      "why": "every project under a directory named python reads as the same placeholder"
+    },
+    {
+      "id": "history-imported-means-on-the-base",
+      "file": "scripts/check_history_sha.py",
+      "find": "    base = _base_commit(git_try)\n",
+      "replace": "    base = None\n",
+      "tests": [
+        "tests/test_history_evidence_portability.py::test_a_committed_claim_not_on_the_base_needs_local_proof",
+        "tests/test_history_evidence_portability.py::test_without_a_chain_a_new_claim_is_named_for_review_not_imported"
+      ],
+      "why": "a forged shipped-green entry committed with --no-verify passes as imported"
+    },
+    {
+      "id": "append-history-refuses-withheld-lines",
+      "file": "scripts/append_history.py",
+      "find": "    withheld = _withheld_at_session_start(fields[\"summary\"], fields[\"knowledge\"])\n",
+      "replace": "    withheld = []\n",
+      "tests": [
+        "tests/test_hook_scripts.py::test_append_history_refuses_a_line_session_start_would_withhold"
+      ],
+      "why": "an entry the next session never sees is written and can never be edited"
+    },
+    {
+      "id": "completion-gate-needs-verified-audit",
+      "file": "scripts/completion_gate.py",
+      "find": "        if data.get(\"verified\") is not True:\n            continue\n",
+      "replace": "",
+      "tests": [
+        "tests/test_hook_scripts.py::test_completion_gate_audit_evidence_clears_and_restains"
+      ],
+      "why": "a self-asserted --result pass silences the completion nudge"
+    },
+    {
+      "id": "release-pass-clean-start-needs-clean-tree",
+      "file": "scripts/memory_log.py",
+      "find": "            clean_start = bool(tree) and p.returncode == 0 and p.stdout.strip() == \"\"\n",
+      "replace": "            clean_start = True\n",
+      "tests": [
+        "tests/test_history_evidence_portability.py::test_a_release_pass_on_a_dirty_tree_cannot_claim_a_clean_start"
+      ],
+      "why": "a hand-run release-pass on a dirty tree mints shipped-green evidence"
+    },
+    {
+      "id": "consumer-ci-token-is-read-only",
+      "file": "workflows/ci.yml.template",
+      "find": "  contents: read\njobs:\n",
+      "replace": "  contents: write\njobs:\n",
+      "tests": [
+        "tests/test_doc_consistency.py::test_workflows_that_run_repository_code_hold_a_read_only_token"
+      ],
+      "why": "pull request code runs with a token that can write to the repository"
     }
   ]
 }

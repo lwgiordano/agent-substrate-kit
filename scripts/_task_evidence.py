@@ -211,24 +211,52 @@ def safe_text(value: str, limit: int = 2000) -> str:
     return _shown(_safe_history_line(value, limit, discard_secrets=True))
 
 
+# Report fields that are filesystem or git facts, not prose (v3.10.5). They get the
+# terminal and credential filters but not the context filter for command words and
+# instructions, which read a project under .../python/ or a branch named fix-node
+# as a shell command and printed every such row as the same strip placeholder.
+FACT_KEYS = frozenset({"root", "path", "branch", "worktree"})
+
+
+def safe_fact(value: str, limit: int = 2000) -> str:
+    """The instruction and role filters still apply, and a value with a space in it
+    reads as prose and gets the command-word filter too: a file NAMED like an
+    instruction is not a fact to show verbatim (v3.10.5 audit)."""
+    from bus_claims import _shown
+    from session_handoff import (_INSTRUCTION_PREFIX, _INVISIBLE_CHARS, _ROLE_PREFIX,
+                                 _STRIPPED_HISTORY, _TODO_INJECTION, _TODO_SHELLISH,
+                                 _clip_words, _redact, _scan_variants)
+    text = _redact(" ".join(_INVISIBLE_CHARS.sub("", str(value)[:1 << 18]).split()))
+    if "[REDACTED-SECRET]" in text:
+        text = "[REDACTED-SECRET]"
+    text = _clip_words(text, limit)
+    checks = [_TODO_INJECTION, _ROLE_PREFIX, _INSTRUCTION_PREFIX]
+    if " " in text:
+        checks.append(_TODO_SHELLISH)
+    if any(p.search(v) for v in _scan_variants(text) for p in checks):
+        text = _STRIPPED_HISTORY
+    return _shown(text)
+
+
 def clip_bytes(value: str, limit: int) -> str:
     raw = value.encode("utf-8")
     return value if len(raw) <= limit else raw[:max(0, limit - 3)].decode("utf-8", "ignore") + "…"
 
 
-def sanitize_report(value) -> tuple[object, int]:
+def sanitize_report(value, key: str | None = None) -> tuple[object, int]:
     """Display strings only; never mutate source bytes or authentication inputs.
 
     Fields are schema-owned; user text only appears in values, not dictionary
-    keys. Known-pattern redaction is not universal credential detection.
+    keys. Known-pattern redaction is not universal credential detection. FACT_KEYS
+    values are paths and git names and get safe_fact; everything else safe_text.
     """
     if isinstance(value, str):
-        clean = safe_text(value, len(value) + 1)
+        clean = (safe_fact if key in FACT_KEYS else safe_text)(value, len(value) + 1)
         return clean, int(clean != value)
     if isinstance(value, dict):
         out, changed = {}, 0
-        for key, item in value.items():
-            out[key], count = sanitize_report(item)
+        for name, item in value.items():
+            out[name], count = sanitize_report(item, name)
             changed += count
         return out, changed
     if isinstance(value, list):

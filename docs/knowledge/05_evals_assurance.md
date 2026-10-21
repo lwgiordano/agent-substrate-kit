@@ -31,6 +31,10 @@ asserts:
 `manage.sh check` proves structure and deterministic test outcomes: the fast
 commit-stage hooks, then the pre-push stage that holds the full test suite.
 `manage.sh evals` proves policy behavior against malicious and benign tasks. A
+check that something is refused passes only on the refusal itself: the expected
+exit code and message, never any non-zero status, so a timeout (124) or a crash
+is not counted as a block. The release smoke and the strict matrix job apply the
+same rule to the profile lock. A
 release is green only when malicious tasks block, benign tasks remain allowed,
 and any required containment task actually runs.
 
@@ -45,7 +49,8 @@ each. The pytest run has its own limit, 1200 seconds by default, set with
 `SUBSTRATE_AUDIT_PYTEST_TIMEOUT` (whole seconds, 60 to 1800); any other value
 stops the audit rather than falling back to the default. The pytest check asks
 for the 15 slowest tests and prints them, so a report shows whether one test or
-the whole suite is slow. Each check's command line and output pass through
+the whole suite is slow. A run killed at its limit never reaches that summary:
+a TIMEOUT report keeps only the tail of the partial output. Each check's command line and output pass through
 `redact_secrets` before they are printed or stored, because the scheduled
 workflow prints them to the CI log and uploads the report. Redaction is
 pattern-based: a value in a shape it does not know still passes.

@@ -192,14 +192,19 @@ echo "==> Smoke: strict profile-lock blocks a downgrade (minimal stage)"
 TREPO="$(mktemp -d)"
 echo "    strict smoke step: stage"
 mkdir -p "$TREPO/scripts" "$TREPO/.substrate"
-for f in check_substrate_config.py command_policy.py harness_patterns.json _substrate_root.py; do
+for f in check_substrate_config.py command_policy.py harness_patterns.json _substrate_root.py _doc_common.py; do
   cp "$APP/scripts/$f" "$TREPO/scripts/$f"
 done
 printf 'strict\n' > "$TREPO/.substrate/required_profile"
 printf 'SUBSTRATE_PROFILE="starter"\n' > "$TREPO/.substrate/config"
 echo "    strict smoke step: downgrade check"
-if ( cd "$TREPO" && $_TO python3 -I scripts/check_substrate_config.py >/dev/null 2>&1 ); then
-  echo "release: BLOCK — strict profile lock did not block a downgrade" >&2; rm -rf "$TREPO"; exit 1
+# Refused means exit 2 with the lock's own message. Any other non-zero (a
+# timeout's 124, a crash) is not evidence the lock works (v3.10.5).
+_lock_rc=0
+_lock_out="$( cd "$TREPO" && $_TO python3 -I scripts/check_substrate_config.py 2>&1 )" || _lock_rc=$?
+if [ "$_lock_rc" -ne 2 ] || ! printf '%s' "$_lock_out" | grep -q "below the required minimum profile"; then
+  echo "release: BLOCK — strict profile lock did not refuse a downgrade (rc=$_lock_rc): $_lock_out" >&2
+  rm -rf "$TREPO"; exit 1
 fi
 rm -rf "$TREPO"
 echo "    strict profile-lock ok"

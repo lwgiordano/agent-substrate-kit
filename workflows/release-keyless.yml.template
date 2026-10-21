@@ -22,7 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with: {fetch-depth: 0}
+        with: {fetch-depth: 0, persist-credentials: false}
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with: {python-version: "3.11"}
       # Every other action here is pinned to a commit SHA that the kit's own CI
@@ -31,7 +31,7 @@ jobs:
       - uses: sigstore/cosign-installer@v3
       - name: Build (unsigned artifact + manifest)
         run: |
-          python3 -m pip install --quiet cryptography
+          python3 -m pip install --quiet cryptography==50.0.2   # pinned: this job can sign
           ./package_release.sh --smoke   # SUBSTRATE_RELEASE_SECKEY unset -> honestly unsigned zip
       - name: Keyless-sign the artifact (Sigstore bundle)
         run: |

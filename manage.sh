@@ -323,7 +323,10 @@ Usage: ./manage.sh setup|doctor|go-live|context-report|code-shape|verify-release
   prove [--only ID..|--list]                  remove each registered guard in a copy; its tests must then FAIL
   recall "<query>" [--budget N] [--k N]       ranked section search over knowledge/ADRs/postmortems/HISTORY/lessons
   brief "<task>" [--path PATH] [--budget N] [--json]  current task evidence; no checks run
-  receipt start --task "<what>" | check ID --kind check|evals|prove | annotate ID --completion complete|incomplete | show ID [--json]
+  audit | full-audit                          quick validators | plus pytest and pre-commit; each check PASS, BLOCK,
+                                              TIMEOUT or NOT-RUN (pytest limit: SUBSTRATE_AUDIT_PYTEST_TIMEOUT, 60..1800 s, default 1200)
+  receipt start --task "<what>" | check ID --kind check|evals|prove [--timeout 1..7200] [--excerpt]
+          | annotate ID --completion complete|incomplete [--note] [--author] [--review-ref] | show ID [--json]
                                               local record of a task, the checks run for it, and whether they still apply
   projects --root DIR [--root DIR ...] [--json]  read-only status of the projects you name (runs none of their code)
   reject --what "<X>" --why "<Y>"             log a rejected approach (injected at SessionStart so it is not re-proposed)

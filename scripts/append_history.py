@@ -72,7 +72,10 @@ def _other_files_dirty(root: Path) -> list[str]:
         )
     except (subprocess.CalledProcessError, FileNotFoundError,
             subprocess.TimeoutExpired):
-        return []  # No git or call failed — caller proceeds without warning.
+        # Unknown is not clean (v3.10.5): a failed or timed-out status used to
+        # return [] and disarm the off-by-one guard. Without --commit-hash the
+        # caller now refuses, as it does for a dirty tree.
+        return ["(git status unavailable)"]
     dirty: list[str] = []
     for line in result.stdout.splitlines():
         if not line.strip():
@@ -86,6 +89,23 @@ def _other_files_dirty(root: Path) -> list[str]:
             continue
         dirty.append(path)
     return dirty
+
+def _withheld_at_session_start(summary: str, knowledge: str) -> list[str]:
+    """Which parts of the entry the next session would never see. Session start
+    shows the summary and the lead sentence of the knowledge field through the
+    context filter, which withholds a line that reads as a command or instruction."""
+    try:
+        import session_handoff as sh
+    except Exception:  # pragma: no cover - stripped install
+        return []
+    out = []
+    if sh._was_stripped(sh._safe_history_line(summary, sh._HISTORY_SUMMARY_CHARS)):
+        out.append("summary")
+    lead = sh._SENTENCE_END.split(" ".join(knowledge.split()), maxsplit=1)[0]
+    if sh._was_stripped(sh._safe_history_line(lead, sh._KNOWLEDGE_SENTENCE_CHARS)):
+        out.append("lead sentence of the knowledge field")
+    return out
+
 
 SESSION_TOKEN_RE = re.compile(r"^\*\*Session token:\*\*\s+(\S+)\s*$", re.MULTILINE)
 # v3.8.42 (round-25 P2): the token is copied verbatim into an append-only HISTORY
@@ -211,6 +231,18 @@ def main() -> int:
             "Too short: " + ", ".join(too_short_narrative),
             file=sys.stderr,
         )
+        return 1
+
+    # v3.10.5: refused while it can still be rephrased, since entries are never
+    # edited. Before this, an entry naming e.g. setup-node or a .sh file reached
+    # the next session as a strip placeholder, or not at all.
+    withheld = _withheld_at_session_start(fields["summary"], fields["knowledge"])
+    if withheld:
+        print("append_history: the session-start context filter would withhold the "
+              + " and the ".join(withheld) + ". It reads a shell tool name standing as "
+              "a word of its own (node, python3, bash, sh, curl), a script name such as "
+              "x.sh, `$(`, a backtick, or an instruction-like lead as a command; rephrase.",
+              file=sys.stderr)
         return 1
 
     root = repo_root()

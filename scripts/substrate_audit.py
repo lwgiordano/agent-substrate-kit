@@ -85,7 +85,7 @@ def _durations(output):
 def _subvenv_bin(name):
     # Substrate-venv tool path, or None if absent. NEVER falls back to
     # ambient PATH (the v3.2.2 "full-audit uses ambient pytest" finding) —
-    # callers skip the gate instead of running an environment-dependent tool.
+    # the caller records the check as NOT-RUN, which never reads as a pass.
     p=ROOT/'.substrate'/'venv'/'bin'/name
     return str(p) if p.exists() else None
 def plan(mode):

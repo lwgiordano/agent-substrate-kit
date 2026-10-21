@@ -98,8 +98,16 @@ def _units_rejected(rel: str, text: str) -> list[tuple[str, int, str, str]]:
             for i, ln in enumerate(text.splitlines(), 1) if ln.strip().startswith("- [")]
 
 
+class _PartlyMalformed(ValueError):
+    """Some records were unusable; `units` holds the ones that were fine."""
+
+    def __init__(self, units):
+        super().__init__("malformed records")
+        self.units = units
+
+
 def _units_lessons(rel: str, text: str) -> list[tuple[str, int, str, str]]:
-    out = []
+    out, bad = [], 0
     for i, ln in enumerate(text.splitlines(), 1):
         try:
             d = json.loads(ln)
@@ -108,10 +116,14 @@ def _units_lessons(rel: str, text: str) -> list[tuple[str, int, str, str]]:
         if isinstance(d, dict) and isinstance(d.get("rule"), str):
             triggers = d.get("triggers", [])
             if not isinstance(triggers, list) or not all(isinstance(t, str) for t in triggers):
-                raise ValueError("invalid lesson triggers")
+                # This record only (v3.10.5): one bad `triggers` dropped every lesson.
+                bad += 1
+                continue
             trig = " ".join(triggers)
             out.append((rel, i, f"lesson {d.get('id', '?')} [{d.get('status', '?')}]",
                         f"{d['rule']}\ntriggers: {trig}"))
+    if bad:
+        raise _PartlyMalformed(out)
     return out
 
 
@@ -137,6 +149,9 @@ def _collect(root: Path, provenance: bool) -> tuple[list[dict], list[dict]]:
             text = source.pop("text")
             try:
                 units = parser(rel, text)
+            except _PartlyMalformed as exc:
+                diagnostics.append({"code": "malformed-source", "path": rel})
+                units = exc.units
             except (TypeError, ValueError):
                 diagnostics.append({"code": "malformed-source", "path": rel})
                 return

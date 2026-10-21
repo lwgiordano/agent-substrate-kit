@@ -177,7 +177,35 @@ def test_project_without_kit_and_with_unsafe_metadata_is_shown_accurately(tmp_pa
     assert row["config"]["status"] == "invalid"
     assert row["config"]["locks"]["required_profile"] == "bad"
     assert {"unsafe-or-unreadable", "invalid-config", "unsafe-lock"} <= codes
+    # v3.10.5: unsafe or malformed metadata is an error row, as documented.
+    assert row["status"] == "error" and api().report([bare])["errors"] == 1
 
+
+
+def test_a_profile_below_its_lock_or_disabled_hooks_is_an_error_row(project):
+    """v3.10.5: a starter profile under required_profile=strict read `config: ok`,
+    and `disableAllHooks` was invisible."""
+    assert api().report([project])["projects"][0]["status"] == "ok"
+    (project / ".substrate/config").write_text('SUBSTRATE_PROFILE="starter"\n')
+    row = api().report([project])["projects"][0]
+    assert row["status"] == "error"
+    assert any(d["code"] == "profile-below-lock" for d in row["diagnostics"])
+    (project / ".substrate/config").write_text('SUBSTRATE_PROFILE="strict"\n')
+    settings = json.loads((project / ".claude/settings.json").read_text())
+    settings["disableAllHooks"] = True
+    (project / ".claude/settings.json").write_text(json.dumps(settings))
+    row = api().report([project])["projects"][0]
+    assert row["status"] == "error"
+    assert any(d["code"] == "hooks-disabled" for d in row["diagnostics"])
+
+
+def test_a_root_naming_a_tool_is_shown_as_its_path(tmp_path, markers):
+    """v3.10.5: the context filter for command words read .../python/ as a shell
+    command and printed every such root as the same strip placeholder."""
+    roots = [make_project(tmp_path / "python" / name, markers) for name in ("node", "bash")]
+    rep = api().report(roots)
+    assert [r["root"] for r in rep["projects"]] == [str(r) for r in roots]
+    assert str(roots[0]) in api().render_text(rep)
 
 def test_hostile_metadata_values_are_bounded_and_sanitized(project):
     (project / ".substrate/install.json").write_text(json.dumps(
@@ -335,16 +363,26 @@ def test_config_parser_splits_lines_like_the_shell(tmp_path):
     parse = api("check_substrate_config").parse_config_text
     hidden = "SUBSTRATE_PROFILE=standard\x0bSUBSTRATE_PROFILE=strict\n"
     vals, err = parse(hidden)
-    assert err and "invalid SUBSTRATE_PROFILE" in err
+    # v3.10.5: refused before any line is read, by both loaders alike.
+    assert err and "control character" in err
     cfg = tmp_path / "config"
     cfg.write_bytes(hidden.encode())
     shell = subprocess.run(["bash", "-c", f'source "{ROOT}/scripts/_substrate_config.sh"; '
                             f'load_substrate_config "{cfg}"'],
                            capture_output=True, text=True, timeout=30)
     assert shell.returncode == 2, "shell loader must reject what the Python parser rejects"
-    assert "invalid SUBSTRATE_PROFILE" in shell.stderr
+    assert "control character" in shell.stderr
     assert parse('SUBSTRATE_PROFILE="strict"  # pinned\nSUBSTRATE_LANG=python\n') == (
         {"SUBSTRATE_PROFILE": "strict", "SUBSTRATE_LANG": "python"}, None)
+    # A CR inside a comment passes the byte rule and is no line break to `read`, so
+    # the text after it stays comment; splitlines() would make it a live assignment.
+    in_comment = 'SUBSTRATE_PROFILE="strict"\n# note\rSUBSTRATE_PROFILE="starter"\n'
+    assert parse(in_comment) == ({"SUBSTRATE_PROFILE": "strict"}, None)
+    cfg.write_bytes(in_comment.encode())
+    shell = subprocess.run(["bash", "-c", f'source "{ROOT}/scripts/_substrate_config.sh"; '
+                            f'load_substrate_config "{cfg}" && printf %s "$SUBSTRATE_PROFILE"'],
+                           capture_output=True, text=True, timeout=30)
+    assert shell.returncode == 0 and shell.stdout == "strict", shell.stderr
 
 
 @pytest.mark.parametrize("profile", ["starter", "strict"])

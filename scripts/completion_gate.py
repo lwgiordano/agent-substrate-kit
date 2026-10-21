@@ -98,8 +98,8 @@ _REMEDIATION = (
     "Substrate completion gate: project files changed this session with no "
     "self-audit recorded after the last change. Before finishing: run the "
     "self-audit skill, then record it with "
-    "`./manage.sh memory skill-run self-audit --result pass` "
-    "(or --result issues-found). Disable this nudge with "
+    "`./manage.sh memory skill-run self-audit --verify`, which runs the "
+    "validator chain and records its real result. Disable this nudge with "
     "SUBSTRATE_COMPLETION_GATE=0."
 )
 
@@ -208,6 +208,10 @@ def _audit_event_after(cutoff: datetime | None) -> bool:
             continue
         data = ev.get("data") or {}
         if data.get("skill") != "self-audit":
+            continue
+        # A self-asserted `--result pass` is a claim; only a run whose validator
+        # chain really ran and passed counts (v3.10.5).
+        if data.get("verified") is not True:
             continue
         ev_ts = _parse_ts(str(ev.get("ts", "")))
         if ev_ts is None:

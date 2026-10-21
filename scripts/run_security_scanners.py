@@ -65,6 +65,11 @@ except Exception:  # pragma: no cover - stripped install
         return None
 
 from _doc_common import read_lock as _dc_read_lock  # noqa: E402
+from _doc_common import redact_secrets as _redact_secrets  # noqa: E402
+
+
+def _redact_tail(out: str) -> str:
+    return _redact_secrets(out)[-2000:]
 try:
     from _substrate_root import substrate_root as _sr
     _DEFAULT_ROOT = _sr()
@@ -146,7 +151,9 @@ def main(argv=None) -> int:
         if status != "clean":
             findings += 1
         results.append({"scanner": name, "status": status, "rc": rc, "desc": desc,
-                        "output_tail": out[-2000:] if status != "clean" else ""})
+                        # Redacted before the 2000-char cut, so a value cannot be split
+                        # around it, and before results.json or --json sees it (v3.10.5).
+                        "output_tail": _redact_tail(out) if status != "clean" else ""})
 
     # advisory artifact
     try:

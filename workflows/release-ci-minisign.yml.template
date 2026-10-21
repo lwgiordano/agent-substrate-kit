@@ -18,17 +18,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with: {fetch-depth: 0}
+        with: {fetch-depth: 0, persist-credentials: false}
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with: {python-version: "3.11"}
       - name: Install tools
         run: |
           sudo apt-get update && sudo apt-get install -y minisign
-          python3 -m pip install --quiet cryptography
+          # Pinned: this job holds the signing key (v3.10.5).
+          python3 -m pip install --quiet cryptography==50.0.2
       - name: Write signing key (mode 600, cleaned up after)
+        # Through env, never interpolated into the script text (v3.10.5).
+        env:
+          SECKEY: ${{ secrets.SUBSTRATE_RELEASE_SECKEY }}
         run: |
           umask 077
-          printf '%s' "${{ secrets.SUBSTRATE_RELEASE_SECKEY }}" > "$RUNNER_TEMP/substrate.key"
+          printf '%s' "$SECKEY" > "$RUNNER_TEMP/substrate.key"
       - name: Build + sign + self-verify
         env:
           SUBSTRATE_RELEASE_SECKEY: ${{ runner.temp }}/substrate.key

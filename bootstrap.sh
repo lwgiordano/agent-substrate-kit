@@ -386,7 +386,7 @@ if ! grep -q 'docs/REJECTED.md' .gitattributes 2>/dev/null; then wappend .gitatt
 # the reader could not parse. Seed it only when ABSENT — never overwrite a bus.
 if ! grep -q 'AGENT_BUS.md' .gitattributes 2>/dev/null; then wappend .gitattributes; echo 'AGENT_BUS.md merge=union' >> .gitattributes; fi
 if [ ! -e AGENT_BUS.md ] && [ -f "$KIT_DIR/templates/AGENT_BUS.md.template" ]; then copy "$KIT_DIR/templates/AGENT_BUS.md.template" AGENT_BUS.md; fi
-wappend .gitignore; [ -e .gitignore ] || touch .gitignore; for line in docs/CURRENT_SESSION.md docs/.todo_state.json .substrate/memory/ .substrate/traces/ .substrate/receipts/ .substrate/venv/ .substrate/dep_cooldown_cache.json 'ai/audits/*/audit-report.json' __pycache__/ .venv/ .pytest_cache/ .ruff_cache/ .mypy_cache/ node_modules/ dist/ build/; do grep -qxF "$line" .gitignore || echo "$line" >> .gitignore; done
+wappend .gitignore; [ -e .gitignore ] || touch .gitignore; for line in docs/CURRENT_SESSION.md docs/.todo_state.json .substrate/memory/ .substrate/traces/ .substrate/receipts/ .substrate/audits/ .substrate/venv/ .substrate/dep_cooldown_cache.json 'ai/audits/*/audit-report.json' __pycache__/ .venv/ .pytest_cache/ .ruff_cache/ .mypy_cache/ node_modules/ dist/ build/; do grep -qxF "$line" .gitignore || echo "$line" >> .gitignore; done
 [ -e docs/.todo_state.json ] || { wprep docs/.todo_state.json; echo '{"version":1,"items":[]}' > docs/.todo_state.json; }
 # Run substrate tools from the KIT, never the target's `scripts/` copy (v3.8.21 / bootstrap:323):
 # on a non-force install into a repo with a pre-existing `scripts/update_manifest.py` collision,

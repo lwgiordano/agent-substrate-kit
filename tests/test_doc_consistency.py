@@ -635,3 +635,19 @@ def test_workflow_actions_are_pinned_to_commit_shas() -> None:
         "\n".join(loose)
     keyless = (KIT / "workflows" / "release-keyless.yml.template").read_text(encoding="utf-8")
     assert "not SHA-verified" in keyless
+
+
+def test_knowledge_doc_counts_in_prose_match_the_directory() -> None:
+    """The entry doc and the install doc state how many knowledge docs the source kit
+    has; adding 11_receipts_projects.md left both one short (v3.10.5)."""
+    words = {10: "ten", 11: "eleven", 12: "twelve", 13: "thirteen", 14: "fourteen",
+             15: "fifteen", 16: "sixteen"}
+    docs = sorted(p.name for p in (KIT / "docs" / "knowledge").glob("[0-9][0-9]_*.md"))
+    assert set(docs) == set(KNOWLEDGE_DOCS)
+    total, siblings = words[len(docs)], words[len(docs) - 1]
+    entry = (KIT / "docs/knowledge/00_substrate.md").read_text(encoding="utf-8")
+    install = (KIT / "docs/knowledge/01_install_adoption.md").read_text(encoding="utf-8")
+    assert f"{total} documents belong to the source kit" in entry
+    assert f"The {siblings} source siblings" in entry
+    assert f"holds {total} functional knowledge documents" in install
+    assert f"the {siblings} source-only documents" in install

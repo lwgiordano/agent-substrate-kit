@@ -42,7 +42,9 @@ jobs:
           test "$(cat .substrate/required_profile)" = "${{ matrix.profile }}"
           if [ "${{ matrix.profile }}" = "strict" ]; then
             printf 'SUBSTRATE_PROFILE="starter"\n' > .substrate/config
-            ! python3 -I scripts/check_substrate_config.py
+            # Refused means exit 2 with the lock's message, not any failure.
+            rc=0; out="$(python3 -I scripts/check_substrate_config.py 2>&1)" || rc=$?
+            test "$rc" = 2 && printf '%s' "$out" | grep -q "below the required minimum profile"
           fi
   full-setup:
     # One representative full setup+check per language (slower path).

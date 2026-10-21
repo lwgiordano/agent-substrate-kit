@@ -49,5 +49,5 @@ review, use the `ultrareview` skill instead.
   completion gate looks for this event):
 
 ```bash
-./manage.sh memory skill-run self-audit --result pass   # or issues-found
+./manage.sh memory skill-run self-audit --verify   # records the validators' real result
 ```

@@ -380,6 +380,18 @@ def release_pass(expect_commit: str, clean_start: bool) -> int:
               file=sys.stderr)
         return 1
     tree = _git_s("rev-parse", "--verify", "HEAD^{tree}")
+    # The caller's word is not enough (v3.10.5): `memory release-pass` can be run
+    # by hand, so clean_start also requires the tracked tree to be clean NOW. This
+    # bounds a careless claim, not a deliberate one (ADR 0002): only the release
+    # gate is meant to call this.
+    if clean_start:
+        try:  # not _git_s: its "" on failure would read as a clean tree
+            p = subprocess.run(["git", "-c", "core.fsmonitor=false", "status", "--porcelain",
+                                "--untracked-files=no"], cwd=ROOT, capture_output=True,
+                               text=True, timeout=15, env=_clean_env())
+            clean_start = bool(tree) and p.returncode == 0 and p.stdout.strip() == ""
+        except (OSError, subprocess.SubprocessError):
+            clean_start = False
     vtext = _safe_read_text(ROOT / "VERSION", ROOT, max_bytes=256) or ""
     return append("release-pass", {"commit": head, "tree": tree,
                                    "version": vtext.strip()[:40], "clean_start": bool(clean_start)})

@@ -84,10 +84,10 @@ locations under `.substrate/`. Code that can run in either layout resolves both
 locations explicitly and treats an absent required asset as an error rather than
 silently skipping work.
 
-The source kit holds eleven functional knowledge documents. A consumer install
+The source kit holds twelve functional knowledge documents. A consumer install
 gets one generated `docs/knowledge/00_substrate.md` with a live inventory of its
 installed scripts. Upgrade preserves consumer-authored sibling knowledge docs
-and does not add the ten source-only documents to the owned overwrite set.
+and does not add the eleven source-only documents to the owned overwrite set.
 The generated `00_substrate.md` and installed `_template.md` are provenance-owned;
 additional project knowledge siblings remain governed context but stay outside
 the upgrade drift baseline.

@@ -18,7 +18,7 @@
         "manage.sh",
         "package_release.sh"
       ],
-      "last_human_reviewed": "2026-10-14",
+      "last_human_reviewed": "2026-10-21",
       "path": "docs/knowledge/00_substrate.md",
       "purpose": "Entry point for current substrate contracts and functional knowledge."
     },
@@ -166,7 +166,7 @@
         "scripts/memory_log.py",
         "scripts/release_gate.sh"
       ],
-      "last_human_reviewed": "2026-09-28",
+      "last_human_reviewed": "2026-10-21",
       "path": "docs/knowledge/08_memory_anchor.md",
       "purpose": "The memory trust anchor \u2014 monotonic advance, remote confirmation, and limits."
     },

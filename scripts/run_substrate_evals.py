@@ -249,6 +249,9 @@ def _validator_blocks(name, cwd, args=(), stdin=""):
     # malicious input was blocked — count it as a failure (visible in the run).
     if p.returncode == 124:
         return False, "TIMEOUT (could not verify)"
+    # A Python traceback is a crash, not a refusal: the validator never decided.
+    if "Traceback (most recent call last)" in p.stderr:
+        return False, f"CRASHED rc={p.returncode} (could not verify)"
     return p.returncode != 0, f"rc={p.returncode}"
 
 
@@ -1631,7 +1634,9 @@ def t_profile_ratchet_lower_refused():
         (td / ".substrate").mkdir(exist_ok=True)
         (td / ".substrate" / "config").write_text('SUBSTRATE_PROFILE="strict"\n', encoding="utf-8")
         p = _run([PY, "-I", "scripts/substrate_profile.py", "--write", "standard"], cwd=td)
-        return p.returncode != 0, f"rc={p.returncode}"
+        # Refused means rc 2 with the ratchet's reason; a timeout (124) or a crash
+        # proves nothing about the ratchet (v3.10.5).
+        return (p.returncode == 2 and "not a raise" in p.stderr), f"rc={p.returncode}"
 
 
 def t_profile_ratchet_raise_succeeds():

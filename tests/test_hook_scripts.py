@@ -4798,8 +4798,22 @@ def test_completion_gate_audit_evidence_clears_and_restains(tmp_path) -> None:
                         "skill-run", "self-audit", "--result", "pass"],
                        cwd=str(repo), capture_output=True, text=True, timeout=30)
     assert p.returncode == 0, p.stderr
-    events = (repo / ".substrate" / "memory" / "events.jsonl").read_text().splitlines()
-    ev = [json.loads(ln) for ln in events if '"skill-run"' in ln][-1]
+    events_path = repo / ".substrate" / "memory" / "events.jsonl"
+    ev = [json.loads(ln) for ln in events_path.read_text().splitlines() if '"skill-run"' in ln][-1]
+    ev_ts = datetime.fromisoformat(ev["ts"]).timestamp()
+    # v3.10.5: a self-asserted `--result pass` is a claim and does NOT silence it.
+    os.utime(fpath, (ev_ts - 1, ev_ts - 1))
+    p = _gate(repo, SUBSTRATE_COMPLETION_GATE="1")
+    assert "systemMessage" in (p.stdout or ""), "an unverified self-audit must not count"
+    # Stand in for `--verify` (which runs the full validator chain): the gate reads
+    # the event's verified field, so the chain is re-appended with it set.
+    p = subprocess.run([sys.executable, "-I", "-c",
+                        "import sys; sys.path.insert(0, sys.argv[1]); import memory_log as m; "
+                        "sys.exit(m.append('skill-run', {'skill': 'self-audit', "
+                        "'result': 'pass', 'verified': True}))", str(SCRIPTS)],
+                       cwd=str(repo), capture_output=True, text=True, timeout=30)
+    assert p.returncode == 0, p.stderr
+    ev = [json.loads(ln) for ln in events_path.read_text().splitlines() if '"skill-run"' in ln][-1]
     ev_ts = datetime.fromisoformat(ev["ts"]).timestamp()
     # change BEFORE the audit -> gate silent (audit covers it)
     os.utime(fpath, (ev_ts - 1, ev_ts - 1))
@@ -15343,3 +15357,25 @@ def test_append_history_treats_an_unreadable_git_status_as_dirty(monkeypatch, tm
         raise subprocess.TimeoutExpired("git", 30)
     monkeypatch.setattr(ah.subprocess, "run", boom)
     assert ah._other_files_dirty(tmp_path)
+
+
+def test_governance_skip_is_a_visible_warning_in_actions(tmp_path):
+    """v3.10.5: a 401/403/404 or a missing token skipped with exit 0 and only a log
+    line; in Actions it now raises a warning annotation as well."""
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("GITHUB_TOKEN", "GH_TOKEN", "GITHUB_REPOSITORY")}
+    env["GITHUB_ACTIONS"] = "true"
+    r = subprocess.run([sys.executable, "-I", str(SCRIPTS / "check_github_governance.py")],
+                       cwd=str(tmp_path), env=env, capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0 and "SKIP" in r.stdout
+    assert "::warning title=Branch protection not verified::" in r.stdout
+
+
+def test_security_scanner_output_is_redacted_before_it_is_stored():
+    """v3.10.5: a scanner's raw output tail went into results.json and --json."""
+    sys.path.insert(0, str(SCRIPTS))
+    import run_security_scanners as rss
+    fake = "AKIA" + "QX7" * 5 + "Z"
+    tail = rss._redact_tail("x" * 5000 + f" leaked {fake} here")
+    assert fake not in tail and len(tail) <= 2000
+

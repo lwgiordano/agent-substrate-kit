@@ -1,6 +1,6 @@
 ---
 purpose: Entry point for current substrate contracts and functional knowledge.
-last_human_reviewed: 2026-10-14
+last_human_reviewed: 2026-10-21
 covers:
   - bootstrap.sh
   - manage.sh
@@ -41,9 +41,9 @@ routes executable project commands through an available host backend and fails
 closed when a required backend or containment proof is missing.
 
 The source checkout and an installed consumer have different layouts. These
-eleven documents belong to the source kit. Bootstrap generates one compact,
+twelve documents belong to the source kit. Bootstrap generates one compact,
 consumer-local `docs/knowledge/00_substrate.md` whose front matter inventories
-the installed top-level Python and shell scripts. The ten source siblings are
+the installed top-level Python and shell scripts. The eleven source siblings are
 not package-owned consumer files.
 
 ## Trust boundary

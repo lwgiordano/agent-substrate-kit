@@ -122,7 +122,12 @@ a gate applies, the command's exit status is the gate's: a failing lint or test,
 a sandbox refusal, a toolchain missing although the repo needs it, and an
 unreadable `package.json` all fail.
 
-Dependency cooldown and security scanner tiers are explicit. Offline or missing
+Dependency cooldown and security scanner tiers are explicit. Scanner output kept
+for a finding is redacted before it is stored under `.substrate/audits/security/`
+(Git-ignored) or printed with `--json`. A branch-protection check that cannot
+read protection (no token, 401, 403, 404) skips with exit 0 unless `--require`,
+and in Actions also raises a warning annotation, so a skip is never only a log
+line. Offline or missing
 backend states report skipped or unavailable instead of false success, and a
 required tier blocks when its evidence cannot be produced. Dependency manifests
 and lockfiles are part of that evidence: absent ecosystem files still mean "no

@@ -31,6 +31,10 @@ asserts:
 `manage.sh check` proves structure and deterministic test outcomes: the fast
 commit-stage hooks, then the pre-push stage that holds the full test suite.
 `manage.sh evals` proves policy behavior against malicious and benign tasks. A
+check that something is refused passes only on the refusal itself: the expected
+exit code and message, never any non-zero status, so a timeout (124) or a crash
+is not counted as a block. The release smoke and the strict matrix job apply the
+same rule to the profile lock. A
 release is green only when malicious tasks block, benign tasks remain allowed,
 and any required containment task actually runs.
 

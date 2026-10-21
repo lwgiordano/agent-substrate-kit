@@ -114,11 +114,18 @@ The chain is gitignored: a receiving clone may have no chain, or a healthy
 unrelated chain without the producing clone's release-pass. An unchanged
 committed entry then reports **NOT verifiable in this checkout**, never verified.
 The comparison covers the whole entry and its multiplicity, ignoring only
-separator newlines. It uses HEAD and, during a merge, resolved MERGE_HEAD
-parents; shared entries cannot authorize extra duplicates. Git failures refuse
+separator newlines. Imported means already on the base branch: the pull
+request's base in Actions (`GITHUB_BASE_REF`), else origin's default branch,
+taken at its merge-base with HEAD and, during a merge, with each resolved
+MERGE_HEAD parent; a clone with no origin falls back to what HEAD commits. In
+CI, HEAD contains the pull request itself, so "committed" alone let a forged
+entry pass. Shared entries cannot authorize extra duplicates. Git failures refuse
 the comparison. This is provenance for a reported historical claim, not proof
-that the claim was true or reviewed. New/edited success entries require local
-proof even in a fresh clone. Broken, linked, or unreadable chains and matching
+that the claim was true or reviewed. A new or edited success entry needs local
+proof wherever a chain exists, even once committed. A checkout with no chain at
+all (CI) cannot hold that proof, so a committed entry that is not on the base is
+counted `new-unverified` and named, as a warning annotation in Actions, for a
+reviewer to confirm the release gate ran; it is never counted as imported. Broken, linked, or unreadable chains and matching
 dirty-start-only passes remain invalid. Reader output separates imported
 unverified, locally verified, and invalid outcomes.
 
@@ -152,8 +159,9 @@ The default brief is 800 estimated tokens (UTF-8 bytes divided by four), with
 an accepted range of 200–6000. Identity and omission notices take priority over
 whole evidence items. JSON is separately capped at 64 KiB with omission counts.
 All displayed string fields use known-pattern sanitization, not universal secret
-detection. A recognized private-key header causes the whole display field to
-be discarded before truncation, not just the header. Retrieved prose is labelled
+detection. Any recognized credential shape (a private-key header, a token or
+key pattern, a credential assignment) causes the whole display field to be
+discarded before truncation, not just the match. Retrieved prose is labelled
 data; the command never executes it or
 runs the suggested checks. Invalid arguments or essential repository lookup
 failure return 2; missing optional evidence remains an explicit partial report.

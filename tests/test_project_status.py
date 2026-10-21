@@ -374,6 +374,15 @@ def test_config_parser_splits_lines_like_the_shell(tmp_path):
     assert "control character" in shell.stderr
     assert parse('SUBSTRATE_PROFILE="strict"  # pinned\nSUBSTRATE_LANG=python\n') == (
         {"SUBSTRATE_PROFILE": "strict", "SUBSTRATE_LANG": "python"}, None)
+    # A CR inside a comment passes the byte rule and is no line break to `read`, so
+    # the text after it stays comment; splitlines() would make it a live assignment.
+    in_comment = 'SUBSTRATE_PROFILE="strict"\n# note\rSUBSTRATE_PROFILE="starter"\n'
+    assert parse(in_comment) == ({"SUBSTRATE_PROFILE": "strict"}, None)
+    cfg.write_bytes(in_comment.encode())
+    shell = subprocess.run(["bash", "-c", f'source "{ROOT}/scripts/_substrate_config.sh"; '
+                            f'load_substrate_config "{cfg}" && printf %s "$SUBSTRATE_PROFILE"'],
+                           capture_output=True, text=True, timeout=30)
+    assert shell.returncode == 0 and shell.stdout == "strict", shell.stderr
 
 
 @pytest.mark.parametrize("profile", ["starter", "strict"])

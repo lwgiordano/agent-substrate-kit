@@ -1104,7 +1104,7 @@
       "tests": [
         "tests/test_project_status.py::test_config_parser_splits_lines_like_the_shell"
       ],
-      "why": "a value hidden after VT/FF reads as a separate assignment to Python but not to the shell"
+      "why": "text after a CR inside a comment reads as a live assignment to Python but stays comment to the shell"
     },
     {
       "id": "projects-uses-kit-parser-not-target",

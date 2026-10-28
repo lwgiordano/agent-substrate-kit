@@ -363,12 +363,15 @@ copy "$KIT_DIR/templates/copilot-instructions.md" .github/copilot-instructions.m
 _safe_mkdir_p .github/instructions; for f in "$KIT_DIR"/templates/github/*.instructions.md; do [ -f "$f" ] && copy "$f" ".github/instructions/$(basename "$f")"; done
 # Copilot coding-agent hooks (preToolUse exfil guard via adapter + session handoff).
 _safe_mkdir_p .github/hooks; copy "$KIT_DIR/templates/github/exfil-guard.hook.json" .github/hooks/exfil-guard.json
-# Language-aware Dependabot: the project ecosystem + github-actions.
+# Language-aware Dependabot: the project ecosystem + github-actions. The project
+# entry excludes scripts/ (v3.10.7): a pip entry at / otherwise finds
+# scripts/substrate-requirements.txt and proposes bumps to a substrate-owned file,
+# which strict's trusted-base audit refuses and, once merged, makes upgrade refuse.
 if [ ! -e .github/dependabot.yml ] || [ "$FORCE" == "yes" ]; then
   wprep .github/dependabot.yml
   case "$LANG_PRIMARY" in node) ECO="npm";; go) ECO="gomod";; python) ECO="pip";; *) ECO="";; esac
   { echo "# Dependabot — generated for lang=$LANG_PRIMARY. See docs for tuning."; echo "version: 2"; echo "updates:";
-    if [ -n "$ECO" ]; then echo "  - package-ecosystem: \"$ECO\""; echo "    directory: \"/\""; echo "    schedule: {interval: \"weekly\"}"; echo "    open-pull-requests-limit: 5"; echo "    labels: [\"dependencies\", \"$LANG_PRIMARY\"]"; fi
+    if [ -n "$ECO" ]; then echo "  - package-ecosystem: \"$ECO\""; echo "    directory: \"/\""; echo "    schedule: {interval: \"weekly\"}"; echo "    open-pull-requests-limit: 5"; echo "    labels: [\"dependencies\", \"$LANG_PRIMARY\"]"; echo "    # scripts/ is substrate-owned: its tool pins arrive with kit upgrades."; echo "    exclude-paths:"; echo "      - \"scripts/**\""; fi
     echo "  - package-ecosystem: \"github-actions\""; echo "    directory: \"/\""; echo "    schedule: {interval: \"weekly\"}"; echo "    open-pull-requests-limit: 3"; echo "    labels: [\"dependencies\", \"ci\"]";
     echo "    groups:"; echo "      actions:"; echo "        patterns: [\"*\"]";
   } > .github/dependabot.yml; echo "    +    .github/dependabot.yml"

@@ -811,6 +811,49 @@ def test_dependabot_groups_action_bumps_into_one_pull_request() -> None:
 
 
 
+def test_consumer_dependabot_never_scans_substrate_scripts(tmp_path) -> None:
+    """v3.10.7: a consumer's pip entry at / also found scripts/substrate-requirements.txt,
+    so Dependabot proposed bumps to a substrate-owned file. The strict trusted-base
+    audit refuses such a PR, and once one is merged upgrade refuses the drifted file.
+    Bootstrap writes dependabot.yml once, so doctor names the fix for older installs."""
+    import os
+    import subprocess
+    import sys as _sys
+
+    import yaml
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("SUBSTRATE_PROJECT_DIR", "CLAUDE_PROJECT_DIR") and not k.startswith("GIT_")}
+    repo = tmp_path / "consumer"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True, env=env)
+    r = subprocess.run(["bash", str(KIT / "bootstrap.sh"), "--target", str(repo), "--profile",
+                        "standard", "--lang", "python", "--no-doctor"], capture_output=True,
+                       text=True, timeout=180, env=env)
+    assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
+    assert (repo / "scripts" / "substrate-requirements.txt").is_file()
+    path = repo / ".github" / "dependabot.yml"
+    pip = next(u for u in yaml.safe_load(path.read_text(encoding="utf-8"))["updates"]
+               if u["package-ecosystem"] == "pip")
+    assert pip["directory"] == "/" and pip["exclude-paths"] == ["scripts/**"]
+
+    def doctor() -> str:
+        d = subprocess.run([_sys.executable, "-I", "scripts/substrate_doctor.py", "--operational"],
+                           cwd=repo, capture_output=True, text=True, timeout=120, env=env)
+        return d.stdout + d.stderr
+
+    assert "the pip entry scans scripts/" not in doctor()
+    text = path.read_text(encoding="utf-8")
+    older = text.replace('    exclude-paths:\n      - "scripts/**"\n', "")
+    assert older != text
+    path.write_text(older, encoding="utf-8")
+    assert 'the pip entry scans scripts/' in doctor() and 'exclude-paths: ["scripts/**"]' in doctor()
+    for fixed in (older.replace('    labels: ["dependencies", "python"]\n',
+                                '    labels: ["dependencies", "python"]\n    exclude-paths: ["./scripts/"]\n'),
+                  text):
+        path.write_text(fixed, encoding="utf-8")
+        assert "the pip entry scans scripts/" not in doctor()
+
+
 def _substrate_pins() -> dict[str, str]:
     pins = {}
     for line in (KIT / "scripts" / "substrate-requirements.txt").read_text(encoding="utf-8").splitlines():

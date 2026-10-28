@@ -83,7 +83,12 @@ naming `SUBSTRATE_RUNNER` instead of passing unnoticed.
 
 Bootstrap writes `.github/dependabot.yml` for the project's package ecosystem
 and for GitHub Actions, with every action bump grouped into one weekly pull
-request.
+request. The project entry excludes `scripts/`: the substrate's tool pins arrive
+with kit upgrades, and a pip entry at `/` would otherwise propose bumps to
+`scripts/substrate-requirements.txt`, which the strict trusted-base audit refuses
+and which, once merged, makes upgrade refuse the drifted file. Bootstrap writes
+that file only once, so `doctor` warns an install whose pip entry still scans
+`scripts/` and names the line to add.
 
 ## Source and installed layouts
 

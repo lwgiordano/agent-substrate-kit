@@ -1714,6 +1714,36 @@
         "tests/test_doc_consistency.py::test_dependabot_groups_action_bumps_into_one_pull_request"
       ],
       "why": "every Python dependency bump opens its own pull request again"
+    },
+    {
+      "id": "consumer-dependabot-excludes-scripts",
+      "file": "bootstrap.sh",
+      "find": "echo \"    exclude-paths:\"; echo \"      - \\\"scripts/**\\\"\"; ",
+      "replace": "",
+      "tests": [
+        "tests/test_doc_consistency.py::test_consumer_dependabot_never_scans_substrate_scripts"
+      ],
+      "why": "consumers' Dependabot proposes bumps to substrate-owned scripts/substrate-requirements.txt"
+    },
+    {
+      "id": "doctor-warns-when-dependabot-scans-scripts",
+      "file": "scripts/substrate_doctor.py",
+      "find": "        if dw: warns.append(dw)\n",
+      "replace": "",
+      "tests": [
+        "tests/test_doc_consistency.py::test_consumer_dependabot_never_scans_substrate_scripts"
+      ],
+      "why": "an install whose dependabot.yml predates the exclusion is never told the fix"
+    },
+    {
+      "id": "doctor-accepts-an-existing-scripts-exclusion",
+      "file": "scripts/substrate_doctor.py",
+      "find": "        if not any(p.lstrip('./').rstrip('/') in _SCRIPTS_EXCLUDED for p in paths):\n",
+      "replace": "        if True:\n",
+      "tests": [
+        "tests/test_doc_consistency.py::test_consumer_dependabot_never_scans_substrate_scripts"
+      ],
+      "why": "doctor warns about a dependabot.yml that already excludes scripts/"
     }
   ]
 }

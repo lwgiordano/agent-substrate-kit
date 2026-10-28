@@ -6,8 +6,26 @@ updates:
     schedule: {interval: "weekly"}
     open-pull-requests-limit: 5
     labels: ["dependencies", "python"]
+  # The substrate tool pins (v3.10.6). Consumers get these with kit upgrades; only the
+  # kit repository asks Dependabot to bump them.
+  - package-ecosystem: "pip"
+    directory: "/scripts"
+    schedule: {interval: "weekly"}
+    # cryptography signs releases: let a new version age a week before it is proposed.
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 3
+    labels: ["dependencies", "python"]
+    groups:
+      substrate-tools:
+        patterns: ["*"]
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule: {interval: "weekly"}
     open-pull-requests-limit: 3
     labels: ["dependencies", "ci"]
+    # One PR a week for every action bump: the kit's workflow templates must follow
+    # each bump, which `./manage.sh sync-pins` does in one step (v3.10.6).
+    groups:
+      actions:
+        patterns: ["*"]

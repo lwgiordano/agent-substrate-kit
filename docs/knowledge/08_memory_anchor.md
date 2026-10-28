@@ -1,6 +1,6 @@
 ---
 purpose: The memory trust anchor — monotonic advance, remote confirmation, and limits.
-last_human_reviewed: 2026-10-21
+last_human_reviewed: 2026-10-28
 covers:
   - scripts/memory_log.py
   - scripts/release_gate.sh
@@ -28,6 +28,12 @@ unconditionally, every release writes one, and the first strict release needs a
 one-time `./manage.sh memory anchor` as the human-established trust root.
 `substrate_doctor` delegates to the same verifier, so "anchor valid" has one
 definition.
+
+The anchor also bounds work receipts. Each receipt record is a
+`receipt` event in the chain, and `receipt show` and `projects` report a listed
+record the Git-ignored store has lost. Hiding a deleted attempt therefore means
+removing its event too, and once a published anchor covers that event the
+rewrite fails `verify --anchor`.
 
 ## Advancing is monotonic
 

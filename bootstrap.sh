@@ -370,6 +370,7 @@ if [ ! -e .github/dependabot.yml ] || [ "$FORCE" == "yes" ]; then
   { echo "# Dependabot — generated for lang=$LANG_PRIMARY. See docs for tuning."; echo "version: 2"; echo "updates:";
     if [ -n "$ECO" ]; then echo "  - package-ecosystem: \"$ECO\""; echo "    directory: \"/\""; echo "    schedule: {interval: \"weekly\"}"; echo "    open-pull-requests-limit: 5"; echo "    labels: [\"dependencies\", \"$LANG_PRIMARY\"]"; fi
     echo "  - package-ecosystem: \"github-actions\""; echo "    directory: \"/\""; echo "    schedule: {interval: \"weekly\"}"; echo "    open-pull-requests-limit: 3"; echo "    labels: [\"dependencies\", \"ci\"]";
+    echo "    groups:"; echo "      actions:"; echo "        patterns: [\"*\"]";
   } > .github/dependabot.yml; echo "    +    .github/dependabot.yml"
 fi
 if [ "$UI_ENABLED" == "yes" ]; then _safe_mkdir_p design-system/pages design-system/tokens; [ -e design-system/MASTER.md ] || { wprep design-system/MASTER.md; echo '# Design System Master

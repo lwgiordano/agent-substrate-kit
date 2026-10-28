@@ -11,7 +11,9 @@ A receipt never certifies more than it observed:
   config) was modified when it ran lists those paths as `harness_changed`;
 - inner test coverage is `unknown` unless the producer reports it (none do yet);
 - a completion assertion is a separate, self-reported record and never alters a
-  measured result; release verification stays with the release gate.
+  measured result; release verification stays with the release gate;
+- every record's SHA-256 is also appended to the memory chain, so a listed record
+  that is later deleted or edited is reported by `show` and `projects`.
 Only `check`, `evals` and `prove` can run; no other command is accepted. Output is
 digested, not stored, unless an excerpt is explicitly requested; the excerpt drops
 credential-shaped lines and private-key blocks and sanitizes the rest line by line.
@@ -162,7 +164,8 @@ def _names(root: Path, directory: Path, cap: int | None = None) -> list[str]:
     return sorted(names)
 
 
-def _write(root: Path, rel: Path, record: dict) -> None:
+def _write(root: Path, rel: Path, record: dict) -> str:
+    """Write a new record; return the SHA-256 of the bytes written."""
     text = json_text(record)
     if len(text.encode()) > RECORD_LIMIT:
         raise ReceiptError("record exceeds the 64 KiB limit")
@@ -172,20 +175,45 @@ def _write(root: Path, rel: Path, record: dict) -> None:
         safe_atomic_write(root / rel, text + "\n", root=root, make_parents=True, mode=0o600)
     except GuardRefusal as exc:
         raise ReceiptError(f"receipt store is unsafe ({safe_text(str(exc), 200)})") from exc
+    return hashlib.sha256((text + "\n").encode("utf-8")).hexdigest()
+
+
+def _chain(root: Path, task_id: str, records: list[tuple[str, str]]) -> bool:
+    """Append the records' digests to the memory chain (v3.10.6), so deleting or
+    editing one is visible later. The record stands when the chain refuses; it
+    is then listed as not chained, and this says so now."""
+    try:
+        import memory_log
+        if memory_log.receipt_event(root, task_id, records) == 0:
+            return True
+    except Exception:  # noqa: BLE001 - reported below, never a silent skip
+        pass
+    print("receipt: WARNING — the memory chain did not record this receipt record; "
+          "`show` will list it as not chained", file=sys.stderr)
+    return False
+
+
+def _chained(root: Path) -> tuple[dict | None, str]:
+    try:
+        import memory_log
+        return memory_log.chained_receipts(root)
+    except Exception as exc:  # noqa: BLE001 - an unreadable chain is reported, not fatal
+        return None, f"memory chain unreadable ({type(exc).__name__})"
 
 
 def _record_name(kind: str, record_id: str) -> str:
     return f"{time.time_ns():019d}-{record_id}-{kind}.json"
 
 
-def _append(root: Path, task_id: str, kind: str, record_id: str, record: dict) -> None:
+def _append(root: Path, task_id: str, kind: str, record_id: str, record: dict) -> tuple[str, str]:
     directory = _task_dir(root, task_id)
     names = _names(root, directory)
     if "task.json" not in names:
         raise ReceiptError("unknown task id")
     if len(names) > MAX_RECORDS:
         raise ReceiptError(f"task already holds {MAX_RECORDS} records; start a new task")
-    _write(root, directory.relative_to(root) / _record_name(kind, record_id), record)
+    name = _record_name(kind, record_id)
+    return name, _write(root, directory.relative_to(root) / name, record)
 
 
 def start(root: Path, task: str) -> str:
@@ -197,7 +225,7 @@ def start(root: Path, task: str) -> str:
     record = dict(schema_version=SCHEMA, kind="task", task_id=task_id, task=text,
                   created_at=now(), created_ns=time.time_ns(), root=safe_fact(str(root), 1000),
                   start_state=_state(facts))
-    _write(root, STORE / task_id / "task.json", record)
+    _chain(root, task_id, [("task.json", _write(root, STORE / task_id / "task.json", record))])
     return task_id
 
 
@@ -343,7 +371,7 @@ def run_check(root: Path, task_id: str, kind: str, timeout: int = DEFAULT_TIMEOU
     start_head = _valid_state(_load(root, STORE / task_id / "task.json").get("start_state")).get("head")
     before = git_facts(root)
     harness = _harness_changed(before, since=start_head, root=root)
-    _append(root, task_id, "running", attempt, dict(
+    started_record = _append(root, task_id, "running", attempt, dict(
         schema_version=SCHEMA, kind="running", task_id=task_id, attempt_id=attempt,
         check=kind, argv=argv, timeout_seconds=int(timeout), started_at=now(),
         before=_state(before), harness_changed=harness))
@@ -395,7 +423,9 @@ def run_check(root: Path, task_id: str, kind: str, timeout: int = DEFAULT_TIMEOU
                   duration_seconds=round(time.monotonic() - started, 3), finished_at=now(),
                   output=output, before=_state(before), after=_state(after),
                   state=state, coverage="unknown", harness_changed=harness)
-    _append(root, task_id, "result", attempt, result)
+    # Both records are chained after the `after` fingerprint, so the chain write
+    # never falls inside the window the fingerprints compare.
+    _chain(root, task_id, [started_record, _append(root, task_id, "result", attempt, result)])
     return result
 
 
@@ -414,11 +444,16 @@ def annotate(root: Path, task_id: str, completion: str, note: str = "",
                   note=_text(note, NOTE_CHARS, "note"),
                   author=_text(author, AUTHOR_CHARS, "author") or "unspecified",
                   author_verified=False, review_ref=ref or None, recorded_at=now())
-    _append(root, task_id, "assertion", record["assertion_id"], record)
+    _chain(root, task_id, [_append(root, task_id, "assertion", record["assertion_id"], record)])
     return record
 
 
 def _load(root: Path, rel: Path) -> dict:
+    return _load_digest(root, rel)[0]
+
+
+def _load_digest(root: Path, rel: Path) -> tuple[dict, str]:
+    """A record and the SHA-256 of its bytes, as the memory chain lists it."""
     raw = safe_read_bytes(root / rel, root, max_bytes=RECORD_LIMIT)
     if raw is None:
         raise ReceiptError(f"unreadable, unsafe or oversized record: {safe_text(rel.name, 120)}")
@@ -428,7 +463,38 @@ def _load(root: Path, rel: Path) -> dict:
         raise ReceiptError(f"malformed record: {safe_text(rel.name, 120)}") from exc
     if not isinstance(data, dict) or data.get("schema_version") != SCHEMA:
         raise ReceiptError(f"unknown receipt schema: {safe_text(rel.name, 120)}")
-    return data
+    return data, hashlib.sha256(raw).hexdigest()
+
+
+# Chain summaries `show` exits 1 on and `projects` counts as an error.
+CHAIN_ERRORS = ("records-missing-or-changed", "unlisted-records")
+
+
+def _chain_report(listed: dict | None, reason: str, task_id: str, digests: dict[str, str],
+                  pending: set[str]) -> tuple[dict, list[dict]]:
+    """The memory chain's view of one receipt: its summary and diagnostics.
+
+    `pending` are `running` records whose attempt has no result yet: they are
+    chained together with their result, so being unlisted is expected. Any other
+    record outside a receipt the chain lists is not evidence (v3.10.6: records
+    copied in from a passing attempt read as a pass)."""
+    if listed is None:
+        return {"status": "unavailable", "reason": reason}, []
+    mine = {n: h for n, h in listed.get(task_id, {}).items()
+            if n == "task.json" or _RECORD.fullmatch(n)}
+    missing = sorted(n for n in mine if n not in digests)
+    changed = sorted(n for n, h in mine.items() if n in digests and digests[n] != h)
+    unchained = sorted(n for n in digests if n not in mine and n not in pending)
+    diagnostics = [{"code": code, "record": safe_text(n, 120)}
+                   for code, found in (("chained-record-missing", missing),
+                                       ("chained-record-changed", changed),
+                                       ("record-not-chained", unchained))
+                   for n in found[:50]]
+    status = ("records-missing-or-changed" if missing or changed
+              else "not-chained" if not mine
+              else "unlisted-records" if unchained else "complete")
+    return {"status": status, "listed": len(mine), "missing": len(missing),
+            "changed": len(changed), "not_chained": len(unchained)}, diagnostics
 
 
 def _resanitize(value, limit: int) -> str | None:
@@ -470,27 +536,34 @@ def _consistent(outcome, code, sig) -> bool:
     return code is None
 
 
-def show(root: Path, task_id: str, current: dict | None = None) -> dict:
+def show(root: Path, task_id: str, current: dict | None = None,
+         chain: tuple[dict | None, str] | None = None) -> dict:
     harden_path()
     root = Path(root).resolve()
     directory = _task_dir(root, task_id)
     names = _names(root, directory)
+    listed, reason = chain if chain is not None else _chained(root)
     if "task.json" not in names:
+        if listed and listed.get(task_id):
+            raise ReceiptError(f"receipt deleted: the memory chain lists {len(listed[task_id])} "
+                               "record(s) for this task and its directory is gone")
         raise ReceiptError("unknown task id")
     if len(names) > MAX_RECORDS + 1:
         raise ReceiptError("task holds more records than a receipt may")
     rel = directory.relative_to(root)
-    task = _load(root, rel / "task.json")
+    task, task_digest = _load_digest(root, rel / "task.json")
+    digests = {"task.json": task_digest}
     if task.get("kind") != "task" or task.get("task_id") != task_id:
         raise ReceiptError("task record does not match its directory")
     running, results, assertions, diagnostics = {}, {}, [], []
+    running_names: dict[str, str] = {}
     for name in names:
         if name == "task.json":
             continue
         m = _RECORD.fullmatch(name)
         if not m:
             raise ReceiptError(f"unexpected file in receipt: {safe_text(name, 120)}")
-        record = _load(root, rel / name)
+        record, digests[name] = _load_digest(root, rel / name)
         if record.get("task_id") != task_id or record.get("kind") != m.group(3):
             raise ReceiptError(f"record does not match its name: {safe_text(name, 120)}")
         if m.group(3) == "assertion":
@@ -508,6 +581,9 @@ def show(root: Path, task_id: str, current: dict | None = None) -> dict:
         if m.group(2) in target:
             raise ReceiptError(f"duplicate attempt record: {safe_text(name, 120)}")
         target[m.group(2)] = (int(m.group(1)), record)
+        if m.group(3) == "running":
+            running_names[m.group(2)] = name
+    pending = {running_names[a] for a in running if a not in results}
     attempts = []
     for attempt_id, (_, start_rec) in sorted(running.items(), key=lambda kv: kv[1][0]):
         before = _valid_state(start_rec.get("before"))
@@ -543,6 +619,8 @@ def show(root: Path, task_id: str, current: dict | None = None) -> dict:
         attempts.append(entry)
     for attempt_id in results:
         diagnostics.append({"code": "result-without-start", "attempt_id": attempt_id})
+    chain_summary, chain_diagnostics = _chain_report(listed, reason, task_id, digests, pending)
+    diagnostics.extend(chain_diagnostics)
     current = current if current is not None else git_facts(root)
     now_fp = current.get("fingerprint")
     checks = {}
@@ -567,6 +645,7 @@ def show(root: Path, task_id: str, current: dict | None = None) -> dict:
                     completion=assertions[-1]["completion"] if assertions else "not-recorded",
                     checks=checks,
                     release_verification="not part of receipts; use ./manage.sh release",
+                    chain=chain_summary,
                     authentication="unsigned local evidence; author is self-reported"),
                 attempts=attempts, assertions=assertions, diagnostics=diagnostics)
 
@@ -582,6 +661,13 @@ def latest_tasks(root: Path, limit: int = 5,
     if len(names) > MAX_SCAN:
         problems.append({"code": "receipt-scan-capped", "task_id": "*",
                          "reason": f"more than {MAX_SCAN} entries"})
+    chain = _chained(root)
+    problems.extend(_chain_gaps(root, chain[0], set(names[:MAX_SCAN])))
+    if chain[0] is None and any(_ID.fullmatch(n) for n in names):
+        # Receipts with no chain to check them against: a deletion would be
+        # invisible, so the report must not read as clean (v3.10.6).
+        problems.append({"code": "receipt-chain-unavailable", "task_id": "*",
+                         "reason": chain[1][:200]})
     dated = []
     for task_id in (n for n in names[:MAX_SCAN] if _ID.fullmatch(n)):
         try:
@@ -594,11 +680,40 @@ def latest_tasks(root: Path, limit: int = 5,
         dated.append((str(task.get("created_at")), ns if isinstance(ns, int) else 0, task_id))
     for *_, task_id in sorted(dated, reverse=True)[:limit]:
         try:
-            shown.append(show(root, task_id, current))
+            shown.append(show(root, task_id, current, chain))
         except ReceiptError as exc:
             problems.append({"code": "invalid-receipt", "task_id": task_id,
                              "reason": str(exc)[:200]})
+            continue
+        if shown[-1]["summary"]["chain"].get("changed"):
+            problems.append({"code": "receipt-records-changed", "task_id": task_id,
+                             "reason": "records differ from the digests the memory chain lists"})
+        if shown[-1]["summary"]["chain"]["status"] == "unlisted-records":
+            problems.append({"code": "receipt-records-unlisted", "task_id": task_id,
+                             "reason": "records the memory chain does not list for this receipt"})
     return shown, problems
+
+
+def _chain_gaps(root: Path, listed: dict | None, present: set[str]) -> list[dict]:
+    """Receipts the memory chain lists that are gone, whole or in part. Checked for
+    every listed receipt, not only the ones shown: deleting the newest, failing
+    receipt would otherwise promote an older pass to `latest` (v3.10.6)."""
+    problems: list[dict] = []
+    for task_id in sorted(t for t in (listed or {}) if _ID.fullmatch(t))[:MAX_SCAN]:
+        if task_id not in present:
+            problems.append({"code": "receipt-deleted", "task_id": task_id,
+                             "reason": "the memory chain lists this receipt; its directory is gone"})
+            continue
+        try:
+            names = set(_names(root, _task_dir(root, task_id)))
+        except ReceiptError as exc:
+            problems.append({"code": "invalid-receipt", "task_id": task_id, "reason": str(exc)[:200]})
+            continue
+        gone = [n for n in listed[task_id] if n not in names]
+        if gone:
+            problems.append({"code": "receipt-records-missing", "task_id": task_id,
+                             "reason": f"{len(gone)} record(s) the memory chain lists are gone"})
+    return problems
 
 
 def render(report: dict) -> str:
@@ -618,8 +733,22 @@ def render(report: dict) -> str:
     for a in report["assertions"]:
         lines.append(f"Assertion {a['completion']} by {a['author']} (unverified) "
                      f"at {a['recorded_at']}: {a['note'] or ''}")
+    c = s["chain"]
+    if c["status"] == "unavailable":
+        lines.append(f"Memory chain: unavailable ({c['reason']}); deletions cannot be detected")
+    elif c["status"] == "records-missing-or-changed":
+        lines.append(f"Memory chain: WARNING — {c['missing']} record(s) it lists are missing and "
+                     f"{c['changed']} changed; this receipt is not the one that was recorded")
+    elif c["status"] == "unlisted-records":
+        lines.append(f"Memory chain: WARNING — {c['not_chained']} record(s) are not in the chain "
+                     "that lists this receipt; they are not evidence")
+    elif c["status"] == "not-chained":
+        lines.append("Memory chain: none of this receipt's records are listed (written before "
+                     "v3.10.6, or the chain refused them)")
+    else:
+        lines.append(f"Memory chain: {c['listed']} record(s) listed")
     for d in report["diagnostics"]:
-        lines.append(f"Diagnostic: {d['code']} {d.get('attempt_id', '')}")
+        lines.append(f"Diagnostic: {d['code']} {d.get('attempt_id', d.get('record', ''))}")
     lines.append(f"Note: {s['authentication']}")
     return "\n".join(lines)
 
@@ -665,7 +794,7 @@ def main(argv=None) -> int:
             return 0
         report = show(root, args.task_id)
         print(json_text(report) if args.json else render(report))
-        return 0
+        return 1 if report["summary"]["chain"]["status"] in CHAIN_ERRORS else 0
     except ReceiptError as exc:
         # Built only from fixed text and already-sanitized fragments; sanitizing
         # again would swallow the whole message around a redaction marker.

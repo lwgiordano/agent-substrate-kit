@@ -23,7 +23,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with: {fetch-depth: 0, persist-credentials: false}
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with: {python-version: "3.11"}
       # Every other action here is pinned to a commit SHA that the kit's own CI
       # has run. This one never runs in the kit, so its tag is not SHA-verified;
@@ -31,7 +31,7 @@ jobs:
       - uses: sigstore/cosign-installer@v3
       - name: Build (unsigned artifact + manifest)
         run: |
-          python3 -m pip install --quiet cryptography==50.0.2   # pinned: this job can sign
+          python3 -m pip install --quiet -c scripts/substrate-requirements.txt cryptography   # pinned: this job can sign
           ./package_release.sh --smoke   # SUBSTRATE_RELEASE_SECKEY unset -> honestly unsigned zip
       - name: Keyless-sign the artifact (Sigstore bundle)
         run: |

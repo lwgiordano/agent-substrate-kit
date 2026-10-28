@@ -19,16 +19,17 @@ jobs:
         with: {fetch-depth: 0, persist-credentials: false}
       # The substrate's own validators are Python (stdlib + PyYAML),
       # regardless of the project's primary language.
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with: {python-version: "3.11"}
       - name: Bootstrap toolchain (python)
         run: |
           set -euo pipefail
+          # Pinned tool versions (v3.10.6): scripts/substrate-requirements.txt.
           if [ -f pyproject.toml ]; then
-            pipx install uv
+            python -m pip install -c scripts/substrate-requirements.txt uv
             uv sync --group dev
           else
-            python -m pip install --upgrade pip PyYAML pre-commit
+            python -m pip install -c scripts/substrate-requirements.txt pip PyYAML pre-commit
           fi
       - name: Node toolchain
         if: hashFiles('package.json') != ''
@@ -39,7 +40,7 @@ jobs:
         run: npm ci || npm install
       - name: Go toolchain
         if: hashFiles('go.mod') != ''
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with: {go-version: "stable"}
       - name: Substrate setup (creates .substrate/venv with validators)
         run: ./manage.sh setup

@@ -476,3 +476,45 @@ def test_release_package_really_leaves_out_local_state(tmp_path):
     planted_hash, names = build()
     assert not [n for n in names if ".substrate/receipts" in n or ".superpowers" in n]
     assert planted_hash == clean_hash, "local state changed the release source hash"
+
+
+def _receipt_project(root):
+    init(root)
+    (root / "manage.sh").write_text("#!/usr/bin/env bash\nexit 0\n")
+    (root / ".gitignore").write_text(".substrate/receipts/\n.substrate/memory/\n")
+    (root / "app.py").write_text("x = 1\n")
+    git(root, "add", ".")
+    git(root, "commit", "-qm", "receipts")
+    return root
+
+
+def test_a_deleted_newer_receipt_makes_the_project_an_error(tmp_path):
+    """v3.10.6: `projects` shows the latest receipt; deleting the newest, failing one
+    used to promote an older pass silently."""
+    root = _receipt_project(tmp_path / "deleted")
+    receipt = api("task_receipt")
+    older = receipt.start(root, "older")
+    receipt.run_check(root, older, "check", 30)
+    newer = receipt.start(root, "newer")
+    import shutil
+    shutil.rmtree(root / ".substrate/receipts" / newer)
+    row = api().report([root])["projects"][0]
+    assert row["latest_receipt"]["task_id"] == older
+    assert row["status"] == "error"
+    assert {"code": "receipt-deleted", "path": ".substrate/receipts/" + newer} in [
+        {k: d.get(k) for k in ("code", "path")} for d in row["diagnostics"]]
+    assert row["latest_receipt"]["chain"] == "complete"
+
+
+def test_receipts_without_a_usable_chain_make_the_project_an_error(tmp_path):
+    """v3.10.6 audit: one garbage line in the chain plus a deleted receipt read
+    `[ok]`, because an unavailable chain was only shown inline."""
+    root = _receipt_project(tmp_path / "unchecked")
+    receipt = api("task_receipt")
+    receipt.start(root, "task")
+    with (root / ".substrate/memory/events.jsonl").open("a") as f:
+        f.write("not json\n")
+    row = api().report([root])["projects"][0]
+    assert row["latest_receipt"]["chain"] == "unavailable"
+    assert row["status"] == "error"
+    assert "receipt-chain-unavailable" in {d["code"] for d in row["diagnostics"]}

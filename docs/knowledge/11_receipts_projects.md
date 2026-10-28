@@ -1,6 +1,6 @@
 ---
 purpose: Work receipts and read-only multi-project status.
-last_human_reviewed: 2026-10-21
+last_human_reviewed: 2026-10-28
 covers:
   - scripts/task_receipt.py
   - scripts/project_status.py
@@ -15,6 +15,9 @@ asserts:
   - scripts/_task_evidence.py::def trusted_executable
   - scripts/task_receipt.py::_CHECK_SELECTION_ENV = frozenset
   - scripts/project_status.py::profile-below-lock
+  - scripts/task_receipt.py::chained-record-missing
+  - scripts/task_receipt.py::receipt-deleted
+  - scripts/memory_log.py::def chained_receipts
 ---
 
 # Work receipts and project status
@@ -97,9 +100,7 @@ record, an outcome that contradicts its exit code (a `passed` that is not 0, a
 state that differs from the one its own before/after fingerprints give. Hashes must
 be hashes, and stored text is re-sanitized on read, so a hand-edited record
 cannot inject terminal controls or a known credential pattern. Error messages
-quote file names only through the same sanitizer. A hand-edit that stays
-internally consistent cannot be detected: receipts are unsigned, and records
-are not chained, so deleting an attempt's two records removes it from `show`. A `running` record with no
+quote file names only through the same sanitizer. A `running` record with no
 result reads `incomplete`; a result with no `running` record is listed as
 `result-without-start` and not counted. For each check kind the summary shows
 the latest outcome, how many attempts passed, and whether the latest attempt's
@@ -107,6 +108,34 @@ input fingerprint equals the current one (`current`, `stale`, or `unknown`). An
 earlier pass never hides a later failure. Receipts are unsigned local evidence:
 they bound accident and sequential edits, not a same-user process rewriting them
 during a run (ADR 0002).
+
+## Receipts in the memory chain
+
+Every record a receipt writes is also listed in the memory chain of the same
+repository (`.substrate/memory/events.jsonl`) as a `receipt` event holding its
+file name and SHA-256. `start` and `annotate` chain their record at once; `check`
+chains its `running` and `result` records together after the second fingerprint,
+so the chain write never falls inside the window the fingerprints compare, and
+an untracked `.substrate/memory/` is outside the fingerprint, like the receipt
+store. `receipt` is a reserved event type: `memory append` cannot write one.
+
+`show` reads the chain only if it verifies, then compares it with the store. A
+listed record that is missing (`chained-record-missing`) or whose bytes differ
+(`chained-record-changed`) makes the chain summary `records-missing-or-changed`:
+the text view warns and `show` exits 1. `show` on a receipt whose directory is
+gone but which the chain lists reports `receipt deleted` and exits 2. In a
+receipt the chain lists, a record it does not list (`record-not-chained`) is not
+evidence: the summary reads `unlisted-records` and `show` exits 1, so records
+copied in from a passing attempt never read as a pass. The one exception is the
+`running` record of an attempt with no result yet, which is chained together
+with its result. A receipt with no listed record at all reads `not-chained`
+(written before v3.10.6, or refused by the chain, which warned). Without
+a readable chain that verifies (absent, linked, over 64 MiB, or broken) the
+summary is `unavailable` and says deletions cannot be detected. The chain is read
+line by line, stopping at the first break. Deleting the events as
+well means rewriting the chain, which `verify
+--anchor` fails once a published anchor covers them ([the memory
+anchor](08_memory_anchor.md)); before that, it is the limit of an unkeyed chain.
 
 ## Project status
 
@@ -129,7 +158,14 @@ values, the three `required_*` locks, hook scripts referenced by
 `lstat`, never resolved, with whether the hooks directory the target's
 `core.hooksPath` selects lies inside or outside its root), and the latest
 receipt (newest by creation time, ties ordered by a nanosecond stamp) with
-per-check applicability, labelled unsigned and recorded by that project. Hook
+per-check applicability and its memory-chain status, labelled unsigned and
+recorded by that project. Every receipt the inspected chain lists is checked, not
+only the latest: a receipt whose directory is gone (`receipt-deleted`), listed
+records that are gone (`receipt-records-missing`), changed or unlisted records
+in the shown receipt (`receipt-records-changed`, `receipt-records-unlisted`), and
+receipts with no usable chain to check them against (`receipt-chain-unavailable`)
+are error diagnostics, so deleting the newest, failing receipt cannot quietly
+promote an older pass. Hook
 files that exist mean configured, never that the host runs them. Branch protection, rulesets and
 memory-anchor publication read `not checked`: this command makes no network
 calls. Missing, non-Git and unborn roots, unsafe or malformed metadata (an

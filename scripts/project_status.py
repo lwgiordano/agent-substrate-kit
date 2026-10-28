@@ -205,7 +205,7 @@ def _receipt(root: Path, diags: list, facts: dict) -> dict | None:
     r = shown[0]
     return {"task_id": r["task_id"], "task": clip_bytes(r["task"] or "", 200),
             "created_at": r["created_at"], "completion": r["summary"]["completion"],
-            "checks": r["summary"]["checks"],
+            "checks": r["summary"]["checks"], "chain": r["summary"]["chain"]["status"],
             "authentication": "unsigned, recorded by the inspected project itself"}
 
 
@@ -312,7 +312,7 @@ def render_text(rep: dict) -> str:
                     + ("; WARNING: gate files modified" if v.get("harness_modified") else "")
                     for k2, v in rec["checks"].items()) or "no checks run"
                 lines.append(f"  receipt: {rec['task_id'][:8]} completion {rec['completion']}; "
-                             f"{checks} (unsigned, recorded by that project)")
+                             f"{checks}; memory chain {rec['chain']} (unsigned, recorded by that project)")
             lines.append("  remote: branch protection, rulesets, anchor publication — not checked")
         for d in r["diagnostics"][:5]:
             lines.append(f"  diagnostic: {d['code']} {d.get('path', '')}")

@@ -474,3 +474,10 @@ This file is `merge=union` in `.gitattributes` so concurrent branch entries comb
 **Knowledge:** A check that something fails or is refused must assert the exact exit code and message, because a crash or a timeout satisfies a test for any non-zero status. The release smoke's strict-lock step had passed on an import crash since v3.8.36, and the language gate turned failing node and go test runs into skips; the seven-lens review found both, and its synthesizer's priority order held up.
 **Outcome:** shipped-green
 
+## 2026-10-28T17:19:21Z — NO_SESSION — c3e639b38a59f616cf55c62788129efb75e31b28
+**Summary:** v3.10.6: Dependabot action bumps arrive green with sync-pins and grouped updates, setup and CI install pinned tool versions, and work receipts are recorded in the memory chain so a deleted or edited attempt is reported.
+**Files:** scripts/sync_action_pins.py,scripts/substrate-requirements.txt,manage.sh,templates/manage.sh.template,bootstrap.sh,.github/dependabot.yml,.github/workflows/*.yml,workflows/*.yml.template,scripts/memory_log.py,scripts/task_receipt.py,scripts/_task_evidence.py,scripts/project_status.py,tests/*,docs/knowledge/*,VERSION,README.md,BENCHMARK.md
+**Intent:** Operator asked how to make the kit's layers work well together and approved three items: a template pin sync with grouped Dependabot, pinned tool versions, and receipt results in the memory chain; a security-auditor pass then found six gaps, all fixed.
+**Knowledge:** Evidence that cannot be checked must read as a problem, never as clean: with the receipt chain made unreadable by one garbage line, a deleted newest receipt hid behind an ok row, and records copied into a chained receipt read as a pass. Separately, a parity test between a file an updater edits and a copy it cannot see turns every automated bump red until the repository ships the sync step and the updater groups its bumps.
+**Outcome:** shipped-green
+

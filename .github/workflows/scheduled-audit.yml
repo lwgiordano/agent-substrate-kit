@@ -21,16 +21,17 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with: {fetch-depth: 0, persist-credentials: false}
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with: {python-version: "3.11"}
       - name: Bootstrap toolchain
         run: |
           set -euo pipefail
+          # Pinned tool versions (v3.10.6): scripts/substrate-requirements.txt.
           if [ -f pyproject.toml ]; then
-            pipx install uv
+            python -m pip install -c scripts/substrate-requirements.txt uv
             uv sync --group dev
           else
-            python -m pip install --upgrade pip PyYAML pre-commit
+            python -m pip install -c scripts/substrate-requirements.txt pip PyYAML pre-commit
           fi
       - name: Substrate setup (so audit uses .substrate/venv tools, not ambient)
         run: ./manage.sh setup
@@ -45,7 +46,7 @@ jobs:
       # otherwise. always() so a failing audit still uploads evidence.
       - name: Upload audit report
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: substrate-audit-report
           path: ai/audits/**

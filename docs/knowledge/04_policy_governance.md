@@ -4,7 +4,7 @@ asserts:
   - scripts/command_policy.py::looks_dangerous_command
   - scripts/check_substrate_config.py::def config_text_problem
   - scripts/lang_gate.sh::run_gate(){
-last_human_reviewed: 2026-10-21
+last_human_reviewed: 2026-10-28
 covers:
   - manage.sh
   - scripts/_substrate_config.sh

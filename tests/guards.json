@@ -1441,6 +1441,269 @@
         "tests/test_doc_consistency.py::test_workflows_that_run_repository_code_hold_a_read_only_token"
       ],
       "why": "pull request code runs with a token that can write to the repository"
+    },
+    {
+      "id": "sync-pins-check-writes-nothing",
+      "file": "scripts/sync_action_pins.py",
+      "find": "        if not args.check:\n            safe_atomic_write(path, new, root=root)\n",
+      "replace": "        safe_atomic_write(path, new, root=root)\n",
+      "tests": [
+        "tests/test_doc_consistency.py::test_sync_pins_copies_the_kit_pins_into_the_templates"
+      ],
+      "why": "a --check run rewrites the templates it was only asked to compare"
+    },
+    {
+      "id": "sync-pins-refuses-a-self-disagreeing-kit",
+      "file": "scripts/sync_action_pins.py",
+      "find": "for action, pins in sorted(seen.items()) if len(pins) != 1]",
+      "replace": "for action, pins in sorted(seen.items()) if len(pins) > 99]",
+      "tests": [
+        "tests/test_doc_consistency.py::test_sync_pins_refuses_when_the_kit_disagrees_with_itself"
+      ],
+      "why": "an action the kit pins two ways is skipped silently and its template keeps a stale pin"
+    },
+    {
+      "id": "consumer-dependabot-groups-action-bumps",
+      "file": "bootstrap.sh",
+      "find": "    echo \"    groups:\"; echo \"      actions:\"; echo \"        patterns: [\\\"*\\\"]\";\n",
+      "replace": "",
+      "tests": [
+        "tests/test_doc_consistency.py::test_dependabot_groups_action_bumps_into_one_pull_request"
+      ],
+      "why": "consumers get one Dependabot PR per action again, each needing its own template sync"
+    },
+    {
+      "id": "setup-installs-pinned-tools",
+      "file": "manage.sh",
+      "find": "  \"$SUBPY\" -m pip install --quiet ${pin[@]+\"${pin[@]}\"} pre-commit PyYAML pytest cryptography\n",
+      "replace": "  \"$SUBPY\" -m pip install --quiet --upgrade pre-commit PyYAML pytest cryptography\n",
+      "tests": [
+        "tests/test_doc_consistency.py::test_setup_and_ci_install_only_pinned_tools"
+      ],
+      "why": "setup installs whatever tool versions were published last, not the tested ones"
+    },
+    {
+      "id": "consumer-ci-installs-pinned-uv",
+      "file": "workflows/ci.yml.template",
+      "find": "            python -m pip install -c scripts/substrate-requirements.txt uv\n",
+      "replace": "            pipx install uv\n",
+      "tests": [
+        "tests/test_doc_consistency.py::test_setup_and_ci_install_only_pinned_tools"
+      ],
+      "why": "consumer CI floats uv to the newest release on every run"
+    },
+    {
+      "id": "receipt-attempts-are-chained",
+      "file": "scripts/task_receipt.py",
+      "find": "    _chain(root, task_id, [started_record, _append(root, task_id, \"result\", attempt, result)])\n",
+      "replace": "    _append(root, task_id, \"result\", attempt, result)\n",
+      "tests": [
+        "tests/test_task_receipt.py::test_deleting_a_failed_attempt_is_reported_not_hidden",
+        "tests/test_task_receipt.py::test_every_record_is_chained_in_the_receipts_own_repository"
+      ],
+      "why": "a failed attempt's records can be deleted without a trace"
+    },
+    {
+      "id": "receipt-show-reports-chained-records-missing",
+      "file": "scripts/task_receipt.py",
+      "find": "    missing = sorted(n for n in mine if n not in digests)\n",
+      "replace": "    missing = []\n",
+      "tests": [
+        "tests/test_task_receipt.py::test_deleting_a_failed_attempt_is_reported_not_hidden"
+      ],
+      "why": "show keeps the earlier pass and says nothing about the deleted failure"
+    },
+    {
+      "id": "receipt-show-reports-chained-records-changed",
+      "file": "scripts/task_receipt.py",
+      "find": "    changed = sorted(n for n, h in mine.items() if n in digests and digests[n] != h)\n",
+      "replace": "    changed = []\n",
+      "tests": [
+        "tests/test_task_receipt.py::test_an_edit_that_stays_internally_consistent_is_reported"
+      ],
+      "why": "an internally consistent hand-edit of a record goes unnoticed"
+    },
+    {
+      "id": "receipt-show-exits-nonzero-on-chain-gaps",
+      "file": "scripts/task_receipt.py",
+      "find": "        return 1 if report[\"summary\"][\"chain\"][\"status\"] in CHAIN_ERRORS else 0\n",
+      "replace": "        return 0\n",
+      "tests": [
+        "tests/test_task_receipt.py::test_deleting_a_failed_attempt_is_reported_not_hidden"
+      ],
+      "why": "a script reading `receipt show` exit status treats a tampered receipt as fine"
+    },
+    {
+      "id": "latest-receipts-report-deleted-receipts",
+      "file": "scripts/task_receipt.py",
+      "find": "    problems.extend(_chain_gaps(root, chain[0], set(names[:MAX_SCAN])))\n",
+      "replace": "",
+      "tests": [
+        "tests/test_task_receipt.py::test_a_deleted_receipt_is_reported_and_cannot_promote_an_older_pass",
+        "tests/test_project_status.py::test_a_deleted_newer_receipt_makes_the_project_an_error"
+      ],
+      "why": "deleting the newest failing receipt silently promotes an older pass to latest"
+    },
+    {
+      "id": "deleted-receipt-is-named-as-deleted",
+      "file": "scripts/task_receipt.py",
+      "find": "        if task_id not in present:\n            problems.append({\"code\": \"receipt-deleted\"",
+      "replace": "        if False:\n            problems.append({\"code\": \"receipt-deleted\"",
+      "tests": [
+        "tests/test_task_receipt.py::test_a_deleted_receipt_is_reported_and_cannot_promote_an_older_pass"
+      ],
+      "why": "a whole deleted receipt is reported as some records missing, not as deleted"
+    },
+    {
+      "id": "receipt-chain-writes-to-the-receipt-repository",
+      "file": "scripts/memory_log.py",
+      "find": "    with at_root(root):\n        return append(\"receipt\"",
+      "replace": "    if True:\n        return append(\"receipt\"",
+      "tests": [
+        "tests/test_task_receipt.py::test_every_record_is_chained_in_the_receipts_own_repository"
+      ],
+      "why": "receipt events land in the chain of whichever repository the process started in"
+    },
+    {
+      "id": "receipt-chain-read-requires-a-verifying-chain",
+      "file": "scripts/memory_log.py",
+      "find": "        brk = _link_break(i, ev, prev)\n        if brk is not None:\n            return None, f\"memory chain does not verify ({brk})\"\n",
+      "replace": "        brk = None\n",
+      "tests": [
+        "tests/test_task_receipt.py::test_without_a_usable_chain_receipts_still_work_and_say_so"
+      ],
+      "why": "records are judged against a chain that fails its own walk"
+    },
+    {
+      "id": "receipt-is-a-reserved-event-type",
+      "file": "scripts/memory_log.py",
+      "find": "\"skill-run\", \"receipt\"})",
+      "replace": "\"skill-run\"})",
+      "tests": [
+        "tests/test_task_receipt.py::test_receipt_chain_events_cannot_be_appended_by_hand"
+      ],
+      "why": "`memory append` can mint receipt events by hand"
+    },
+    {
+      "id": "untracked-memory-chain-is-outside-the-fingerprint",
+      "file": "scripts/_task_evidence.py",
+      "find": "_RUNTIME_STATE = (\".substrate/receipts/\", \".substrate/memory/\")",
+      "replace": "_RUNTIME_STATE = (\".substrate/receipts/\",)",
+      "tests": [
+        "tests/test_task_receipt.py::test_every_record_is_chained_in_the_receipts_own_repository"
+      ],
+      "why": "a receipt's own chain write makes its pass stale and reads as a gate change"
+    },
+    {
+      "id": "receipt-chain-read-is-streamed",
+      "file": "scripts/memory_log.py",
+      "find": "    for line in _lines(text):\n",
+      "replace": "    for line in text.splitlines():\n",
+      "tests": [
+        "tests/test_task_receipt.py::test_a_hostile_chain_is_rejected_without_parsing_all_of_it"
+      ],
+      "why": "a hostile chain in an inspected project costs gigabytes before line one is rejected"
+    },
+    {
+      "id": "chain-walk-rejects-non-object-lines",
+      "file": "scripts/memory_log.py",
+      "find": "    if not isinstance(ev, dict):\n        return f\"BREAK at line {i + 1}: not an event object\"\n",
+      "replace": "",
+      "tests": [
+        "tests/test_task_receipt.py::test_a_hostile_chain_is_rejected_without_parsing_all_of_it"
+      ],
+      "why": "a JSON line that is not an object crashes the chain walk instead of breaking it"
+    },
+    {
+      "id": "at-root-never-half-rebinds",
+      "file": "scripts/memory_log.py",
+      "find": "    try:  # a root that cannot be resolved must not leave a partial rebind\n        root = Path(root)\n        ROOT, MEM = root, root / \".substrate\" / \"memory\"\n        EVENTS, _ROOT_REAL = MEM / \"events.jsonl\", os.path.realpath(root)\n        yield\n",
+      "replace": "    root = Path(root)\n    ROOT, MEM = root, root / \".substrate\" / \"memory\"\n    EVENTS, _ROOT_REAL = MEM / \"events.jsonl\", os.path.realpath(root)\n    try:\n        yield\n",
+      "tests": [
+        "tests/test_task_receipt.py::test_an_unusable_root_never_leaves_the_chain_half_rebound"
+      ],
+      "why": "a failed rebind leaves the chain pointing half at another repository"
+    },
+    {
+      "id": "unlisted-records-in-a-chained-receipt-are-an-error",
+      "file": "scripts/task_receipt.py",
+      "find": "              else \"unlisted-records\" if unchained else \"complete\")\n",
+      "replace": "              else \"complete\")\n",
+      "tests": [
+        "tests/test_task_receipt.py::test_records_copied_into_a_chained_receipt_are_not_evidence"
+      ],
+      "why": "records copied in from a passing attempt read as a pass"
+    },
+    {
+      "id": "unlisted-records-fail-receipt-show",
+      "file": "scripts/task_receipt.py",
+      "find": "CHAIN_ERRORS = (\"records-missing-or-changed\", \"unlisted-records\")",
+      "replace": "CHAIN_ERRORS = (\"records-missing-or-changed\",)",
+      "tests": [
+        "tests/test_task_receipt.py::test_records_copied_into_a_chained_receipt_are_not_evidence"
+      ],
+      "why": "`receipt show` exits 0 on a receipt holding records the chain never listed"
+    },
+    {
+      "id": "unlisted-records-are-a-projects-problem",
+      "file": "scripts/task_receipt.py",
+      "find": "        if shown[-1][\"summary\"][\"chain\"][\"status\"] == \"unlisted-records\":\n",
+      "replace": "        if False:\n",
+      "tests": [
+        "tests/test_task_receipt.py::test_records_copied_into_a_chained_receipt_are_not_evidence"
+      ],
+      "why": "`projects` reads a receipt holding unlisted records as clean"
+    },
+    {
+      "id": "a-running-check-is-not-an-unlisted-record",
+      "file": "scripts/task_receipt.py",
+      "find": "    unchained = sorted(n for n in digests if n not in mine and n not in pending)\n",
+      "replace": "    unchained = sorted(n for n in digests if n not in mine)\n",
+      "tests": [
+        "tests/test_task_receipt.py::test_a_check_still_running_is_not_an_unlisted_record"
+      ],
+      "why": "every check in progress makes its receipt, and its project row, an error"
+    },
+    {
+      "id": "receipts-without-a-chain-are-a-problem",
+      "file": "scripts/task_receipt.py",
+      "find": "    if chain[0] is None and any(_ID.fullmatch(n) for n in names):\n",
+      "replace": "    if False:\n",
+      "tests": [
+        "tests/test_task_receipt.py::test_receipts_with_no_chain_at_all_are_a_problem",
+        "tests/test_project_status.py::test_receipts_without_a_usable_chain_make_the_project_an_error"
+      ],
+      "why": "breaking the chain with one garbage line hides a deleted receipt behind an ok row"
+    },
+    {
+      "id": "sync-pins-refuses-with-no-kit-pins",
+      "file": "scripts/sync_action_pins.py",
+      "find": "    if not pins:\n",
+      "replace": "    if False:\n",
+      "tests": [
+        "tests/test_doc_consistency.py::test_sync_pins_refuses_when_the_kit_pins_nothing"
+      ],
+      "why": "sync-pins --check says \"in sync\" when it compared nothing"
+    },
+    {
+      "id": "setup-refuses-without-the-pin-file",
+      "file": "manage.sh",
+      "find": "  [ -f \"$pins\" ] || { echo \"setup: $pins is missing; restore it (./manage.sh upgrade, or git checkout) — refusing to install unpinned tool versions\" >&2; return 1; }\n  pin=(-c \"$pins\")\n",
+      "replace": "  [ -f \"$pins\" ] && pin=(-c \"$pins\")\n",
+      "tests": [
+        "tests/test_doc_consistency.py::test_setup_refuses_without_the_pin_file"
+      ],
+      "why": "a missing pin file installs whatever tool versions were published last"
+    },
+    {
+      "id": "dependabot-tool-pins-cool-down",
+      "file": ".github/dependabot.yml",
+      "find": "    cooldown:\n      default-days: 7\n",
+      "replace": "",
+      "tests": [
+        "tests/test_doc_consistency.py::test_dependabot_groups_action_bumps_into_one_pull_request"
+      ],
+      "why": "the release-signing dependency is proposed the day a new version is published"
     }
   ]
 }

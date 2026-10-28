@@ -55,6 +55,9 @@ KNOWLEDGE_ASSERTS = {
     "scripts/task_receipt.py::harness_changed",
     "scripts/task_receipt.py::_CHECK_SELECTION_ENV = frozenset",
     "scripts/project_status.py::profile-below-lock",
+    "scripts/task_receipt.py::chained-record-missing",
+    "scripts/task_receipt.py::receipt-deleted",
+    "scripts/memory_log.py::def chained_receipts",
     "scripts/append_history.py::def _withheld_at_session_start",
     "scripts/project_status.py::not checked",
     "scripts/project_status.py::inspection-failed",
@@ -562,7 +565,8 @@ def test_consumer_workflow_templates_pin_the_same_action_versions_as_the_kit() -
         for ref, files in sorted(shipped[action].items()):
             if ref != want:
                 drift.append(f"{action}@{ref} in {sorted(files)}; the kit uses @{want}")
-    assert not drift, "consumer workflow templates drifted from the kit:\n" + "\n".join(drift)
+    assert not drift, ("consumer workflow templates drifted from the kit "
+                       "(run ./manage.sh sync-pins):\n" + "\n".join(drift))
 
 
 def test_scheduled_audit_can_open_its_failure_issue() -> None:
@@ -723,3 +727,142 @@ def test_workflows_that_run_repository_code_hold_a_read_only_token() -> None:
                 assert "${{" not in (step.get("run") or "").replace("${{ matrix.", ""), \
                     f"{path.name}: an expression is interpolated into a run script; use env"
 
+
+def _sync_pins(root, *args):
+    import subprocess
+    import sys as _sys
+    return subprocess.run([_sys.executable, "-I", str(KIT / "scripts" / "sync_action_pins.py"),
+                           "--root", str(root), *args], capture_output=True, text=True, timeout=60)
+
+
+def test_sync_pins_copies_the_kit_pins_into_the_templates(tmp_path) -> None:
+    """v3.10.6: Dependabot bumps .github/workflows only, so every bump arrived red on
+    the template parity test. `./manage.sh sync-pins` copies the kit's exact pins."""
+    new, old = "a" * 40, "b" * 40
+    (tmp_path / ".github" / "workflows").mkdir(parents=True)
+    (tmp_path / "workflows").mkdir()
+    (tmp_path / ".github/workflows/ci.yml").write_text(
+        f"jobs:\n  x:\n    steps:\n      - uses: actions/setup-go@{new} # v7.0.0\n"
+        f"        uses: actions/upload-artifact@{new} # v7.0.2\n", encoding="utf-8")
+    template = (f"jobs:\n  x:\n    steps:\n      - uses: actions/setup-go@{old} # v6\n"
+                f"        with: {{go-version: stable}}\n"
+                f"      - uses: actions/upload-artifact@{old} # v4\n"
+                f"      - uses: sigstore/cosign-installer@v3\n")
+    (tmp_path / "workflows/ci.yml.template").write_text(template, encoding="utf-8")
+    r = _sync_pins(tmp_path, "--check")
+    assert r.returncode == 1 and "sync-pins" in r.stderr, r.stdout + r.stderr
+    assert (tmp_path / "workflows/ci.yml.template").read_text(encoding="utf-8") == template
+    r = _sync_pins(tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr
+    synced = (tmp_path / "workflows/ci.yml.template").read_text(encoding="utf-8")
+    assert synced == template.replace(f"setup-go@{old} # v6", f"setup-go@{new} # v7.0.0") \
+        .replace(f"upload-artifact@{old} # v4", f"upload-artifact@{new} # v7.0.2")
+    assert _sync_pins(tmp_path, "--check").returncode == 0
+
+
+def test_sync_pins_refuses_when_the_kit_disagrees_with_itself(tmp_path) -> None:
+    (tmp_path / ".github" / "workflows").mkdir(parents=True)
+    (tmp_path / "workflows").mkdir()
+    for name, sha in (("a.yml", "a" * 40), ("b.yml", "c" * 40)):
+        (tmp_path / ".github/workflows" / name).write_text(
+            f"      - uses: actions/checkout@{sha} # v7\n", encoding="utf-8")
+    (tmp_path / "workflows/ci.yml.template").write_text(
+        "      - uses: actions/checkout@" + "b" * 40 + " # v7\n", encoding="utf-8")
+    r = _sync_pins(tmp_path)
+    assert r.returncode == 2 and "2 ways" in r.stderr, r.stdout + r.stderr
+
+
+def test_sync_pins_refuses_when_the_kit_pins_nothing(tmp_path) -> None:
+    """v3.10.6 audit: with no kit pin to compare a template with, --check said
+    "in sync" and exited 0."""
+    (tmp_path / "workflows").mkdir()
+    (tmp_path / "workflows/ci.yml.template").write_text(
+        "      - uses: actions/checkout@" + "b" * 40 + " # v7\n", encoding="utf-8")
+    for args in ((), ("--check",)):
+        r = _sync_pins(tmp_path, *args)
+        assert r.returncode == 2 and "pin no action" in r.stderr, r.stdout + r.stderr
+
+
+def test_sync_pins_is_a_no_op_in_a_consumer_install(tmp_path) -> None:
+    (tmp_path / ".github" / "workflows").mkdir(parents=True)
+    r = _sync_pins(tmp_path)
+    assert r.returncode == 0 and "nothing to do" in r.stdout
+
+
+def test_dependabot_groups_action_bumps_into_one_pull_request() -> None:
+    """v3.10.6: one PR per action meant one red PR per action each week; grouped,
+    one `./manage.sh sync-pins` covers the week's bumps."""
+    import yaml
+    for text in ((KIT / ".github" / "dependabot.yml").read_text(encoding="utf-8"),):
+        updates = yaml.safe_load(text)["updates"]
+        actions = next(u for u in updates if u["package-ecosystem"] == "github-actions")
+        assert actions.get("groups", {}).get("actions", {}).get("patterns") == ["*"]
+    boot = (KIT / "bootstrap.sh").read_text(encoding="utf-8")
+    assert 'echo "    groups:"; echo "      actions:"; echo "        patterns: [\\"*\\"]"' in boot
+    # The tool pins, cryptography (which signs releases) among them, in one weekly
+    # PR, and never for a version published less than a week ago.
+    updates = yaml.safe_load((KIT / ".github" / "dependabot.yml").read_text(encoding="utf-8"))["updates"]
+    tools = next(u for u in updates if u.get("directory") == "/scripts")
+    assert tools["package-ecosystem"] == "pip" and tools["groups"]["substrate-tools"]["patterns"] == ["*"]
+    assert tools.get("cooldown", {}).get("default-days", 0) >= 7
+
+
+
+def _substrate_pins() -> dict[str, str]:
+    pins = {}
+    for line in (KIT / "scripts" / "substrate-requirements.txt").read_text(encoding="utf-8").splitlines():
+        line = line.split("#", 1)[0].strip()
+        if line:
+            name, _, version = line.partition("==")
+            assert re.fullmatch(r"[A-Za-z0-9._-]+", name) and re.fullmatch(r"\d[\w.]*", version), line
+            pins[name.lower()] = version
+    return pins
+
+
+def test_setup_refuses_without_the_pin_file(tmp_path) -> None:
+    """v3.10.6 audit: a missing pin file only warned, then installed whatever was
+    published last."""
+    import shutil
+    import subprocess
+    (tmp_path / "scripts").mkdir()
+    shutil.copy(KIT / "manage.sh", tmp_path / "manage.sh")
+    shutil.copy(KIT / "scripts" / "_substrate_config.sh", tmp_path / "scripts")
+    r = subprocess.run(["bash", "manage.sh", "setup"], cwd=tmp_path, capture_output=True,
+                       text=True, timeout=120)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "refusing to install unpinned tool versions" in r.stderr
+    assert not (tmp_path / ".substrate" / "venv").exists()
+
+
+def test_setup_and_ci_install_only_pinned_tools() -> None:
+    """v3.10.6: `./manage.sh setup` and CI installed the newest pre-commit, pytest,
+    cryptography and uv on every run. Every install goes through the pin file, and
+    names only tools it pins, so an unpinned tool cannot be added quietly."""
+    pins = _substrate_pins()
+    word = re.compile(r"[A-Za-z][A-Za-z0-9._-]*")
+    for rel in ("manage.sh", "templates/manage.sh.template"):
+        text = (KIT / rel).read_text(encoding="utf-8")
+        installs = [c.split(";")[0] for c in re.findall(r'"\$SUBPY" -m pip install ([^\n]*)', text)]
+        assert len(installs) >= 4, rel
+        for cmd in installs:
+            assert '${pin[@]+"${pin[@]}"}' in cmd, f"{rel}: unpinned install: {cmd}"
+            names = [w for w in cmd.split() if word.fullmatch(w)]
+            assert names and all(n.lower() in pins for n in names), f"{rel}: {cmd}"
+    # Every workflow, so a Dependabot bump of the pin file cannot leave an inline
+    # `==` pin (the release templates' cryptography) on the old version.
+    seen = set()
+    for path in [*(KIT / ".github" / "workflows").glob("*.yml"), *(KIT / "workflows").glob("*.template")]:
+        text = path.read_text(encoding="utf-8")
+        assert "pipx install" not in text, path.name
+        for line in text.splitlines():
+            if line.strip().startswith("#") or "pip install" not in line:
+                continue
+            tokens = line.split("pip install", 1)[1].split(" #", 1)[0].split()
+            assert "-c" in tokens and tokens[tokens.index("-c") + 1] == "scripts/substrate-requirements.txt", \
+                f"{path.name}: unpinned install: {line.strip()}"
+            names = [w for w in tokens if word.fullmatch(w)]
+            assert names and all(n.lower() in pins for n in names), f"{path.name}: {line.strip()}"
+            seen.add(path.name)
+    assert {"ci.yml", "scheduled-audit.yml", "ci.yml.template", "scheduled-audit.yml.template",
+            "release-keyless.yml.template", "release-ci-minisign.yml.template",
+            "auto-upgrade.yml.template"} <= seen, seen

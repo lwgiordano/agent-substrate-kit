@@ -1,0 +1,24 @@
+# Substrate tool versions, pinned (v3.10.6).
+#
+# `./manage.sh setup` installs the substrate venv (.substrate/venv) with this file
+# as pip constraints, and CI installs uv and pre-commit with it, so a run uses the
+# versions the kit was tested with, not whatever was published last. In the kit
+# repository Dependabot proposes bumps (one PR a week); consumer installs receive
+# new pins with each kit upgrade. A test fails if setup installs a tool that is
+# not pinned here.
+pip==26.2.1
+uv==0.13.4
+pre-commit==4.7.0
+PyYAML==6.0.3
+pytest==9.1.1
+cryptography==50.0.2
+# Python projects without uv: their dev toolchain, installed into the same venv.
+pytest-cov==7.1.0
+pytest-randomly==4.1.0
+pytest-rerunfailures==16.3
+hypothesis==6.155.3
+ruff==0.15.17
+mypy==2.1.0
+bandit==1.9.4
+pip-audit==2.10.1
+types-PyYAML==6.0.12.20260518

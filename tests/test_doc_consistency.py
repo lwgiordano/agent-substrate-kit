@@ -786,3 +786,48 @@ def test_dependabot_groups_action_bumps_into_one_pull_request() -> None:
     boot = (KIT / "bootstrap.sh").read_text(encoding="utf-8")
     assert 'echo "    groups:"; echo "      actions:"; echo "        patterns: [\\"*\\"]"' in boot
 
+
+
+def _substrate_pins() -> dict[str, str]:
+    pins = {}
+    for line in (KIT / "scripts" / "substrate-requirements.txt").read_text(encoding="utf-8").splitlines():
+        line = line.split("#", 1)[0].strip()
+        if line:
+            name, _, version = line.partition("==")
+            assert re.fullmatch(r"[A-Za-z0-9._-]+", name) and re.fullmatch(r"\d[\w.]*", version), line
+            pins[name.lower()] = version
+    return pins
+
+
+def test_setup_and_ci_install_only_pinned_tools() -> None:
+    """v3.10.6: `./manage.sh setup` and CI installed the newest pre-commit, pytest,
+    cryptography and uv on every run. Every install goes through the pin file, and
+    names only tools it pins, so an unpinned tool cannot be added quietly."""
+    pins = _substrate_pins()
+    word = re.compile(r"[A-Za-z][A-Za-z0-9._-]*")
+    for rel in ("manage.sh", "templates/manage.sh.template"):
+        text = (KIT / rel).read_text(encoding="utf-8")
+        installs = [c.split(";")[0] for c in re.findall(r'"\$SUBPY" -m pip install ([^\n]*)', text)]
+        assert len(installs) >= 4, rel
+        for cmd in installs:
+            assert '${pin[@]+"${pin[@]}"}' in cmd, f"{rel}: unpinned install: {cmd}"
+            names = [w for w in cmd.split() if word.fullmatch(w)]
+            assert names and all(n.lower() in pins for n in names), f"{rel}: {cmd}"
+    # Every workflow, so a Dependabot bump of the pin file cannot leave an inline
+    # `==` pin (the release templates' cryptography) on the old version.
+    seen = set()
+    for path in [*(KIT / ".github" / "workflows").glob("*.yml"), *(KIT / "workflows").glob("*.template")]:
+        text = path.read_text(encoding="utf-8")
+        assert "pipx install" not in text, path.name
+        for line in text.splitlines():
+            if line.strip().startswith("#") or "pip install" not in line:
+                continue
+            tokens = line.split("pip install", 1)[1].split(" #", 1)[0].split()
+            assert "-c" in tokens and tokens[tokens.index("-c") + 1] == "scripts/substrate-requirements.txt", \
+                f"{path.name}: unpinned install: {line.strip()}"
+            names = [w for w in tokens if word.fullmatch(w)]
+            assert names and all(n.lower() in pins for n in names), f"{path.name}: {line.strip()}"
+            seen.add(path.name)
+    assert {"ci.yml", "scheduled-audit.yml", "ci.yml.template", "scheduled-audit.yml.template",
+            "release-keyless.yml.template", "release-ci-minisign.yml.template",
+            "auto-upgrade.yml.template"} <= seen, seen

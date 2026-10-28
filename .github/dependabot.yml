@@ -6,6 +6,16 @@ updates:
     schedule: {interval: "weekly"}
     open-pull-requests-limit: 5
     labels: ["dependencies", "python"]
+  # The substrate tool pins (v3.10.6). Consumers get these with kit upgrades; only the
+  # kit repository asks Dependabot to bump them.
+  - package-ecosystem: "pip"
+    directory: "/scripts"
+    schedule: {interval: "weekly"}
+    open-pull-requests-limit: 3
+    labels: ["dependencies", "python"]
+    groups:
+      substrate-tools:
+        patterns: ["*"]
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule: {interval: "weekly"}

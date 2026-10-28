@@ -75,7 +75,11 @@ Substrate runtime memory and the work-receipt store (`.substrate/receipts/`) are
 ignored in consumer Git state so hook activity and receipts do not make commits
 perpetually dirty. Setup supports the project runner selected in
 config and installs both substrate tools and the relevant project development
-toolchain.
+toolchain. Every package setup installs with pip is constrained by
+`scripts/substrate-requirements.txt`, so a run gets the versions the kit was
+tested with; a missing pin file is reported, never silently ignored. A failed
+`uv sync` of the project toolchain does not stop setup, but it prints a warning
+naming `SUBSTRATE_RUNNER` instead of passing unnoticed.
 
 Bootstrap writes `.github/dependabot.yml` for the project's package ecosystem
 and for GitHub Actions, with every action bump grouped into one weekly pull

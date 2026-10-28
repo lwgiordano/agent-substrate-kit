@@ -34,7 +34,7 @@ jobs:
           gh release download --repo "$KIT_REPO" --pattern '*.zip' --pattern '*.minisig' --pattern '*.sigstore' --pattern '*.sha256'
       - name: Upgrade in place (the engine verifies the signature itself, fail-closed)
         run: |
-          python3 -m pip install --quiet cryptography==50.0.2
+          python3 -m pip install --quiet -c scripts/substrate-requirements.txt cryptography
           ZIP="$(ls _upgrade/*.zip | grep -v -- '-review-bundle' | head -1)"
           # `upgrade` runs the SAME multi-backend verifier internally (fail-closed), so the
           # consume path never bypasses the engine's own trust check (v3.7.19).

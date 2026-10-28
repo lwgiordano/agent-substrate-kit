@@ -47,9 +47,12 @@ never runs in the kit, so it stays on its tag, marked not SHA-verified, until
 an operator pins it to a commit they have checked. Node jobs run Node 24.
 Jobs that run repository code hold a read-only token and check out without
 persisting credentials; workflow expressions reach scripts through `env`, never
-the script text. The release templates pin the Python package they install
-next to the signing key or OIDC identity; the kit's own CI installs its test
-tools unpinned, in jobs that hold no secret on pull requests.
+the script text. Every `pip install` in the kit's workflows and the templates,
+including the one next to the signing key or OIDC identity, takes its versions
+from `scripts/substrate-requirements.txt`, the same constraints file setup uses,
+and a test rejects an install of a tool that file does not pin. In the kit
+repository Dependabot bumps that file in one grouped pull request a week;
+consumers receive new pins with each kit upgrade.
 
 `docs/manifest.json` is generated from source knowledge docs and ADRs. It is not
 hand-edited. `.substrate/install.json` is generated after render and records the

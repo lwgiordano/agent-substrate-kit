@@ -25,7 +25,7 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y minisign
           # Pinned: this job holds the signing key (v3.10.5).
-          python3 -m pip install --quiet cryptography==50.0.2
+          python3 -m pip install --quiet -c scripts/substrate-requirements.txt cryptography
       - name: Write signing key (mode 600, cleaned up after)
         # Through env, never interpolated into the script text (v3.10.5).
         env:

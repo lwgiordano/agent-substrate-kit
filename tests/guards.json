@@ -1441,6 +1441,56 @@
         "tests/test_doc_consistency.py::test_workflows_that_run_repository_code_hold_a_read_only_token"
       ],
       "why": "pull request code runs with a token that can write to the repository"
+    },
+    {
+      "id": "sync-pins-check-writes-nothing",
+      "file": "scripts/sync_action_pins.py",
+      "find": "        if not args.check:\n            safe_atomic_write(path, new, root=root)\n",
+      "replace": "        safe_atomic_write(path, new, root=root)\n",
+      "tests": [
+        "tests/test_doc_consistency.py::test_sync_pins_copies_the_kit_pins_into_the_templates"
+      ],
+      "why": "a --check run rewrites the templates it was only asked to compare"
+    },
+    {
+      "id": "sync-pins-refuses-a-self-disagreeing-kit",
+      "file": "scripts/sync_action_pins.py",
+      "find": "for action, pins in sorted(seen.items()) if len(pins) != 1]",
+      "replace": "for action, pins in sorted(seen.items()) if len(pins) > 99]",
+      "tests": [
+        "tests/test_doc_consistency.py::test_sync_pins_refuses_when_the_kit_disagrees_with_itself"
+      ],
+      "why": "an action the kit pins two ways is skipped silently and its template keeps a stale pin"
+    },
+    {
+      "id": "consumer-dependabot-groups-action-bumps",
+      "file": "bootstrap.sh",
+      "find": "    echo \"    groups:\"; echo \"      actions:\"; echo \"        patterns: [\\\"*\\\"]\";\n",
+      "replace": "",
+      "tests": [
+        "tests/test_doc_consistency.py::test_dependabot_groups_action_bumps_into_one_pull_request"
+      ],
+      "why": "consumers get one Dependabot PR per action again, each needing its own template sync"
+    },
+    {
+      "id": "setup-installs-pinned-tools",
+      "file": "manage.sh",
+      "find": "  \"$SUBPY\" -m pip install --quiet ${pin[@]+\"${pin[@]}\"} pre-commit PyYAML pytest cryptography\n",
+      "replace": "  \"$SUBPY\" -m pip install --quiet --upgrade pre-commit PyYAML pytest cryptography\n",
+      "tests": [
+        "tests/test_doc_consistency.py::test_setup_and_ci_install_only_pinned_tools"
+      ],
+      "why": "setup installs whatever tool versions were published last, not the tested ones"
+    },
+    {
+      "id": "consumer-ci-installs-pinned-uv",
+      "file": "workflows/ci.yml.template",
+      "find": "            python -m pip install -c scripts/substrate-requirements.txt uv\n",
+      "replace": "            pipx install uv\n",
+      "tests": [
+        "tests/test_doc_consistency.py::test_setup_and_ci_install_only_pinned_tools"
+      ],
+      "why": "consumer CI floats uv to the newest release on every run"
     }
   ]
 }

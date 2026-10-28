@@ -41,7 +41,13 @@ setup(){
   # 1. Substrate validator venv (all languages). pytest is included for
   #    every language because the kit ships its own tests/ to every repo;
   #    full-audit must run them from the substrate venv, never ambient.
-  [ -x "$SUBPY" ] || { echo "==> Creating substrate venv ($SUBVENV)"; python3 -m venv "$SUBVENV"; "$SUBPY" -m pip install --quiet --upgrade pip; }
+  # Tool versions come from scripts/substrate-requirements.txt, a pip constraints
+  # file (v3.10.6): setup installs what the kit was tested with, not whatever was
+  # published last. Applied on every run, so an older venv is brought to the pins.
+  local pins="scripts/substrate-requirements.txt" pin=()
+  if [ -f "$pins" ]; then pin=(-c "$pins")
+  else echo "setup: WARNING — $pins is missing; installing UNPINNED tool versions" >&2; fi
+  [ -x "$SUBPY" ] || { echo "==> Creating substrate venv ($SUBVENV)"; python3 -m venv "$SUBVENV"; "$SUBPY" -m pip install --quiet --upgrade ${pin[@]+"${pin[@]}"} pip; }
   # Self-healing: a partial/interrupted install can leave the venv python
   # present but pre-commit/PyYAML/pytest missing. Verify and (re)install so
   # `setup` is idempotent and repairs a half-initialized environment
@@ -51,19 +57,24 @@ setup(){
   # verification, v3.7.13); include it so the trust check is actually runnable.
   "$SUBPY" -c 'import yaml, pytest, pre_commit, cryptography' >/dev/null 2>&1 || need_repair=yes
   [ -x "$SUBVENV/bin/pre-commit" ] || need_repair=yes
+  if [ "$need_repair" = yes ]; then echo "==> Installing/repairing substrate tools"; fi
+  # Without --upgrade: an installed version that satisfies the pins is left alone
+  # (no network), one that does not is replaced by the pinned version.
+  "$SUBPY" -m pip install --quiet ${pin[@]+"${pin[@]}"} pre-commit PyYAML pytest cryptography
   if [ "$need_repair" = yes ]; then
-    echo "==> Installing/repairing substrate tools"
-    "$SUBPY" -m pip install --quiet --upgrade pre-commit PyYAML pytest cryptography
     # If the import is fine but the console script is missing (e.g. a
     # truncated install), force-recreate it.
-    [ -x "$SUBVENV/bin/pre-commit" ] || "$SUBPY" -m pip install --quiet --force-reinstall --no-deps pre-commit
+    [ -x "$SUBVENV/bin/pre-commit" ] || "$SUBPY" -m pip install --quiet --force-reinstall --no-deps ${pin[@]+"${pin[@]}"} pre-commit
   fi
   # 2. Python projects: install project + dev toolchain too. --all-extras covers BOTH
   #    dev-declaration styles (optional-dependencies + PEP 735 dependency-groups); the
   #    old `--group dev` silently installed nothing for optional-dependencies (trial #1).
   if [ "$SUBSTRATE_LANG" = python ]; then
-    if command -v uv >/dev/null 2>&1; then uv sync --all-extras || true
-    else "$SUBPY" -m pip install --quiet pytest pytest-cov pytest-randomly pytest-rerunfailures hypothesis ruff mypy bandit pip-audit types-PyYAML cryptography; fi
+    # A failed uv sync is not fatal (a Poetry project has no [project] table for
+    # uv), but it is never silent (v3.10.6: it used to be `|| true`).
+    if command -v uv >/dev/null 2>&1; then
+      uv sync --all-extras || echo "setup: WARNING — uv sync failed (exit $?); the project's dev toolchain may be missing. A Poetry or pip project: set SUBSTRATE_RUNNER in .substrate/config." >&2
+    else "$SUBPY" -m pip install --quiet ${pin[@]+"${pin[@]}"} pytest pytest-cov pytest-randomly pytest-rerunfailures hypothesis ruff mypy bandit pip-audit types-PyYAML cryptography; fi
   fi
   subtool pre-commit install
   if [ "$SUBSTRATE_PROFILE" = "strict" ]; then subtool pre-commit install --hook-type commit-msg; fi

@@ -7,7 +7,7 @@
 # new pins with each kit upgrade. A test fails if setup installs a tool that is
 # not pinned here.
 pip==26.2.1
-uv==0.13.4
+uv==0.13.5
 pre-commit==4.7.0
 PyYAML==6.0.3
 pytest==9.1.1

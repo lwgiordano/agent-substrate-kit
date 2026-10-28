@@ -800,11 +800,14 @@ def test_dependabot_groups_action_bumps_into_one_pull_request() -> None:
     boot = (KIT / "bootstrap.sh").read_text(encoding="utf-8")
     assert 'echo "    groups:"; echo "      actions:"; echo "        patterns: [\\"*\\"]"' in boot
     # The tool pins, cryptography (which signs releases) among them, in one weekly
-    # PR, and never for a version published less than a week ago.
+    # PR, and never for a version published less than a week ago. One pip entry: the
+    # root one finds scripts/substrate-requirements.txt too, and a second entry for
+    # /scripts opened every bump twice, once without the cooldown.
     updates = yaml.safe_load((KIT / ".github" / "dependabot.yml").read_text(encoding="utf-8"))["updates"]
-    tools = next(u for u in updates if u.get("directory") == "/scripts")
-    assert tools["package-ecosystem"] == "pip" and tools["groups"]["substrate-tools"]["patterns"] == ["*"]
-    assert tools.get("cooldown", {}).get("default-days", 0) >= 7
+    pips = [u for u in updates if u["package-ecosystem"] == "pip"]
+    assert [u["directory"] for u in pips] == ["/"]
+    assert pips[0]["groups"]["python"]["patterns"] == ["*"]
+    assert pips[0].get("cooldown", {}).get("default-days", 0) >= 7
 
 
 

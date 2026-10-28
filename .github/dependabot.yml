@@ -1,15 +1,11 @@
 # Dependabot — generated for lang=python. See docs for tuning.
 version: 2
 updates:
+  # One entry for every Python dependency. It also finds the substrate tool pins in
+  # scripts/substrate-requirements.txt (consumers get those with kit upgrades), so a
+  # second entry for /scripts opened each bump twice, once without the cooldown.
   - package-ecosystem: "pip"
     directory: "/"
-    schedule: {interval: "weekly"}
-    open-pull-requests-limit: 5
-    labels: ["dependencies", "python"]
-  # The substrate tool pins (v3.10.6). Consumers get these with kit upgrades; only the
-  # kit repository asks Dependabot to bump them.
-  - package-ecosystem: "pip"
-    directory: "/scripts"
     schedule: {interval: "weekly"}
     # cryptography signs releases: let a new version age a week before it is proposed.
     cooldown:
@@ -17,7 +13,7 @@ updates:
     open-pull-requests-limit: 3
     labels: ["dependencies", "python"]
     groups:
-      substrate-tools:
+      python:
         patterns: ["*"]
   - package-ecosystem: "github-actions"
     directory: "/"

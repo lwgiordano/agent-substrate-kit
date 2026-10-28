@@ -562,7 +562,8 @@ def test_consumer_workflow_templates_pin_the_same_action_versions_as_the_kit() -
         for ref, files in sorted(shipped[action].items()):
             if ref != want:
                 drift.append(f"{action}@{ref} in {sorted(files)}; the kit uses @{want}")
-    assert not drift, "consumer workflow templates drifted from the kit:\n" + "\n".join(drift)
+    assert not drift, ("consumer workflow templates drifted from the kit "
+                       "(run ./manage.sh sync-pins):\n" + "\n".join(drift))
 
 
 def test_scheduled_audit_can_open_its_failure_issue() -> None:
@@ -722,4 +723,66 @@ def test_workflows_that_run_repository_code_hold_a_read_only_token() -> None:
             for step in job.get("steps") or []:
                 assert "${{" not in (step.get("run") or "").replace("${{ matrix.", ""), \
                     f"{path.name}: an expression is interpolated into a run script; use env"
+
+
+def _sync_pins(root, *args):
+    import subprocess
+    import sys as _sys
+    return subprocess.run([_sys.executable, "-I", str(KIT / "scripts" / "sync_action_pins.py"),
+                           "--root", str(root), *args], capture_output=True, text=True, timeout=60)
+
+
+def test_sync_pins_copies_the_kit_pins_into_the_templates(tmp_path) -> None:
+    """v3.10.6: Dependabot bumps .github/workflows only, so every bump arrived red on
+    the template parity test. `./manage.sh sync-pins` copies the kit's exact pins."""
+    new, old = "a" * 40, "b" * 40
+    (tmp_path / ".github" / "workflows").mkdir(parents=True)
+    (tmp_path / "workflows").mkdir()
+    (tmp_path / ".github/workflows/ci.yml").write_text(
+        f"jobs:\n  x:\n    steps:\n      - uses: actions/setup-go@{new} # v7.0.0\n"
+        f"        uses: actions/upload-artifact@{new} # v7.0.2\n", encoding="utf-8")
+    template = (f"jobs:\n  x:\n    steps:\n      - uses: actions/setup-go@{old} # v6\n"
+                f"        with: {{go-version: stable}}\n"
+                f"      - uses: actions/upload-artifact@{old} # v4\n"
+                f"      - uses: sigstore/cosign-installer@v3\n")
+    (tmp_path / "workflows/ci.yml.template").write_text(template, encoding="utf-8")
+    r = _sync_pins(tmp_path, "--check")
+    assert r.returncode == 1 and "sync-pins" in r.stderr, r.stdout + r.stderr
+    assert (tmp_path / "workflows/ci.yml.template").read_text(encoding="utf-8") == template
+    r = _sync_pins(tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr
+    synced = (tmp_path / "workflows/ci.yml.template").read_text(encoding="utf-8")
+    assert synced == template.replace(f"setup-go@{old} # v6", f"setup-go@{new} # v7.0.0") \
+        .replace(f"upload-artifact@{old} # v4", f"upload-artifact@{new} # v7.0.2")
+    assert _sync_pins(tmp_path, "--check").returncode == 0
+
+
+def test_sync_pins_refuses_when_the_kit_disagrees_with_itself(tmp_path) -> None:
+    (tmp_path / ".github" / "workflows").mkdir(parents=True)
+    (tmp_path / "workflows").mkdir()
+    for name, sha in (("a.yml", "a" * 40), ("b.yml", "c" * 40)):
+        (tmp_path / ".github/workflows" / name).write_text(
+            f"      - uses: actions/checkout@{sha} # v7\n", encoding="utf-8")
+    (tmp_path / "workflows/ci.yml.template").write_text(
+        "      - uses: actions/checkout@" + "b" * 40 + " # v7\n", encoding="utf-8")
+    r = _sync_pins(tmp_path)
+    assert r.returncode == 2 and "2 ways" in r.stderr, r.stdout + r.stderr
+
+
+def test_sync_pins_is_a_no_op_in_a_consumer_install(tmp_path) -> None:
+    (tmp_path / ".github" / "workflows").mkdir(parents=True)
+    r = _sync_pins(tmp_path)
+    assert r.returncode == 0 and "nothing to do" in r.stdout
+
+
+def test_dependabot_groups_action_bumps_into_one_pull_request() -> None:
+    """v3.10.6: one PR per action meant one red PR per action each week; grouped,
+    one `./manage.sh sync-pins` covers the week's bumps."""
+    import yaml
+    for text in ((KIT / ".github" / "dependabot.yml").read_text(encoding="utf-8"),):
+        updates = yaml.safe_load(text)["updates"]
+        actions = next(u for u in updates if u["package-ecosystem"] == "github-actions")
+        assert actions.get("groups", {}).get("actions", {}).get("patterns") == ["*"]
+    boot = (KIT / "bootstrap.sh").read_text(encoding="utf-8")
+    assert 'echo "    groups:"; echo "      actions:"; echo "        patterns: [\\"*\\"]"' in boot
 

@@ -4,7 +4,7 @@ asserts:
   - bootstrap.sh::_safe_mkdir_p
   - bootstrap.sh::wappend
   - scripts/run_python_gate.sh::_ruff_args
-last_human_reviewed: 2026-10-21
+last_human_reviewed: 2026-10-28
 covers:
   - bootstrap.sh
   - manage.sh
@@ -76,6 +76,10 @@ ignored in consumer Git state so hook activity and receipts do not make commits
 perpetually dirty. Setup supports the project runner selected in
 config and installs both substrate tools and the relevant project development
 toolchain.
+
+Bootstrap writes `.github/dependabot.yml` for the project's package ecosystem
+and for GitHub Actions, with every action bump grouped into one weekly pull
+request.
 
 ## Source and installed layouts
 

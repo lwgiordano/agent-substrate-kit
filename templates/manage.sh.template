@@ -295,6 +295,7 @@ case "$cmd" in
   reject) run_py scripts/append_rejected.py "$@" ;;
   prove) run_py scripts/prove_guards.py "$@" ;;
   recall) run_py scripts/recall.py "$@" ;;
+  sync-pins) run_py scripts/sync_action_pins.py "$@" ;;
   brief) run_py_system scripts/task_brief.py "$@" ;;
   receipt) run_py_system scripts/task_receipt.py "$@" ;;
   projects) run_py_system scripts/project_status.py "$@" ;;
@@ -302,7 +303,7 @@ case "$cmd" in
   new-validator) run_py scripts/new_validator.py "$@" ;;
   design-init) mkdir -p design-system/pages design-system/tokens; echo "design-system/ scaffolded" ;;
   *) cat <<'HELP'
-Usage: ./manage.sh setup|doctor|go-live|context-report|code-shape|verify-release|upgrade|enable|security|check|evals|audit|full-audit|release|manifest|agent-system-audit|handoff|memory|reject|prove|recall|brief|receipt|projects|bus|design-init|new-validator
+Usage: ./manage.sh setup|doctor|go-live|context-report|code-shape|verify-release|upgrade|enable|security|check|evals|audit|full-audit|release|manifest|agent-system-audit|handoff|memory|reject|prove|recall|sync-pins|brief|receipt|projects|bus|design-init|new-validator
   evals                                       adversarial behavior evals (block-rate / FP-rate, writes a trace)
   doctor [--quick|--security|--operational]   readiness levels
   go-live [--json]                            local/remote/deep readiness map (offline, side-effect-light)
@@ -311,6 +312,7 @@ Usage: ./manage.sh setup|doctor|go-live|context-report|code-shape|verify-release
   enable remote [--plan|--write|--check]      turn on the remote-governance tier (CODEOWNERS + trusted-base)
   memory [verify|tail|tasks|record <file>]    append-only event log (records HISTORY/REJECTED/lessons entries)
   prove [--only ID..|--list]                  remove each registered guard in a copy; its tests must then FAIL
+  sync-pins [--check]                         copy the kit's action pins into workflows/*.template (kit source only)
   recall "<query>" [--budget N] [--k N]       ranked section search over knowledge/ADRs/postmortems/HISTORY/lessons
   brief "<task>" [--path PATH] [--budget N] [--json]  current task evidence; no checks run
   audit | full-audit                          quick validators | plus pytest and pre-commit; each check PASS, BLOCK,

@@ -481,3 +481,10 @@ This file is `merge=union` in `.gitattributes` so concurrent branch entries comb
 **Knowledge:** Evidence that cannot be checked must read as a problem, never as clean: with the receipt chain made unreadable by one garbage line, a deleted newest receipt hid behind an ok row, and records copied into a chained receipt read as a pass. Separately, a parity test between a file an updater edits and a copy it cannot see turns every automated bump red until the repository ships the sync step and the updater groups its bumps.
 **Outcome:** shipped-green
 
+## 2026-10-28T17:44:47Z — NO_SESSION — 7ff8603
+**Summary:** Correction to the v3.10.6 entry: the weekly Dependabot actions pull request still fails the template parity test until sync-pins runs on its branch; v3.10.6 made it one grouped pull request and one command, not green on arrival. README corrected.
+**Files:** README.md
+**Intent:** Self-review after merging v3.10.6 found the README and HISTORY summary overstating the Dependabot change; HISTORY is append-only, so this entry carries the correction.
+**Knowledge:** Describe what a change does to the workflow a person runs, not what it makes possible: sync-pins plus grouping made a red Dependabot pull request one command to fix, and the release notes said it no longer arrived red. Making it arrive green needs the templates to take their pins from the kit at install time, or a push that triggers CI, which GITHUB_TOKEN does not.
+**Outcome:** unverified
+

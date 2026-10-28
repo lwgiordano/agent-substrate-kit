@@ -167,7 +167,7 @@
         "scripts/memory_log.py",
         "scripts/release_gate.sh"
       ],
-      "last_human_reviewed": "2026-10-21",
+      "last_human_reviewed": "2026-10-28",
       "path": "docs/knowledge/08_memory_anchor.md",
       "purpose": "The memory trust anchor \u2014 monotonic advance, remote confirmation, and limits."
     },
@@ -204,7 +204,7 @@
         "scripts/check_history_sha.py",
         "scripts/session_handoff.py"
       ],
-      "last_human_reviewed": "2026-10-21",
+      "last_human_reviewed": "2026-10-28",
       "path": "docs/knowledge/10_lessons_recall.md",
       "purpose": "Lessons with evidence, the record the chain attests, outcome labels, and recall."
     },
@@ -213,7 +213,7 @@
         "scripts/task_receipt.py",
         "scripts/project_status.py"
       ],
-      "last_human_reviewed": "2026-10-21",
+      "last_human_reviewed": "2026-10-28",
       "path": "docs/knowledge/11_receipts_projects.md",
       "purpose": "Work receipts and read-only multi-project status."
     }

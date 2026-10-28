@@ -18,7 +18,12 @@ from _doc_common import open_dir_chain, safe_read_bytes
 GIT_LIMIT = 16 << 20
 FILE_LIMIT = 8 << 20
 TOTAL_LIMIT = 128 << 20
-EXCLUSIONS = [".substrate/receipts/", "Git-ignored untracked files"]
+EXCLUSIONS = [".substrate/receipts/", "untracked .substrate/memory/", "Git-ignored untracked files"]
+# Substrate runtime state that a receipt writes while it observes (v3.10.6: each
+# receipt record is chained in .substrate/memory/events.jsonl). Untracked copies
+# are left out even without a .gitignore line, or a receipt's own write would
+# read as a change to the tree it checked.
+_RUNTIME_STATE = (".substrate/receipts/", ".substrate/memory/")
 
 
 def now() -> str:
@@ -150,7 +155,7 @@ def git_facts(root: Path) -> dict:
                 entries[os.fsdecode(name)] = (mode, oid)
         changed = {p for p in set(tree) | set(entries) if tree.get(p) != entries.get(p)}
         loose = {os.fsdecode(p) for p in untracked.split(b"\0") if p}
-        loose = {p for p in loose if not p.startswith(".substrate/receipts/")}
+        loose = {p for p in loose if not p.startswith(_RUNTIME_STATE)}
         changed |= loose
         digest = hashlib.sha256()
 

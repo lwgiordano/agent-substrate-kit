@@ -54,7 +54,7 @@ import stat
 import subprocess
 import sys
 import tempfile
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -255,8 +255,9 @@ RECORD_FILES = ("docs/HISTORY.md", "docs/REJECTED.md", "docs/lessons.jsonl")
 # cannot mint evidence the gates later read as authoritative.
 # skill-run is written only by `memory skill-run`, which computes `verified`
 # itself; a raw `append --type skill-run` could claim a verified self-audit and
-# silence the completion nudge (v3.10.5).
-RESERVED_TYPES = frozenset({"record", "release-pass", "anchor-forced", "skill-run"})
+# silence the completion nudge (v3.10.5). receipt is written only by
+# task_receipt.py, for the records it has just written (v3.10.6).
+RESERVED_TYPES = frozenset({"record", "release-pass", "anchor-forced", "skill-run", "receipt"})
 
 
 def record_units(relpath: str, text: str) -> list[str]:
@@ -438,6 +439,69 @@ def lesson_unit_hash(lesson_id: str, rule: str) -> str:
     """The recorded identity of one lesson (id + normalized rule text)."""
     return _unit_hash(record_units("docs/lessons.jsonl",
                                    json.dumps({"id": lesson_id, "rule": rule}))[0])
+
+
+@contextmanager
+def at_root(root):
+    """Point the chain at `root` for the duration (v3.10.6). A caller holding an
+    explicit root (a receipt for that repository) must write that repository's
+    chain, not the one this process was started in. Rebinds module globals, so
+    it is not thread-safe; callers are single-threaded."""
+    global ROOT, MEM, EVENTS, _ROOT_REAL
+    saved = (ROOT, MEM, EVENTS, _ROOT_REAL)
+    root = Path(root)
+    ROOT, MEM = root, root / ".substrate" / "memory"
+    EVENTS, _ROOT_REAL = MEM / "events.jsonl", os.path.realpath(root)
+    try:
+        yield
+    finally:
+        ROOT, MEM, EVENTS, _ROOT_REAL = saved
+
+
+# --- Work receipts (v3.10.6) --------------------------------------------------
+# Receipts live in a Git-ignored local store, so deleting a failed attempt's
+# records used to remove it without a trace. Every record task_receipt.py writes
+# is also a `receipt` event here, {"task": id, "records": [[file name, sha256]]},
+# and `receipt show` and `projects` compare the store with these events: a listed
+# record that is missing or changed, or a listed receipt whose directory is gone,
+# is reported. Deleting the events too means rewriting the chain, which fails
+# `verify --anchor` once a published anchor covers them; before that it is the
+# documented limit of an unkeyed chain.
+RECEIPT_CHAIN_LIMIT = 64 << 20
+
+
+def receipt_event(root, task_id: str, records: list[tuple[str, str]]) -> int:
+    """Append one `receipt` event to `root`'s chain; 0 when it was written."""
+    with at_root(root):
+        return append("receipt", {"task": task_id, "records": [[n, h] for n, h in records]})
+
+
+def chained_receipts(root) -> tuple[dict[str, dict[str, str]] | None, str]:
+    """{task id: {record file name: sha256}} from `root`'s chain, ONLY if the chain
+    verifies. (None, reason) when it is absent, unsafe, over 64 MiB, or broken: a
+    record cannot be shown missing against a log that fails its own walk."""
+    path = Path(root) / ".substrate" / "memory" / "events.jsonl"
+    if not os.path.lexists(str(path)):
+        return None, "no memory chain"
+    try:
+        text = _safe_read_text(path, Path(root), max_bytes=RECEIPT_CHAIN_LIMIT)
+    except OSError:
+        text = None
+    if text is None:
+        return None, "memory chain is linked, special, outside the repo, or over 64 MiB"
+    events = _parse_events(text)
+    brk = _chain_break(events)
+    if brk is not None:
+        return None, f"memory chain does not verify ({brk})"
+    out: dict[str, dict[str, str]] = {}
+    for ev in events:
+        d = ev.get("data")
+        if ev.get("type") != "receipt" or not isinstance(d, dict) or not isinstance(d.get("task"), str):
+            continue
+        for item in d.get("records") if isinstance(d.get("records"), list) else []:
+            if isinstance(item, list) and len(item) == 2 and all(isinstance(x, str) for x in item):
+                out.setdefault(d["task"], {})[item[0]] = item[1]
+    return out, ""
 
 
 def release_passes(events: list[dict] | None = None) -> list[dict]:
@@ -1434,7 +1498,7 @@ def main(argv: list[str]) -> int:
         if a.type in RESERVED_TYPES:
             print(f"memory-log: type {a.type!r} is reserved — it is evidence other gates "
                   "trust, written only by its own command (record / release-pass / "
-                  "anchor --force)", file=sys.stderr)
+                  "anchor --force / skill-run / receipt)", file=sys.stderr)
             return 2
         return append(a.type, data)
     if a.cmd == "record":

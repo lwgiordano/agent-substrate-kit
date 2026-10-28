@@ -1491,6 +1491,108 @@
         "tests/test_doc_consistency.py::test_setup_and_ci_install_only_pinned_tools"
       ],
       "why": "consumer CI floats uv to the newest release on every run"
+    },
+    {
+      "id": "receipt-attempts-are-chained",
+      "file": "scripts/task_receipt.py",
+      "find": "    _chain(root, task_id, [started_record, _append(root, task_id, \"result\", attempt, result)])\n",
+      "replace": "    _append(root, task_id, \"result\", attempt, result)\n",
+      "tests": [
+        "tests/test_task_receipt.py::test_deleting_a_failed_attempt_is_reported_not_hidden",
+        "tests/test_task_receipt.py::test_every_record_is_chained_in_the_receipts_own_repository"
+      ],
+      "why": "a failed attempt's records can be deleted without a trace"
+    },
+    {
+      "id": "receipt-show-reports-chained-records-missing",
+      "file": "scripts/task_receipt.py",
+      "find": "    missing = sorted(n for n in mine if n not in digests)\n",
+      "replace": "    missing = []\n",
+      "tests": [
+        "tests/test_task_receipt.py::test_deleting_a_failed_attempt_is_reported_not_hidden"
+      ],
+      "why": "show keeps the earlier pass and says nothing about the deleted failure"
+    },
+    {
+      "id": "receipt-show-reports-chained-records-changed",
+      "file": "scripts/task_receipt.py",
+      "find": "    changed = sorted(n for n, h in mine.items() if n in digests and digests[n] != h)\n",
+      "replace": "    changed = []\n",
+      "tests": [
+        "tests/test_task_receipt.py::test_an_edit_that_stays_internally_consistent_is_reported"
+      ],
+      "why": "an internally consistent hand-edit of a record goes unnoticed"
+    },
+    {
+      "id": "receipt-show-exits-nonzero-on-chain-gaps",
+      "file": "scripts/task_receipt.py",
+      "find": "        return 1 if report[\"summary\"][\"chain\"][\"status\"] == \"records-missing-or-changed\" else 0\n",
+      "replace": "        return 0\n",
+      "tests": [
+        "tests/test_task_receipt.py::test_deleting_a_failed_attempt_is_reported_not_hidden"
+      ],
+      "why": "a script reading `receipt show` exit status treats a tampered receipt as fine"
+    },
+    {
+      "id": "latest-receipts-report-deleted-receipts",
+      "file": "scripts/task_receipt.py",
+      "find": "    problems.extend(_chain_gaps(root, chain[0], set(names[:MAX_SCAN])))\n",
+      "replace": "",
+      "tests": [
+        "tests/test_task_receipt.py::test_a_deleted_receipt_is_reported_and_cannot_promote_an_older_pass",
+        "tests/test_project_status.py::test_a_deleted_newer_receipt_makes_the_project_an_error"
+      ],
+      "why": "deleting the newest failing receipt silently promotes an older pass to latest"
+    },
+    {
+      "id": "deleted-receipt-is-named-as-deleted",
+      "file": "scripts/task_receipt.py",
+      "find": "        if task_id not in present:\n            problems.append({\"code\": \"receipt-deleted\"",
+      "replace": "        if False:\n            problems.append({\"code\": \"receipt-deleted\"",
+      "tests": [
+        "tests/test_task_receipt.py::test_a_deleted_receipt_is_reported_and_cannot_promote_an_older_pass"
+      ],
+      "why": "a whole deleted receipt is reported as some records missing, not as deleted"
+    },
+    {
+      "id": "receipt-chain-writes-to-the-receipt-repository",
+      "file": "scripts/memory_log.py",
+      "find": "    with at_root(root):\n        return append(\"receipt\"",
+      "replace": "    if True:\n        return append(\"receipt\"",
+      "tests": [
+        "tests/test_task_receipt.py::test_every_record_is_chained_in_the_receipts_own_repository"
+      ],
+      "why": "receipt events land in the chain of whichever repository the process started in"
+    },
+    {
+      "id": "receipt-chain-read-requires-a-verifying-chain",
+      "file": "scripts/memory_log.py",
+      "find": "    brk = _chain_break(events)\n    if brk is not None:\n        return None, f\"memory chain does not verify ({brk})\"\n    out: dict[str, dict[str, str]] = {}\n",
+      "replace": "    out: dict[str, dict[str, str]] = {}\n",
+      "tests": [
+        "tests/test_task_receipt.py::test_without_a_usable_chain_receipts_still_work_and_say_so"
+      ],
+      "why": "records are judged against a chain that fails its own walk"
+    },
+    {
+      "id": "receipt-is-a-reserved-event-type",
+      "file": "scripts/memory_log.py",
+      "find": "\"skill-run\", \"receipt\"})",
+      "replace": "\"skill-run\"})",
+      "tests": [
+        "tests/test_task_receipt.py::test_receipt_chain_events_cannot_be_appended_by_hand"
+      ],
+      "why": "`memory append` can mint receipt events by hand"
+    },
+    {
+      "id": "untracked-memory-chain-is-outside-the-fingerprint",
+      "file": "scripts/_task_evidence.py",
+      "find": "_RUNTIME_STATE = (\".substrate/receipts/\", \".substrate/memory/\")",
+      "replace": "_RUNTIME_STATE = (\".substrate/receipts/\",)",
+      "tests": [
+        "tests/test_task_receipt.py::test_every_record_is_chained_in_the_receipts_own_repository"
+      ],
+      "why": "a receipt's own chain write makes its pass stale and reads as a gate change"
     }
   ]
 }

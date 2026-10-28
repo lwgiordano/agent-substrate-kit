@@ -1704,6 +1704,16 @@
         "tests/test_doc_consistency.py::test_dependabot_groups_action_bumps_into_one_pull_request"
       ],
       "why": "the release-signing dependency is proposed the day a new version is published"
+    },
+    {
+      "id": "dependabot-python-bumps-grouped",
+      "file": ".github/dependabot.yml",
+      "find": "    groups:\n      python:\n        patterns: [\"*\"]\n",
+      "replace": "",
+      "tests": [
+        "tests/test_doc_consistency.py::test_dependabot_groups_action_bumps_into_one_pull_request"
+      ],
+      "why": "every Python dependency bump opens its own pull request again"
     }
   ]
 }

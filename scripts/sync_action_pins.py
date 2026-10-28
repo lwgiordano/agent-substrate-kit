@@ -12,7 +12,8 @@ no single pin to copy. Templates for actions the kit never runs (cosign-installe
 are left alone. A consumer install has no templates, so this does nothing there.
 
 Usage: scripts/sync_action_pins.py [--check] [--root DIR]
-Exit codes: 0 in sync (or synced) | 1 drift found with --check | 2 error.
+Exit codes: 0 in sync (or synced) | 1 drift found with --check | 2 error (including
+templates with no kit pin to compare them with).
 """
 from __future__ import annotations
 
@@ -77,6 +78,12 @@ def main(argv: list[str] | None = None) -> int:
     if errors:
         for e in errors:
             print(f"sync-pins: {e}", file=sys.stderr)
+        return 2
+    if not pins:
+        # Templates but no kit pin to compare them with: "in sync" would be a
+        # claim nothing was checked for.
+        print("sync-pins: the kit's .github/workflows pin no action to a commit; "
+              "there is nothing to copy or compare", file=sys.stderr)
         return 2
     drift = 0
     for path in templates:

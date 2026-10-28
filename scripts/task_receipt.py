@@ -466,23 +466,33 @@ def _load_digest(root: Path, rel: Path) -> tuple[dict, str]:
     return data, hashlib.sha256(raw).hexdigest()
 
 
-def _chain_report(listed: dict | None, reason: str, task_id: str,
-                  digests: dict[str, str]) -> tuple[dict, list[dict]]:
-    """The memory chain's view of one receipt: its summary and diagnostics."""
+# Chain summaries `show` exits 1 on and `projects` counts as an error.
+CHAIN_ERRORS = ("records-missing-or-changed", "unlisted-records")
+
+
+def _chain_report(listed: dict | None, reason: str, task_id: str, digests: dict[str, str],
+                  pending: set[str]) -> tuple[dict, list[dict]]:
+    """The memory chain's view of one receipt: its summary and diagnostics.
+
+    `pending` are `running` records whose attempt has no result yet: they are
+    chained together with their result, so being unlisted is expected. Any other
+    record outside a receipt the chain lists is not evidence (v3.10.6: records
+    copied in from a passing attempt read as a pass)."""
     if listed is None:
         return {"status": "unavailable", "reason": reason}, []
     mine = {n: h for n, h in listed.get(task_id, {}).items()
             if n == "task.json" or _RECORD.fullmatch(n)}
     missing = sorted(n for n in mine if n not in digests)
     changed = sorted(n for n, h in mine.items() if n in digests and digests[n] != h)
-    unchained = sorted(n for n in digests if n not in mine)
+    unchained = sorted(n for n in digests if n not in mine and n not in pending)
     diagnostics = [{"code": code, "record": safe_text(n, 120)}
                    for code, found in (("chained-record-missing", missing),
                                        ("chained-record-changed", changed),
                                        ("record-not-chained", unchained))
                    for n in found[:50]]
     status = ("records-missing-or-changed" if missing or changed
-              else "partly-chained" if unchained else "complete")
+              else "not-chained" if not mine
+              else "unlisted-records" if unchained else "complete")
     return {"status": status, "listed": len(mine), "missing": len(missing),
             "changed": len(changed), "not_chained": len(unchained)}, diagnostics
 
@@ -546,6 +556,7 @@ def show(root: Path, task_id: str, current: dict | None = None,
     if task.get("kind") != "task" or task.get("task_id") != task_id:
         raise ReceiptError("task record does not match its directory")
     running, results, assertions, diagnostics = {}, {}, [], []
+    running_names: dict[str, str] = {}
     for name in names:
         if name == "task.json":
             continue
@@ -570,6 +581,9 @@ def show(root: Path, task_id: str, current: dict | None = None,
         if m.group(2) in target:
             raise ReceiptError(f"duplicate attempt record: {safe_text(name, 120)}")
         target[m.group(2)] = (int(m.group(1)), record)
+        if m.group(3) == "running":
+            running_names[m.group(2)] = name
+    pending = {running_names[a] for a in running if a not in results}
     attempts = []
     for attempt_id, (_, start_rec) in sorted(running.items(), key=lambda kv: kv[1][0]):
         before = _valid_state(start_rec.get("before"))
@@ -605,7 +619,7 @@ def show(root: Path, task_id: str, current: dict | None = None,
         attempts.append(entry)
     for attempt_id in results:
         diagnostics.append({"code": "result-without-start", "attempt_id": attempt_id})
-    chain_summary, chain_diagnostics = _chain_report(listed, reason, task_id, digests)
+    chain_summary, chain_diagnostics = _chain_report(listed, reason, task_id, digests, pending)
     diagnostics.extend(chain_diagnostics)
     current = current if current is not None else git_facts(root)
     now_fp = current.get("fingerprint")
@@ -649,6 +663,11 @@ def latest_tasks(root: Path, limit: int = 5,
                          "reason": f"more than {MAX_SCAN} entries"})
     chain = _chained(root)
     problems.extend(_chain_gaps(root, chain[0], set(names[:MAX_SCAN])))
+    if chain[0] is None and any(_ID.fullmatch(n) for n in names):
+        # Receipts with no chain to check them against: a deletion would be
+        # invisible, so the report must not read as clean (v3.10.6).
+        problems.append({"code": "receipt-chain-unavailable", "task_id": "*",
+                         "reason": chain[1][:200]})
     dated = []
     for task_id in (n for n in names[:MAX_SCAN] if _ID.fullmatch(n)):
         try:
@@ -669,6 +688,9 @@ def latest_tasks(root: Path, limit: int = 5,
         if shown[-1]["summary"]["chain"].get("changed"):
             problems.append({"code": "receipt-records-changed", "task_id": task_id,
                              "reason": "records differ from the digests the memory chain lists"})
+        if shown[-1]["summary"]["chain"]["status"] == "unlisted-records":
+            problems.append({"code": "receipt-records-unlisted", "task_id": task_id,
+                             "reason": "records the memory chain does not list for this receipt"})
     return shown, problems
 
 
@@ -717,10 +739,14 @@ def render(report: dict) -> str:
     elif c["status"] == "records-missing-or-changed":
         lines.append(f"Memory chain: WARNING — {c['missing']} record(s) it lists are missing and "
                      f"{c['changed']} changed; this receipt is not the one that was recorded")
+    elif c["status"] == "unlisted-records":
+        lines.append(f"Memory chain: WARNING — {c['not_chained']} record(s) are not in the chain "
+                     "that lists this receipt; they are not evidence")
+    elif c["status"] == "not-chained":
+        lines.append("Memory chain: none of this receipt's records are listed (written before "
+                     "v3.10.6, or the chain refused them)")
     else:
-        lines.append(f"Memory chain: {c['listed']} record(s) listed"
-                     + (f"; {c['not_chained']} not chained (written before v3.10.6, or the "
-                        "chain refused them)" if c["not_chained"] else ""))
+        lines.append(f"Memory chain: {c['listed']} record(s) listed")
     for d in report["diagnostics"]:
         lines.append(f"Diagnostic: {d['code']} {d.get('attempt_id', d.get('record', ''))}")
     lines.append(f"Note: {s['authentication']}")
@@ -768,7 +794,7 @@ def main(argv=None) -> int:
             return 0
         report = show(root, args.task_id)
         print(json_text(report) if args.json else render(report))
-        return 1 if report["summary"]["chain"]["status"] == "records-missing-or-changed" else 0
+        return 1 if report["summary"]["chain"]["status"] in CHAIN_ERRORS else 0
     except ReceiptError as exc:
         # Built only from fixed text and already-sanitized fragments; sanitizing
         # again would swallow the whole message around a redaction marker.

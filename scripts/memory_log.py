@@ -218,19 +218,30 @@ def _chain_break(events: list[dict]) -> str | None:
     is not evidence."""
     prev = ZERO
     for i, ev in enumerate(events):
-        if "_corrupt" in ev:
-            return f"BREAK at line {i + 1}: not valid JSON"
-        if ev.get("seq") != i:
-            return f"BREAK at seq {i}: out-of-order/missing seq"
-        if ev.get("prev") != prev:
-            return f"BREAK at seq {i}: prev-hash mismatch"
-        try:
-            expect = _event_hash(prev, ev["seq"], ev["ts"], ev["type"], ev.get("data"))
-        except (KeyError, TypeError):
-            return f"BREAK at seq {i}: malformed event"
-        if ev.get("hash") != expect:
-            return f"BREAK at seq {i}: content hash mismatch (tampered)"
+        brk = _link_break(i, ev, prev)
+        if brk is not None:
+            return brk
         prev = ev["hash"]
+    return None
+
+
+def _link_break(i: int, ev, prev: str) -> str | None:
+    """Why event `i` does not link to `prev`, or None. A JSON line that is not an
+    object is a break, never a crash (v3.10.6)."""
+    if not isinstance(ev, dict):
+        return f"BREAK at line {i + 1}: not an event object"
+    if "_corrupt" in ev:
+        return f"BREAK at line {i + 1}: not valid JSON"
+    if ev.get("seq") != i:
+        return f"BREAK at seq {i}: out-of-order/missing seq"
+    if ev.get("prev") != prev:
+        return f"BREAK at seq {i}: prev-hash mismatch"
+    try:
+        expect = _event_hash(prev, ev["seq"], ev["ts"], ev["type"], ev.get("data"))
+    except (KeyError, TypeError):
+        return f"BREAK at seq {i}: malformed event"
+    if ev.get("hash") != expect:
+        return f"BREAK at seq {i}: content hash mismatch (tampered)"
     return None
 
 
@@ -449,10 +460,10 @@ def at_root(root):
     it is not thread-safe; callers are single-threaded."""
     global ROOT, MEM, EVENTS, _ROOT_REAL
     saved = (ROOT, MEM, EVENTS, _ROOT_REAL)
-    root = Path(root)
-    ROOT, MEM = root, root / ".substrate" / "memory"
-    EVENTS, _ROOT_REAL = MEM / "events.jsonl", os.path.realpath(root)
-    try:
+    try:  # a root that cannot be resolved must not leave a partial rebind
+        root = Path(root)
+        ROOT, MEM = root, root / ".substrate" / "memory"
+        EVENTS, _ROOT_REAL = MEM / "events.jsonl", os.path.realpath(root)
         yield
     finally:
         ROOT, MEM, EVENTS, _ROOT_REAL = saved
@@ -476,25 +487,47 @@ def receipt_event(root, task_id: str, records: list[tuple[str, str]]) -> int:
         return append("receipt", {"task": task_id, "records": [[n, h] for n, h in records]})
 
 
+def _lines(text: str):
+    """The `\\n`-separated lines of `text`, one at a time."""
+    start, end = 0, len(text)
+    while start < end:
+        stop = text.find("\n", start)
+        stop = end if stop < 0 else stop
+        yield text[start:stop]
+        start = stop + 1
+
+
 def chained_receipts(root) -> tuple[dict[str, dict[str, str]] | None, str]:
     """{task id: {record file name: sha256}} from `root`'s chain, ONLY if the chain
     verifies. (None, reason) when it is absent, unsafe, over 64 MiB, or broken: a
-    record cannot be shown missing against a log that fails its own walk."""
-    path = Path(root) / ".substrate" / "memory" / "events.jsonl"
+    record cannot be shown missing against a log that fails its own walk.
+
+    `projects` calls this on chains it does not control, so the walk is streamed
+    and stops at the first break: building every event first let 64 MiB of `{}`
+    lines take 3 GB and half a minute before the walk could reject line one."""
+    root = Path(root)
+    path = root / ".substrate" / "memory" / "events.jsonl"
     if not os.path.lexists(str(path)):
         return None, "no memory chain"
     try:
-        text = _safe_read_text(path, Path(root), max_bytes=RECEIPT_CHAIN_LIMIT)
+        text = _safe_read_text(path, root, max_bytes=RECEIPT_CHAIN_LIMIT)
     except OSError:
         text = None
     if text is None:
         return None, "memory chain is linked, special, outside the repo, or over 64 MiB"
-    events = _parse_events(text)
-    brk = _chain_break(events)
-    if brk is not None:
-        return None, f"memory chain does not verify ({brk})"
     out: dict[str, dict[str, str]] = {}
-    for ev in events:
+    prev, i = ZERO, 0
+    for line in _lines(text):
+        if not line.strip():
+            continue
+        try:
+            ev = json.loads(line)
+        except (ValueError, RecursionError):
+            ev = {"_corrupt": line[:80]}
+        brk = _link_break(i, ev, prev)
+        if brk is not None:
+            return None, f"memory chain does not verify ({brk})"
+        prev, i = ev["hash"], i + 1
         d = ev.get("data")
         if ev.get("type") != "receipt" or not isinstance(d, dict) or not isinstance(d.get("task"), str):
             continue

@@ -772,6 +772,17 @@ def test_sync_pins_refuses_when_the_kit_disagrees_with_itself(tmp_path) -> None:
     assert r.returncode == 2 and "2 ways" in r.stderr, r.stdout + r.stderr
 
 
+def test_sync_pins_refuses_when_the_kit_pins_nothing(tmp_path) -> None:
+    """v3.10.6 audit: with no kit pin to compare a template with, --check said
+    "in sync" and exited 0."""
+    (tmp_path / "workflows").mkdir()
+    (tmp_path / "workflows/ci.yml.template").write_text(
+        "      - uses: actions/checkout@" + "b" * 40 + " # v7\n", encoding="utf-8")
+    for args in ((), ("--check",)):
+        r = _sync_pins(tmp_path, *args)
+        assert r.returncode == 2 and "pin no action" in r.stderr, r.stdout + r.stderr
+
+
 def test_sync_pins_is_a_no_op_in_a_consumer_install(tmp_path) -> None:
     (tmp_path / ".github" / "workflows").mkdir(parents=True)
     r = _sync_pins(tmp_path)
@@ -788,6 +799,12 @@ def test_dependabot_groups_action_bumps_into_one_pull_request() -> None:
         assert actions.get("groups", {}).get("actions", {}).get("patterns") == ["*"]
     boot = (KIT / "bootstrap.sh").read_text(encoding="utf-8")
     assert 'echo "    groups:"; echo "      actions:"; echo "        patterns: [\\"*\\"]"' in boot
+    # The tool pins, cryptography (which signs releases) among them, in one weekly
+    # PR, and never for a version published less than a week ago.
+    updates = yaml.safe_load((KIT / ".github" / "dependabot.yml").read_text(encoding="utf-8"))["updates"]
+    tools = next(u for u in updates if u.get("directory") == "/scripts")
+    assert tools["package-ecosystem"] == "pip" and tools["groups"]["substrate-tools"]["patterns"] == ["*"]
+    assert tools.get("cooldown", {}).get("default-days", 0) >= 7
 
 
 
@@ -800,6 +817,21 @@ def _substrate_pins() -> dict[str, str]:
             assert re.fullmatch(r"[A-Za-z0-9._-]+", name) and re.fullmatch(r"\d[\w.]*", version), line
             pins[name.lower()] = version
     return pins
+
+
+def test_setup_refuses_without_the_pin_file(tmp_path) -> None:
+    """v3.10.6 audit: a missing pin file only warned, then installed whatever was
+    published last."""
+    import shutil
+    import subprocess
+    (tmp_path / "scripts").mkdir()
+    shutil.copy(KIT / "manage.sh", tmp_path / "manage.sh")
+    shutil.copy(KIT / "scripts" / "_substrate_config.sh", tmp_path / "scripts")
+    r = subprocess.run(["bash", "manage.sh", "setup"], cwd=tmp_path, capture_output=True,
+                       text=True, timeout=120)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "refusing to install unpinned tool versions" in r.stderr
+    assert not (tmp_path / ".substrate" / "venv").exists()
 
 
 def test_setup_and_ci_install_only_pinned_tools() -> None:

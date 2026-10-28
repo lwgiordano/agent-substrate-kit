@@ -641,7 +641,7 @@ def test_every_record_is_chained_in_the_receipts_own_repository(project):
     task_id = r.start(project, "chained task")
     r.run_check(project, task_id, "check", 30)
     r.annotate(project, task_id, "complete")
-    assert memory_log.EVENTS == process_chain
+    assert process_chain == memory_log.EVENTS
     events = [e for e in chain_events(project) if e["type"] == "receipt"]
     listed = {name for e in events for name, _ in e["data"]["records"]}
     assert listed == {p.name for p in records(project, task_id)} and len(listed) == 4
@@ -658,7 +658,8 @@ def test_every_record_is_chained_in_the_receipts_own_repository(project):
     assert ".substrate/memory" not in (project / ".gitignore").read_text()
     res = r.run_check(project, task_id, "check", 30)
     assert res["state"] == "unchanged" and res["harness_changed"] == []
-    assert r.show(project, task_id)["summary"]["checks"]["check"]["applies_to_current_state"] == "current"
+    check = r.show(project, task_id)["summary"]["checks"]["check"]
+    assert check["applies_to_current_state"] == "current"
 
 
 def test_deleting_a_failed_attempt_is_reported_not_hidden(project, monkeypatch, capsys):
@@ -669,8 +670,8 @@ def test_deleting_a_failed_attempt_is_reported_not_hidden(project, monkeypatch, 
     r.run_check(project, task_id, "check", 30)
     stub(project, "exit 3")
     r.run_check(project, task_id, "check", 30)
-    failed = [p for p in records(project, task_id)
-              if p.name.endswith("-result.json") and json.loads(p.read_text())["outcome"] == "failed"]
+    failed = [p for p in records(project, task_id) if p.name.endswith("-result.json")
+              and json.loads(p.read_text())["outcome"] == "failed"]
     attempt = json.loads(failed[0].read_text())["attempt_id"]
     for p in records(project, task_id):
         if attempt in p.name:
@@ -734,6 +735,9 @@ def test_without_a_usable_chain_receipts_still_work_and_say_so(project, capsys):
     chain = r.show(project, task_id)["summary"]["chain"]
     assert chain["status"] == "unavailable" and "does not verify" in chain["reason"]
     assert "deletions cannot be detected" in r.render(r.show(project, task_id))
+    # Receipts with no chain to check them against are a problem, not a clean report.
+    _, problems = r.latest_tasks(project, limit=1)
+    assert [p["code"] for p in problems] == ["receipt-chain-unavailable"]
     events.unlink()
     events.symlink_to(project / "app.py")
     other = r.start(project, "chain refused")
@@ -744,10 +748,89 @@ def test_without_a_usable_chain_receipts_still_work_and_say_so(project, capsys):
     assert rep["summary"]["chain"]["status"] == "unavailable"
     r.annotate(project, other, "complete")
     rep = r.show(project, other)
-    assert rep["summary"]["chain"]["status"] == "partly-chained"
+    assert rep["summary"]["chain"]["status"] == "unlisted-records"
     assert rep["summary"]["chain"]["not_chained"] == 1
 
 
 def test_receipt_chain_events_cannot_be_appended_by_hand():
     import memory_log
     assert memory_log.main(["append", "--type", "receipt", "--message", "x"]) == 2
+
+
+def test_records_copied_into_a_chained_receipt_are_not_evidence(project, monkeypatch, capsys):
+    """v3.10.6 audit: a passing attempt's records copied into another chained
+    receipt read `passed`, with only a note that they were not chained."""
+    r = api()
+    source = r.start(project, "source")
+    r.run_check(project, source, "check", 30)
+    target = r.start(project, "target")
+    for p in records(project, source):
+        if p.name != "task.json":
+            copied = json.loads(p.read_text()) | {"task_id": target}
+            (project / ".substrate/receipts" / target / p.name).write_text(json.dumps(copied))
+    rep = r.show(project, target)
+    assert rep["summary"]["checks"]["check"]["latest_outcome"] == "passed"
+    assert rep["summary"]["chain"]["status"] == "unlisted-records"
+    assert rep["summary"]["chain"]["not_chained"] == 2
+    monkeypatch.setattr(r, "_root", lambda: project)
+    assert r.main(["show", target]) == 1
+    assert "they are not evidence" in capsys.readouterr().out
+    _, problems = r.latest_tasks(project, limit=1)
+    assert {"code": "receipt-records-unlisted", "task_id": target} in [
+        {k: p[k] for k in ("code", "task_id")} for p in problems]
+
+
+def test_a_check_still_running_is_not_an_unlisted_record(project):
+    """A `running` record is chained together with its result, so until the check
+    ends it is expected to be unlisted; it reads incomplete, never passed."""
+    r = api()
+    task_id = r.start(project, "task")
+    attempt = "1b1c2d3e-4f50-4a6b-8c7d-8e9f0a1b2c3d"
+    r._append(project, task_id, "running", attempt, {
+        "schema_version": 1, "kind": "running", "task_id": task_id, "attempt_id": attempt,
+        "check": "check", "before": {}, "harness_changed": []})
+    rep = r.show(project, task_id)
+    assert rep["summary"]["checks"]["check"]["latest_outcome"] == "incomplete"
+    assert rep["summary"]["chain"]["status"] == "complete"
+    assert r.latest_tasks(project, limit=1)[1] == []
+
+
+def test_receipts_with_no_chain_at_all_are_a_problem(project):
+    r = api()
+    task_id = r.start(project, "task")
+    (project / ".substrate/memory/events.jsonl").unlink()
+    shown, problems = r.latest_tasks(project, limit=1)
+    assert [s["task_id"] for s in shown] == [task_id]
+    assert shown[0]["summary"]["chain"] == {"status": "unavailable", "reason": "no memory chain"}
+    assert problems == [{"code": "receipt-chain-unavailable", "task_id": "*",
+                         "reason": "no memory chain"}]
+
+
+def test_a_hostile_chain_is_rejected_without_parsing_all_of_it(project):
+    """v3.10.6 audit: `projects` reads chains it does not control, and 64 MiB of
+    `{}` lines used to be parsed whole (3 GB) before the walk rejected line one."""
+    import tracemalloc
+
+    import memory_log
+    events = project / ".substrate/memory/events.jsonl"
+    events.parent.mkdir(parents=True)
+    events.write_text("{}\n" * (2 << 20))
+    tracemalloc.start()
+    try:
+        listed, reason = memory_log.chained_receipts(project)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert listed is None and "does not verify" in reason
+    assert peak < 32 << 20, peak
+    events.write_text("[]\n")
+    assert memory_log.chained_receipts(project)[0] is None
+    assert memory_log._chain_break([[]]) == "BREAK at line 1: not an event object"
+
+
+def test_an_unusable_root_never_leaves_the_chain_half_rebound():
+    import memory_log
+    before = (memory_log.ROOT, memory_log.MEM, memory_log.EVENTS)
+    with pytest.raises(ValueError), memory_log.at_root("bad\0root"):
+        pass
+    assert before == (memory_log.ROOT, memory_log.MEM, memory_log.EVENTS)

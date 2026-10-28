@@ -111,9 +111,7 @@ during a run (ADR 0002).
 
 ## Receipts in the memory chain
 
-A receipt's records are bound to the memory chain, so a hand-edit that stays
-internally consistent, or a deleted attempt, is visible. Every
-record a receipt writes is also listed in the memory chain of the same
+Every record a receipt writes is also listed in the memory chain of the same
 repository (`.substrate/memory/events.jsonl`) as a `receipt` event holding its
 file name and SHA-256. `start` and `annotate` chain their record at once; `check`
 chains its `running` and `result` records together after the second fingerprint,
@@ -125,12 +123,17 @@ store. `receipt` is a reserved event type: `memory append` cannot write one.
 listed record that is missing (`chained-record-missing`) or whose bytes differ
 (`chained-record-changed`) makes the chain summary `records-missing-or-changed`:
 the text view warns and `show` exits 1. `show` on a receipt whose directory is
-gone but which the chain lists reports `receipt deleted` and exits 2. A record
-the chain does not list (`record-not-chained`) leaves the summary
-`partly-chained`: it was written before v3.10.6, or the chain refused it, and the
-writer warned at the time. Without a readable chain that verifies (absent, linked,
-over 64 MiB, or broken) the summary is `unavailable` and says deletions cannot be
-detected. Deleting the events as well means rewriting the chain, which `verify
+gone but which the chain lists reports `receipt deleted` and exits 2. In a
+receipt the chain lists, a record it does not list (`record-not-chained`) is not
+evidence: the summary reads `unlisted-records` and `show` exits 1, so records
+copied in from a passing attempt never read as a pass. The one exception is the
+`running` record of an attempt with no result yet, which is chained together
+with its result. A receipt with no listed record at all reads `not-chained`
+(written before v3.10.6, or refused by the chain, which warned). Without
+a readable chain that verifies (absent, linked, over 64 MiB, or broken) the
+summary is `unavailable` and says deletions cannot be detected. The chain is read
+line by line, stopping at the first break. Deleting the events as
+well means rewriting the chain, which `verify
 --anchor` fails once a published anchor covers them ([the memory
 anchor](08_memory_anchor.md)); before that, it is the limit of an unkeyed chain.
 
@@ -158,9 +161,11 @@ receipt (newest by creation time, ties ordered by a nanosecond stamp) with
 per-check applicability and its memory-chain status, labelled unsigned and
 recorded by that project. Every receipt the inspected chain lists is checked, not
 only the latest: a receipt whose directory is gone (`receipt-deleted`), listed
-records that are gone (`receipt-records-missing`), or changed records in the
-shown receipt (`receipt-records-changed`) are error diagnostics, so deleting the
-newest, failing receipt cannot quietly promote an older pass. Hook
+records that are gone (`receipt-records-missing`), changed or unlisted records
+in the shown receipt (`receipt-records-changed`, `receipt-records-unlisted`), and
+receipts with no usable chain to check them against (`receipt-chain-unavailable`)
+are error diagnostics, so deleting the newest, failing receipt cannot quietly
+promote an older pass. Hook
 files that exist mean configured, never that the host runs them. Branch protection, rulesets and
 memory-anchor publication read `not checked`: this command makes no network
 calls. Missing, non-Git and unborn roots, unsafe or malformed metadata (an

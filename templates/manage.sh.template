@@ -45,8 +45,8 @@ setup(){
   # file (v3.10.6): setup installs what the kit was tested with, not whatever was
   # published last. Applied on every run, so an older venv is brought to the pins.
   local pins="scripts/substrate-requirements.txt" pin=()
-  if [ -f "$pins" ]; then pin=(-c "$pins")
-  else echo "setup: WARNING — $pins is missing; installing UNPINNED tool versions" >&2; fi
+  [ -f "$pins" ] || { echo "setup: $pins is missing; restore it (./manage.sh upgrade, or git checkout) — refusing to install unpinned tool versions" >&2; return 1; }
+  pin=(-c "$pins")
   [ -x "$SUBPY" ] || { echo "==> Creating substrate venv ($SUBVENV)"; python3 -m venv "$SUBVENV"; "$SUBPY" -m pip install --quiet --upgrade ${pin[@]+"${pin[@]}"} pip; }
   # Self-healing: a partial/interrupted install can leave the venv python
   # present but pre-commit/PyYAML/pytest missing. Verify and (re)install so

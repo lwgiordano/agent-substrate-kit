@@ -40,7 +40,8 @@ full commit SHA, with its version as a comment (`uses: actions/checkout@<sha>
 # v7`), so moving a tag cannot change what a consumer's CI runs; Dependabot
 still proposes the bumps, grouped into one pull request a week. It edits only
 `.github/workflows/`, so `./manage.sh sync-pins` copies each pin from there into
-the templates (`--check` reports drift, and a test fails while they differ).
+the templates (`--check` reports drift, and a test fails while they differ; a
+kit that pins nothing to copy from is an error, not "in sync").
 Each pinned SHA is one the kit's own CI has run. The
 exception is `sigstore/cosign-installer` in the keyless release template: it
 never runs in the kit, so it stays on its tag, marked not SHA-verified, until
@@ -51,8 +52,9 @@ the script text. Every `pip install` in the kit's workflows and the templates,
 including the one next to the signing key or OIDC identity, takes its versions
 from `scripts/substrate-requirements.txt`, the same constraints file setup uses,
 and a test rejects an install of a tool that file does not pin. In the kit
-repository Dependabot bumps that file in one grouped pull request a week;
-consumers receive new pins with each kit upgrade.
+repository Dependabot bumps that file in one grouped pull request a week, and
+only to versions published at least seven days earlier, since `cryptography` signs
+releases; consumers receive new pins with each kit upgrade.
 
 `docs/manifest.json` is generated from source knowledge docs and ADRs. It is not
 hand-edited. `.substrate/install.json` is generated after render and records the

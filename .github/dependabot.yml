@@ -11,6 +11,9 @@ updates:
   - package-ecosystem: "pip"
     directory: "/scripts"
     schedule: {interval: "weekly"}
+    # cryptography signs releases: let a new version age a week before it is proposed.
+    cooldown:
+      default-days: 7
     open-pull-requests-limit: 3
     labels: ["dependencies", "python"]
     groups:

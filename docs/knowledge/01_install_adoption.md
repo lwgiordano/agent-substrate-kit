@@ -77,7 +77,7 @@ perpetually dirty. Setup supports the project runner selected in
 config and installs both substrate tools and the relevant project development
 toolchain. Every package setup installs with pip is constrained by
 `scripts/substrate-requirements.txt`, so a run gets the versions the kit was
-tested with; a missing pin file is reported, never silently ignored. A failed
+tested with; without the pin file setup refuses to install anything. A failed
 `uv sync` of the project toolchain does not stop setup, but it prints a warning
 naming `SUBSTRATE_RUNNER` instead of passing unnoticed.
 

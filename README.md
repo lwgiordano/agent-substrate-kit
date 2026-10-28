@@ -42,7 +42,9 @@ bash /path/to/agent_substrate_kit_v3/bootstrap.sh --profile standard --lang auto
 | 4-field bug-fix commit protocol + postmortem-per-bugfix hooks | — | — | yes |
 | Extras (calibration, stale-phrases, license headers) | — | — | yes |
 
-## Current status (v3.10.6)
+## Current status (v3.10.7)
+
+**v3.10.7** — consumers' Dependabot stays out of `scripts/`. v3.10.6 shipped the tool pin file `scripts/substrate-requirements.txt` to every install, and the pip entry bootstrap writes for a Python project would have proposed weekly bumps to it. The strict trusted-base audit refuses such a pull request, and once one is merged `./manage.sh upgrade` refuses the changed file. Bootstrap now excludes `scripts/**` from the project's Dependabot entry. An existing install keeps its `dependabot.yml`, so `doctor` warns when the pip entry still scans `scripts/` and names the line to add.
 
 **v3.10.6** — the parts that drifted apart now move together. Dependabot proposes the kit's action bumps in one grouped pull request a week. That pull request still fails the template parity test, because Dependabot cannot see the consumer workflow templates; one `./manage.sh sync-pins` on its branch copies every pin across and turns it green. This release carries setup-python 7.1.0, setup-go 7.0.0 and upload-artifact 7.0.2 (Dependabot #21–#23). Setup, CI and the release templates install their tools from one pinned constraints file, `scripts/substrate-requirements.txt`, which Dependabot also bumps, instead of whatever was published last; a failed `uv sync` now warns instead of passing silently. Work receipts record every record's digest in the memory chain, so `receipt show` and `projects` report a deleted or edited attempt, and deleting the newest failing receipt no longer promotes an older pass; once a published anchor covers the chain, removing that evidence fails `verify --anchor`.
 

@@ -488,3 +488,10 @@ This file is `merge=union` in `.gitattributes` so concurrent branch entries comb
 **Knowledge:** Describe what a change does to the workflow a person runs, not what it makes possible: sync-pins plus grouping made a red Dependabot pull request one command to fix, and the release notes said it no longer arrived red. Making it arrive green needs the templates to take their pins from the kit at install time, or a push that triggers CI, which GITHUB_TOKEN does not.
 **Outcome:** unverified
 
+## 2026-10-28T19:40:03Z — NO_SESSION — 5d7e4dc20bb5c5763affc7fe95a83719a7ef28e7
+**Summary:** v3.10.7: consumers' Dependabot stays out of the substrate's scripts directory; bootstrap excludes it from the project entry, and doctor warns older installs whose pip entry still scans it.
+**Files:** bootstrap.sh,scripts/substrate_doctor.py,tests/test_doc_consistency.py,tests/guards.json,docs/knowledge/01_install_adoption.md,VERSION,README.md,BENCHMARK.md
+**Intent:** Operator asked whether v3.10.6 works on its own; the review found this consumer regression, and the operator asked for it to be fixed as v3.10.7.
+**Knowledge:** Before shipping a file into every consumer, check which tools there will claim it by name: the tool pin file matched the pattern Dependabot uses for requirement files, so a consumer's pip entry at the root would have proposed weekly edits to substrate-owned code that strict refuses and upgrade then rejects. The kit's own Dependabot run showed the root entry scans subdirectories, which is how it was caught before the release was published.
+**Outcome:** shipped-green
+

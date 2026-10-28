@@ -10,7 +10,7 @@ Readiness levels (default runs quick+security+subprocess checks):
                  that files exist.
 """
 from __future__ import annotations
-import argparse, json, shutil, subprocess, sys
+import argparse, json, re, shutil, subprocess, sys
 from pathlib import Path
 # Use the shared root resolver (env override / git toplevel / ancestor) like
 # every other validator+hook, so `doctor` is correct when launched from a
@@ -271,6 +271,38 @@ def _config_tool_warns():
         if tool and tool not in ('uv','python','python3') and not shutil.which(tool):
             w.append(f'{key} references "{tool}" which is not on PATH')
     return w
+_SCRIPTS_EXCLUDED = ('scripts', 'scripts/*', 'scripts/**', 'scripts/substrate-requirements.txt')
+
+
+def _dependabot_scripts_warn():
+    """A pip entry that scans scripts/ proposes bumps to scripts/substrate-requirements.txt,
+    a substrate-owned file: strict's trusted-base audit refuses such a PR and, once one is
+    merged, upgrade refuses the drifted file. Bootstrap writes dependabot.yml once, so an
+    install from before v3.10.7 keeps the old entry. The kit source bumps that file on
+    purpose and is exempt."""
+    if (ROOT/'bootstrap.sh').is_file() and (ROOT/'templates').is_dir():
+        return None
+    if not (ROOT/'scripts'/'substrate-requirements.txt').is_file():
+        return None
+    text=_safe_read_text(ROOT/'.github'/'dependabot.yml', ROOT, max_bytes=1 << 20)
+    if not text:
+        return None
+    for entry in re.split(r'(?m)^[ \t]*-[ \t]+(?=package-ecosystem[ \t]*:)', text)[1:]:
+        eco=re.match(r'package-ecosystem[ \t]*:[ \t]*["\']?([\w-]+)', entry)
+        if not eco or eco.group(1)!='pip':
+            continue
+        m=re.search(r'(?m)^[ \t]*exclude-paths[ \t]*:(.*(?:\n[ \t]*-[^\n]*)*)', entry)
+        listed=m.group(1) if m else ''
+        paths=re.findall(r'[^\s"\',\[\]#-][^\s"\',\[\]#]*',
+                         '\n'.join(ln.split('#',1)[0] for ln in listed.split('\n')))
+        if not any(p.lstrip('./').rstrip('/') in _SCRIPTS_EXCLUDED for p in paths):
+            return ('.github/dependabot.yml: the pip entry scans scripts/, so Dependabot will propose '
+                    'bumps to scripts/substrate-requirements.txt, a substrate-owned file (the strict '
+                    'trusted-base audit refuses them, and upgrade refuses once one is merged); add '
+                    'exclude-paths: ["scripts/**"] to that entry')
+    return None
+
+
 def run(cmd):
     try:
         p=subprocess.run(cmd,cwd=ROOT,capture_output=True,text=True,timeout=60); return p.returncode,(p.stdout+p.stderr).strip()
@@ -693,6 +725,8 @@ def main():
                 if rc: blocks.append(msg); warns.append(out)
     if a.operational or full:
         ob,ow=_operational_findings(); blocks+=ob; warns+=ow
+        dw=_dependabot_scripts_warn()
+        if dw: warns.append(dw)
     if full:
         for cmd,msg in [([sys.executable,'scripts/update_manifest.py','--check'],'manifest stale'),([sys.executable,'scripts/check_agent_harness.py'],'agent harness failed')]:
             rc,out=run(cmd)

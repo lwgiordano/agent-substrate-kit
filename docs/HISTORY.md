@@ -495,3 +495,10 @@ This file is `merge=union` in `.gitattributes` so concurrent branch entries comb
 **Knowledge:** Before shipping a file into every consumer, check which tools there will claim it by name: the tool pin file matched the pattern Dependabot uses for requirement files, so a consumer's pip entry at the root would have proposed weekly edits to substrate-owned code that strict refuses and upgrade then rejects. The kit's own Dependabot run showed the root entry scans subdirectories, which is how it was caught before the release was published.
 **Outcome:** shipped-green
 
+## 2026-10-29T20:04:39Z — NO_SESSION — 229fa639e386febb8b32569e5a71eeea25a48611
+**Summary:** v3.10.8: the keyless release template pins cosign-installer to the commit its floating v3 tag resolved to, so every action the kit runs or installs is pinned to a commit.
+**Files:** workflows/release-keyless.yml.template,tests/test_doc_consistency.py,tests/guards.json,docs/knowledge/06_release_distribution.md,VERSION,README.md,BENCHMARK.md
+**Intent:** Operator supplied the upstream tag listing for sigstore/cosign-installer so the last unpinned action in the consumer templates could be pinned.
+**Knowledge:** A step that runs with signing rights must not take its code from a movable tag, even when the kit's own CI cannot run it: the operator resolved the upstream tag and the template now pins that commit, so consumers run exactly what they ran before and a later move is a deliberate, tested change. Newer v3 tags existed that the floating tag had not moved to; adopting one is a separate decision.
+**Outcome:** shipped-green
+

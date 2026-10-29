@@ -1,6 +1,6 @@
 ---
 purpose: Release packaging, signing, manifests, and artifact verification.
-last_human_reviewed: 2026-10-28
+last_human_reviewed: 2026-10-29
 covers:
   - manage.sh
   - package_release.sh
@@ -14,7 +14,7 @@ covers:
   - scripts/verify_release.py
   - scripts/write_install_json.py
 asserts:
-  - workflows/release-keyless.yml.template::not SHA-verified
+  - workflows/release-keyless.yml.template::operator-verified
 ---
 
 # Release and distribution
@@ -42,10 +42,11 @@ still proposes the bumps, grouped into one pull request a week. It edits only
 `.github/workflows/`, so `./manage.sh sync-pins` copies each pin from there into
 the templates (`--check` reports drift, and a test fails while they differ; a
 kit that pins nothing to copy from is an error, not "in sync").
-Each pinned SHA is one the kit's own CI has run. The
-exception is `sigstore/cosign-installer` in the keyless release template: it
-never runs in the kit, so it stays on its tag, marked not SHA-verified, until
-an operator pins it to a commit they have checked. Node jobs run Node 24.
+Each pinned SHA is one the kit's own CI has run, except
+`sigstore/cosign-installer` in the keyless release template, which never runs in
+the kit. Its pin is operator-verified: the commit the floating `v3` tag resolved
+to when the operator checked it upstream, which is cosign-installer's 3.9.1
+release, and a test holds it there, so moving it means repeating that check. Node jobs run Node 24.
 Jobs that run repository code hold a read-only token and check out without
 persisting credentials; workflow expressions reach scripts through `env`, never
 the script text. Every `pip install` in the kit's workflows and the templates,

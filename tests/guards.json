@@ -1744,6 +1744,16 @@
         "tests/test_doc_consistency.py::test_consumer_dependabot_never_scans_substrate_scripts"
       ],
       "why": "doctor warns about a dependabot.yml that already excludes scripts/"
+    },
+    {
+      "id": "keyless-release-cosign-installer-is-pinned",
+      "file": "workflows/release-keyless.yml.template",
+      "find": "      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3.9.1\n",
+      "replace": "      - uses: sigstore/cosign-installer@v3\n",
+      "tests": [
+        "tests/test_doc_consistency.py::test_workflow_actions_are_pinned_to_commit_shas"
+      ],
+      "why": "the job that signs releases runs whatever the movable v3 tag points to"
     }
   ]
 }

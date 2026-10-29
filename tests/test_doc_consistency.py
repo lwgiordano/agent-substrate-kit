@@ -68,7 +68,7 @@ KNOWLEDGE_ASSERTS = {
     "scripts/substrate_audit.py::'TIMEOUT'",
     "scripts/substrate_audit.py::_redact(out)",
     "scripts/session_handoff.py::(?<!\\w-)",
-    "workflows/release-keyless.yml.template::not SHA-verified",
+    "workflows/release-keyless.yml.template::operator-verified",
     "workflows/scheduled-audit.yml.template::issues: write",
     "scripts/check_lessons.py::evidence_exists",
     "scripts/memory_log.py::record_units",
@@ -631,11 +631,10 @@ def test_workflow_actions_are_pinned_to_commit_shas() -> None:
     the action's repository. Every action the kit runs, and every action it installs in
     consumers, is pinned to a full commit SHA with the version kept as a comment so
     Dependabot can still propose updates. The one exception never runs in the kit, so
-    its SHA cannot be checked here; the template says so next to it."""
+    its SHA cannot be checked here, so the operator checked it against the upstream
+    tag (v3.10.8) and this test holds it to that commit."""
     uses = re.compile(r"^[\s-]*uses:\s*(.*)$")
     pinned = re.compile(r"""(["']?)[\w.-]+/[\w./-]+@[0-9a-f]{40}\1[ \t]+#[ \t]*v\d\S*""")
-    # Exactly this ref is exempt; any other ref of the same action is not.
-    unverifiable = {"sigstore/cosign-installer@v3"}
     loose = []
     paths = sorted([*(KIT / ".github" / "workflows").glob("*.yml"),
                     *(KIT / ".github" / "workflows").glob("*.yaml"),
@@ -649,8 +648,6 @@ def test_workflow_actions_are_pinned_to_commit_shas() -> None:
                 continue
             seen += 1
             value = m.group(1).strip()
-            if value.strip("\"'") in unverifiable:
-                continue
             if not pinned.fullmatch(value):
                 loose.append(f"{path.name}: {value}")
     assert seen >= 30
@@ -662,13 +659,15 @@ def test_workflow_actions_are_pinned_to_commit_shas() -> None:
         for job in jobs.values():
             for step in job.get("steps") or []:
                 ref = step.get("uses")
-                if ref and ref not in unverifiable:
+                if ref:
                     assert re.fullmatch(r"[\w.-]+/[\w./-]+@[0-9a-f]{40}", ref), \
                         f"{path.name}: {ref}"
     assert not loose, "actions not pinned to a commit SHA with a version comment:\n" + \
         "\n".join(loose)
     keyless = (KIT / "workflows" / "release-keyless.yml.template").read_text(encoding="utf-8")
-    assert "not SHA-verified" in keyless
+    # cosign-installer never runs in the kit: its pin is the commit the operator found
+    # the floating v3 tag on (2026-10-29), and a change has to repeat that check.
+    assert "uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3.9.1" in keyless and "operator-verified" in keyless
 
 
 def test_knowledge_doc_counts_in_prose_match_the_directory() -> None:

@@ -42,7 +42,9 @@ bash /path/to/agent_substrate_kit_v3/bootstrap.sh --profile standard --lang auto
 | 4-field bug-fix commit protocol + postmortem-per-bugfix hooks | — | — | yes |
 | Extras (calibration, stale-phrases, license headers) | — | — | yes |
 
-## Current status (v3.10.7)
+## Current status (v3.10.8)
+
+**v3.10.8** — every GitHub Action the kit runs or installs is now pinned to a commit. The last exception was `sigstore/cosign-installer` in the keyless release template, which never runs in the kit and so stayed on its movable `v3` tag, in the job that signs releases. It is now pinned to the commit `v3` resolved to when the operator checked it upstream (cosign-installer 3.9.1), so consumers run exactly what they ran before, and a test holds the pin so moving it is a deliberate change.
 
 **v3.10.7** — consumers' Dependabot stays out of `scripts/`. v3.10.6 shipped the tool pin file `scripts/substrate-requirements.txt` to every install, and the pip entry bootstrap writes for a Python project would have proposed weekly bumps to it. The strict trusted-base audit refuses such a pull request, and once one is merged `./manage.sh upgrade` refuses the changed file. Bootstrap now excludes `scripts/**` from the project's Dependabot entry. An existing install keeps its `dependabot.yml`, so `doctor` warns when the pip entry still scans `scripts/` and names the line to add.
 

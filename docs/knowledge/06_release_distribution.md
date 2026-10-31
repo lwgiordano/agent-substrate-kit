@@ -1,6 +1,6 @@
 ---
 purpose: Release packaging, signing, manifests, and artifact verification.
-last_human_reviewed: 2026-10-29
+last_human_reviewed: 2026-10-31
 covers:
   - manage.sh
   - package_release.sh
@@ -32,8 +32,9 @@ workflows, and compact install assets. Consumer-heavy self-tests and source-only
 knowledge siblings are not installed by default. Cheap installed-file and smoke
 tests remain in consumer repositories; `--dev-tests` opts into the full source
 self-test suite. Local state never ships: the memory chain, traces, work
-receipts (`.substrate/receipts/`) and execution scratch (`.superpowers/`) are
-left out of the source hash, the zip, and the zip-hygiene check.
+receipts (`.substrate/receipts/`), the hooks' usage log (`.substrate/usage/`) and
+execution scratch (`.superpowers/`) are left out of the source hash, the zip, and
+the zip-hygiene check.
 
 The kit's workflows and the consumer workflow templates pin every action to a
 full commit SHA, with its version as a comment (`uses: actions/checkout@<sha>

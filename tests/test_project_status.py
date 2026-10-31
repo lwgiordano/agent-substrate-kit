@@ -393,7 +393,8 @@ def test_receipt_projects_and_brief_work_in_a_fresh_consumer(tmp_path, profile):
     subprocess.run(["bash", str(ROOT / "bootstrap.sh"), "--target", str(consumer),
                     "--profile", profile, "--lang", "none", "--no-doctor"],
                    check=True, capture_output=True, timeout=180)
-    assert ".substrate/receipts/" in (consumer / ".gitignore").read_text().splitlines()
+    ignored = (consumer / ".gitignore").read_text().splitlines()
+    assert ".substrate/receipts/" in ignored and ".substrate/usage/" in ignored
     git(consumer, "add", ".")
     git(consumer, "commit", "-qm", "consumer fixture")
 
@@ -438,7 +439,7 @@ def test_release_package_excludes_every_local_state_store():
     text = (ROOT / "package_release.sh").read_text()
     hygiene = next(line for line in text.splitlines() if line.startswith("_JUNK_RE="))
     for store in (".substrate/receipts", ".superpowers", ".substrate/memory",
-                  ".substrate/traces"):
+                  ".substrate/traces", ".substrate/usage"):
         assert f"/{store}/*'" in text, f"source hash includes {store}"
         assert f'"*/{store}/*"' in text, f"zip includes {store}"
         assert "/" + store.replace(".", "\\.") + "/" in hygiene, f"zip hygiene misses {store}"
@@ -457,7 +458,7 @@ def test_release_package_really_leaves_out_local_state(tmp_path):
     kit = tmp_path / ROOT.name
     shutil.copytree(ROOT, kit, ignore=shutil.ignore_patterns(
         ".git", ".venv", "venv", "dist", "__pycache__", ".pytest_cache", ".ruff_cache",
-        "node_modules", "receipts", ".superpowers"))
+        "node_modules", "receipts", "usage", ".superpowers"))
 
     def build():
         proc = subprocess.run(["bash", "package_release.sh", "--smoke"], cwd=kit,
@@ -473,8 +474,12 @@ def test_release_package_really_leaves_out_local_state(tmp_path):
     (receipt / "task.json").write_text('{"planted": true}\n')
     (kit / ".superpowers").mkdir()
     (kit / ".superpowers" / "note.md").write_text("planted\n")
+    usage = kit / ".substrate" / "usage"
+    usage.mkdir(parents=True, exist_ok=True)
+    (usage / "events.jsonl").write_text('{"planted": true}\n')
     planted_hash, names = build()
-    assert not [n for n in names if ".substrate/receipts" in n or ".superpowers" in n]
+    assert not [n for n in names if ".substrate/receipts" in n or ".superpowers" in n
+                or ".substrate/usage" in n]
     assert planted_hash == clean_hash, "local state changed the release source hash"
 
 

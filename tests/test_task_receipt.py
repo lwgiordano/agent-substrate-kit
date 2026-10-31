@@ -662,6 +662,22 @@ def test_every_record_is_chained_in_the_receipts_own_repository(project):
     assert check["applies_to_current_state"] == "current"
 
 
+def test_the_hooks_usage_log_is_not_a_change_to_the_tree(project, monkeypatch):
+    """v3.11.0: the hooks append to .substrate/usage/ on every tool call, so a usage
+    write after a check must not make that check stale, even with no .gitignore
+    line for the log."""
+    harness_usage = pytest.importorskip("harness_usage")
+    monkeypatch.setenv("SUBSTRATE_USAGE_LOG", "1")
+    r = api()
+    task_id = r.start(project, "task")
+    r.run_check(project, task_id, "check", 30)
+    harness_usage.record("exfil-guard", "allow", root=project, ms=1)
+    assert (project / ".substrate/usage/events.jsonl").is_file()
+    assert ".substrate/usage" not in (project / ".gitignore").read_text()
+    check = r.show(project, task_id)["summary"]["checks"]["check"]
+    assert check["applies_to_current_state"] == "current"
+
+
 def test_deleting_a_failed_attempt_is_reported_not_hidden(project, monkeypatch, capsys):
     """v3.10.6: deleting an attempt's two records used to remove it from `show`
     without a trace, so a failure could be erased and the earlier pass kept."""

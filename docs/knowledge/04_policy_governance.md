@@ -4,7 +4,7 @@ asserts:
   - scripts/command_policy.py::looks_dangerous_command
   - scripts/check_substrate_config.py::def config_text_problem
   - scripts/lang_gate.sh::run_gate(){
-last_human_reviewed: 2026-10-28
+last_human_reviewed: 2026-10-31
 covers:
   - manage.sh
   - scripts/_substrate_config.sh
@@ -19,6 +19,7 @@ covers:
   - scripts/check_validator_input_coverage.py
   - scripts/command_policy.py
   - scripts/copilot_hook_adapter.py
+  - scripts/harness_usage.py
   - scripts/lang_gate.sh
   - scripts/remote_detect.py
   - scripts/sandbox_detect.py
@@ -77,6 +78,33 @@ Claude, Codex, and Copilot adapters normalize their host payloads into the same
 decision. Malformed or missing shell payloads fail closed when containment is
 required. Hook smoke tests exercise denial behavior rather than checking only
 that a script parses.
+
+## Harness usage
+
+The hooks keep a local record of what they decided, so an operator can see which
+rules fire in real work (ADR 0003). `harness_usage.record` appends one line per
+decision to `.substrate/usage/events.jsonl`: the hook (exfil guard, lint-on-write,
+completion gate, session start), its outcome, the fixed name of the rule that
+decided, small counts such as latency and injected context size, and the lesson
+ids session start injected. The command, paths, findings and prompt text are
+never stored: rule names are the policy's fixed reasons, and the writer drops
+any field or character outside a fixed vocabulary. Recording runs after the
+verdict is fixed and never raises, so it cannot change one. The append walks the
+directory with `open_dir_chain`, opens with `O_NOFOLLOW`, and writes only to a
+regular file with one link; anything else is skipped. The log rotates once at
+2 MiB, is Git-ignored and left out of receipts and release packages, and is off
+with `SUBSTRATE_USAGE_LOG=0`. The test suite, evals and hook smoke turn it off.
+The Copilot adapter decides in-process and does not record yet.
+
+`./manage.sh usage [--days N] [--json]` reports outcomes per hook, blocks and
+overrides per rule (kept apart: an override where a rule would have blocked is
+an operator calling that block a false positive), lint findings by linter,
+context size and truncation, and lessons never injected once five session
+starts are in the window. It re-checks every field it reads and shows only rule
+names a hook writes (the policy's reasons, read from `command_policy.py`, plus
+the hooks' fixed names); any other reads as unrecognized, so no free text from
+the log reaches an agent reading the report. It measures and changes nothing; a
+prune is a reviewed change.
 
 ## Sandbox and exfiltration
 

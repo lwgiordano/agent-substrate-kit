@@ -4,7 +4,7 @@ asserts:
   - bootstrap.sh::_safe_mkdir_p
   - bootstrap.sh::wappend
   - scripts/run_python_gate.sh::_ruff_args
-last_human_reviewed: 2026-10-28
+last_human_reviewed: 2026-10-31
 covers:
   - bootstrap.sh
   - manage.sh
@@ -71,9 +71,9 @@ replace a pre-existing `pyproject.toml`. The Python gate filters substrate-owned
 tests in scope. If every explicit Ruff path is substrate-reserved, the adapter
 exits successfully instead of invoking a bare whole-repository scan.
 
-Substrate runtime memory and the work-receipt store (`.substrate/receipts/`) are
-ignored in consumer Git state so hook activity and receipts do not make commits
-perpetually dirty. Setup supports the project runner selected in
+Substrate runtime memory, the work-receipt store (`.substrate/receipts/`) and the
+hooks' usage log (`.substrate/usage/`) are ignored in consumer Git state so hook
+activity and receipts do not make commits perpetually dirty. Setup supports the project runner selected in
 config and installs both substrate tools and the relevant project development
 toolchain. Every package setup installs with pip is constrained by
 `scripts/substrate-requirements.txt`, so a run gets the versions the kit was

@@ -36,6 +36,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -161,7 +162,20 @@ def _provably_contained(root: Path, host: str) -> bool:
     return False
 
 
+def _usage(root: Path, outcome: str, rule: str | None, started: float) -> None:
+    """One usage event per Bash decision (v3.11.0): the outcome and the fixed name
+    of the rule that decided, never the command. Best-effort: recording cannot
+    change the verdict, so it is called after the verdict is fixed."""
+    try:
+        import harness_usage
+        harness_usage.record("exfil-guard", outcome, rule, root=root,
+                             ms=int((time.monotonic() - started) * 1000))
+    except Exception:  # noqa: BLE001 - observability never decides
+        pass
+
+
 def main() -> int:
+    started = time.monotonic()
     # Compute the containment requirement BEFORE parsing, so a malformed Bash
     # payload fails CLOSED under required_sandbox (a hook that can't read the
     # command can't prove containment) — v3.5.5-audit P2.
@@ -171,6 +185,7 @@ def main() -> int:
 
     def _block_required(why: str) -> int:
         print(f"exfil-guard: BLOCKED — containment is required ({why}).", file=sys.stderr)
+        _usage(_r, "deny", f"containment required: {why}", started)
         return 2
 
     try:
@@ -204,9 +219,18 @@ def main() -> int:
             "execution (`npx @anthropic-ai/sandbox-runtime claude`, a container, …).",
             file=sys.stderr,
         )
+        _usage(_r, "deny", "containment required: not provably sandboxed", started)
         return 2
-    # Audited override for legitimate one-offs (exfil tripwire only).
+    # Audited override for legitimate one-offs (exfil tripwire only). The usage
+    # event names the rule the override bypassed (v3.11.0): an override where a
+    # rule would have blocked is an operator judging that block a false positive.
     if os.environ.get("SUBSTRATE_ALLOW_SECRET_CMD", "") in ("1", "true", "yes"):
+        bypassed = None
+        try:
+            bypassed = _looks_dangerous(cmd, _profile())
+        except Exception:  # noqa: BLE001 - attribution only; the override stands
+            bypassed = None
+        _usage(_r, "override", bypassed, started)
         return 0
     # FAIL CLOSED: an invalid/unreadable profile must BLOCK, not downgrade.
     try:
@@ -214,6 +238,7 @@ def main() -> int:
         reason = _looks_dangerous(cmd, profile)
     except CommandPolicyUnavailable as e:
         print(f"exfil-guard: BLOCKED — command policy unavailable: {e}", file=sys.stderr)
+        _usage(_r, "deny", "command policy unavailable", started)
         return 2
     if reason:
         print(
@@ -223,7 +248,9 @@ def main() -> int:
             "set the SUBSTRATE_ALLOW_SECRET_CMD env var to 1 for this session (audited).",
             file=sys.stderr,
         )
+        _usage(_r, "deny", reason, started)
         return 2
+    _usage(_r, "allow", None, started)
     return 0
 
 

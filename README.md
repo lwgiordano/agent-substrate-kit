@@ -42,7 +42,9 @@ bash /path/to/agent_substrate_kit_v3/bootstrap.sh --profile standard --lang auto
 | 4-field bug-fix commit protocol + postmortem-per-bugfix hooks | — | — | yes |
 | Extras (calibration, stale-phrases, license headers) | — | — | yes |
 
-## Current status (v3.10.8)
+## Current status (v3.11.0)
+
+**v3.11.0** — the hooks record what they decide, and `./manage.sh usage` reports it. Each decision of the exfil guard, lint-on-write, the completion gate and session start appends one line to the Git-ignored `.substrate/usage/events.jsonl`: the outcome and the fixed name of the rule that decided, never the command, a path or file contents. The report shows blocks and overrides per rule, kept apart (an override where a rule would have blocked is someone calling that block a false positive), lint findings, the size of the injected session context, and lessons that are never injected. It changes nothing: pruning a rule or a lesson is still a reviewed change (ADR 0003). Recording cannot change a verdict, skips a linked or shared log file, is off with `SUBSTRATE_USAGE_LOG=0`, and is off for the test suite, evals and hook smoke. The Copilot adapter does not record yet.
 
 **v3.10.8** — every GitHub Action the kit runs or installs is now pinned to a commit. The last exception was `sigstore/cosign-installer` in the keyless release template, which never runs in the kit and so stayed on its movable `v3` tag, in the job that signs releases. It is now pinned to the commit `v3` resolved to when the operator checked it upstream (cosign-installer 3.9.1), so consumers run exactly what they ran before, and a test holds the pin so moving it is a deliberate change.
 

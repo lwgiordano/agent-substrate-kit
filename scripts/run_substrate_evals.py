@@ -2204,6 +2204,9 @@ the containment task is tested rather than skipped.
 def main(argv) -> int:
     as_json = "--json" in argv
     no_trace = "--no-trace" in argv
+    # The evals run the hooks on attack fixtures; none of that is the agent's own
+    # work, so it stays out of the usage log the operator reads (v3.11.0).
+    os.environ["SUBSTRATE_USAGE_LOG"] = "0"
 
     # --run-one <id>: run exactly ONE task in THIS process and emit its record.
     # Lets a constrained runtime isolate any single (heavy) task in a fresh

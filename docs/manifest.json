@@ -9,6 +9,11 @@
       "path": "docs/decisions/0002-anchor-threat-model-boundary.md",
       "status": "Accepted",
       "title": "0002: Freeze local anchor hardening at a declared threat-model boundary"
+    },
+    {
+      "path": "docs/decisions/0003-harness-usage-observability.md",
+      "status": "Accepted",
+      "title": "0003: Record what the hooks decide, and let people judge it"
     }
   ],
   "knowledge_docs": [
@@ -18,7 +23,7 @@
         "manage.sh",
         "package_release.sh"
       ],
-      "last_human_reviewed": "2026-10-28",
+      "last_human_reviewed": "2026-10-31",
       "path": "docs/knowledge/00_substrate.md",
       "purpose": "Entry point for current substrate contracts and functional knowledge."
     },
@@ -37,7 +42,7 @@
         "scripts/update_manifest.py",
         "scripts/write_install_json.py"
       ],
-      "last_human_reviewed": "2026-10-28",
+      "last_human_reviewed": "2026-10-31",
       "path": "docs/knowledge/01_install_adoption.md",
       "purpose": "Installation and adoption across new and existing repositories."
     },
@@ -55,7 +60,7 @@
         "scripts/verify_release.py",
         "scripts/write_install_json.py"
       ],
-      "last_human_reviewed": "2026-10-28",
+      "last_human_reviewed": "2026-10-31",
       "path": "docs/knowledge/02_upgrade_integrity.md",
       "purpose": "Upgrade provenance, authority floors, transactions, and postconditions."
     },
@@ -71,7 +76,7 @@
         "scripts/session_handoff.py",
         "scripts/todo_state_hook.py"
       ],
-      "last_human_reviewed": "2026-10-28",
+      "last_human_reviewed": "2026-10-31",
       "path": "docs/knowledge/03_memory_sessions.md",
       "purpose": "Tamper-evident memory, session restore, completion, and append-only logs."
     },
@@ -90,6 +95,7 @@
         "scripts/check_validator_input_coverage.py",
         "scripts/command_policy.py",
         "scripts/copilot_hook_adapter.py",
+        "scripts/harness_usage.py",
         "scripts/lang_gate.sh",
         "scripts/remote_detect.py",
         "scripts/sandbox_detect.py",
@@ -97,7 +103,7 @@
         "scripts/setup_branch_protection.sh",
         "scripts/substrate_profile.py"
       ],
-      "last_human_reviewed": "2026-10-28",
+      "last_human_reviewed": "2026-10-31",
       "path": "docs/knowledge/04_policy_governance.md",
       "purpose": "Command policy, hooks, sandboxing, and local or remote governance."
     },
@@ -118,7 +124,7 @@
         "scripts/prove_guards.py",
         "scripts/substrate_audit.py"
       ],
-      "last_human_reviewed": "2026-10-28",
+      "last_human_reviewed": "2026-10-31",
       "path": "docs/knowledge/05_evals_assurance.md",
       "purpose": "Behavioral evals, the malicious and benign corpus, and assurance limits."
     },
@@ -136,7 +142,7 @@
         "scripts/verify_release.py",
         "scripts/write_install_json.py"
       ],
-      "last_human_reviewed": "2026-10-29",
+      "last_human_reviewed": "2026-10-31",
       "path": "docs/knowledge/06_release_distribution.md",
       "purpose": "Release packaging, signing, manifests, and artifact verification."
     },
@@ -158,7 +164,7 @@
         "scripts/session_handoff.py",
         "scripts/todo_state_hook.py"
       ],
-      "last_human_reviewed": "2026-10-28",
+      "last_human_reviewed": "2026-10-31",
       "path": "docs/knowledge/07_agent_context_governance.md",
       "purpose": "Agent context inventory, harness scanning, budgets, and doc drift."
     },
@@ -188,7 +194,7 @@
         "scripts/code_shape.py",
         "scripts/run_security_scanners.py"
       ],
-      "last_human_reviewed": "2026-10-21",
+      "last_human_reviewed": "2026-10-31",
       "path": "docs/knowledge/09_deterministic_validators.md",
       "purpose": "Deterministic validator layers, pinned copies, and append-only gates."
     },
@@ -204,7 +210,7 @@
         "scripts/check_history_sha.py",
         "scripts/session_handoff.py"
       ],
-      "last_human_reviewed": "2026-10-28",
+      "last_human_reviewed": "2026-10-31",
       "path": "docs/knowledge/10_lessons_recall.md",
       "purpose": "Lessons with evidence, the record the chain attests, outcome labels, and recall."
     },

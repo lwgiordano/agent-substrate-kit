@@ -1106,15 +1106,34 @@ def _write_session_start() -> None:
         pass
 
 
+_INJECTED_LESSON = re.compile(r"(?m)^[ \t]*-[ \t]*\((L[0-9]{1,5})\)")
+
+
+def _usage(body: str | None, context: str) -> None:
+    """One usage event per session start (v3.11.0): how much context was injected,
+    whether it was truncated, and which lessons it carried, by id. Best-effort."""
+    try:
+        import harness_usage
+        harness_usage.record("session-start", "injected", None, root=ROOT,
+                             ids=_INJECTED_LESSON.findall(context), chars=len(context),
+                             truncated=context.endswith("[context truncated]"),
+                             structured=body is not None)
+    except Exception:  # noqa: BLE001 - observability never decides
+        pass
+
+
 def restore() -> int:
     _write_session_start()
+    body = _restore_from_structured()
+    context = _compose_context(body)
     out = {
         "hookSpecificOutput": {
             "hookEventName": "SessionStart",
-            "additionalContext": _compose_context(_restore_from_structured()),
+            "additionalContext": context,
         }
     }
     print(json.dumps(out))
+    _usage(body, context)
     return 0
 
 

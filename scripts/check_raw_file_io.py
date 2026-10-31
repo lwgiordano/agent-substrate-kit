@@ -296,6 +296,17 @@ ALLOWLIST: dict[str, str] = {
     "write_install_json.py:root.read_bytes":
         "refuse_linked_leaf() runs on the immediately preceding line and skips "
         "an unsafe leaf, so provenance never attests a hash read through a link",
+    # v3.11.0: the usage log's append. Both names are single components resolved
+    # against a directory fd that open_dir_chain walked with O_NOFOLLOW, so no
+    # ancestor can be a link; the log is never read back into a decision.
+    "harness_usage.py:LOG.os.open":
+        "dir_fd-relative O_APPEND|O_NOFOLLOW|O_NONBLOCK open, then fstat S_ISREG "
+        "and st_nlink==1 before the one write; anything else is skipped",
+    "harness_usage.py:LOG.os.replace":
+        "rotation inside the same walked dir fd, only after lstat proved the log "
+        "a regular file with one link; rename follows no link at either name",
+    "harness_usage.py:ROTATED.os.replace":
+        "the destination of that same rename, in the same walked dir fd",
 }
 
 

@@ -13,6 +13,7 @@ build/
 .substrate/memory/
 .substrate/traces/
 .substrate/receipts/
+.substrate/usage/
 .substrate/audits/
 .superpowers/
 .substrate/dep_cooldown_cache.json

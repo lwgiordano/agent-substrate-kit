@@ -17,6 +17,7 @@ is the system-level view that connects them.
 | Release / upgrade | `package_release.sh`, `scripts/release_gate.sh`, `scripts/substrate_upgrade.py` | Artifact packaged (signed when a maintainer key is present, else honestly unsigned), gate re-run from the built artifact, verified in-place upgrade with ownership migration |
 | Coordination | `AGENT_BUS.md`, `docs/HISTORY.md`, `docs/REJECTED.md` | Append-only, git-carried records for multi-agent claims, history, and rejected designs |
 | Task evidence | `manage.sh brief`, `manage.sh receipt`, `manage.sh projects` | Read-only task brief, local unsigned work receipts (what ran, on which tree, whether it still applies), read-only multi-project status |
+| Harness usage | `scripts/harness_usage.py`, `manage.sh usage` | Local log of what the hooks decided (outcome and fixed rule name, never the command or path) and a report of blocks, overrides, lint findings, context size and lessons never injected; measures, changes no rule (ADR 0003) |
 
 ## Data flow
 

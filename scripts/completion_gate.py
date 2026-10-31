@@ -244,6 +244,15 @@ def _work_happened() -> tuple[bool, datetime | None]:
     return True, _last_project_change()
 
 
+def _usage(outcome: str, rule: str) -> None:
+    """One usage event per Stop the gate judged (v3.11.0). Best-effort."""
+    try:
+        import harness_usage
+        harness_usage.record("completion-gate", outcome, rule, root=ROOT)
+    except Exception:  # noqa: BLE001 - observability never decides
+        pass
+
+
 def main() -> int:
     try:
         try:
@@ -253,16 +262,20 @@ def main() -> int:
         if not isinstance(hook, dict) or hook.get("stop_hook_active"):
             return 0
         if not _enabled():
+            _usage("silent", "gate off")
             return 0
         changed, cutoff = _work_happened()
         if not changed:
+            _usage("silent", "no project change")
             return 0
         if _audit_event_after(cutoff):
+            _usage("silent", "verified self-audit after the change")
             return 0
         if _BLOCK_MODE_ENABLED and _strict_profile():  # pragma: no cover — v3.8.4
             print(json.dumps({"decision": "block", "reason": _REMEDIATION}))
         else:
             print(json.dumps({"systemMessage": _REMEDIATION}))
+        _usage("nudge", "no verified self-audit after the change")
         return 0
     except Exception as e:
         print(f"completion-gate: internal error (fail-open): {e}", file=sys.stderr)

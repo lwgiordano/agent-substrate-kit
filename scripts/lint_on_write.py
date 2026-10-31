@@ -31,6 +31,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -115,7 +116,23 @@ def lint(path: Path) -> tuple[int, str]:
     return 0, ""
 
 
+_LINTER = {".py": "ruff", ".js": "eslint", ".jsx": "eslint", ".ts": "eslint",
+           ".tsx": "eslint", ".go": "gofmt"}
+
+
+def _usage(outcome: str, suffix: str, started: float) -> None:
+    """One usage event per linted write (v3.11.0): which linter and whether it
+    found anything; never the path or the findings. Best-effort."""
+    try:
+        import harness_usage
+        harness_usage.record("lint-on-write", outcome, _LINTER.get(suffix, "unlinted"), root=ROOT,
+                             ms=int((time.monotonic() - started) * 1000))
+    except Exception:  # noqa: BLE001 - observability never decides
+        pass
+
+
 def main() -> int:
+    started = time.monotonic()
     try:
         raw = sys.stdin.read()
         hook = json.loads(raw) if raw.strip() else {}
@@ -140,7 +157,9 @@ def main() -> int:
             f"lint-on-write: {path} has lint errors — fix before moving on:\n{out}",
             file=sys.stderr,
         )
+        _usage("findings", path.suffix.lower(), started)
         return 2
+    _usage("ok", path.suffix.lower(), started)
     return 0
 
 

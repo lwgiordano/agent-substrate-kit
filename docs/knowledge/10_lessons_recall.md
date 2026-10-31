@@ -1,6 +1,6 @@
 ---
 purpose: Lessons with evidence, the record the chain attests, outcome labels, and recall.
-last_human_reviewed: 2026-10-28
+last_human_reviewed: 2026-10-31
 covers:
   - scripts/check_lessons.py
   - scripts/recall.py
@@ -180,8 +180,8 @@ relative PATH entries for the process, so a `git` planted in the observed tree
 never runs.
 Unsupported, linked, unreadable, or oversized inputs report unknown, not clean;
 converted worktree text may conservatively report dirty. Untracked files under
-`.substrate/receipts/` and `.substrate/memory/` are substrate runtime state and
-stay out of the fingerprint even without a `.gitignore` line. This is an observation,
+`.substrate/receipts/`, `.substrate/memory/` and `.substrate/usage/` are substrate
+runtime state and stay out of the fingerprint even without a `.gitignore` line. This is an observation,
 not protection against concurrent same-user rewriting (ADR 0002).
 
 `check_knowledge_narrative.py` warns (it never blocks) when a knowledge doc

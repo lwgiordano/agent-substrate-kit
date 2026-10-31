@@ -108,6 +108,9 @@ def _run(args: list[str], stdin: str, cwd=None):
 
 def main() -> int:
     failures: list[str] = []
+    # Smoke runs of the hooks are not the agent's work: keep them out of the
+    # usage log the operator reads (v3.11.0).
+    os.environ["SUBSTRATE_USAGE_LOG"] = "0"
 
     # 1. Integrity hash-pin of the LIVE detection regex OBJECTS (not the
     #    frozen INTEGRITY_REGEXES dict — that can stay stale while a helper

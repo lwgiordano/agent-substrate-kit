@@ -18,12 +18,14 @@ from _doc_common import open_dir_chain, safe_read_bytes
 GIT_LIMIT = 16 << 20
 FILE_LIMIT = 8 << 20
 TOTAL_LIMIT = 128 << 20
-EXCLUSIONS = [".substrate/receipts/", "untracked .substrate/memory/", "Git-ignored untracked files"]
+EXCLUSIONS = [".substrate/receipts/", "untracked .substrate/memory/", "untracked .substrate/usage/",
+              "Git-ignored untracked files"]
 # Substrate runtime state that a receipt writes while it observes (v3.10.6: each
 # receipt record is chained in .substrate/memory/events.jsonl). Untracked copies
 # are left out even without a .gitignore line, or a receipt's own write would
-# read as a change to the tree it checked.
-_RUNTIME_STATE = (".substrate/receipts/", ".substrate/memory/")
+# read as a change to the tree it checked. The usage log (v3.11.0) is written by
+# the hooks on every tool call, so it changes while any receipt observes.
+_RUNTIME_STATE = (".substrate/receipts/", ".substrate/memory/", ".substrate/usage/")
 
 
 def now() -> str:

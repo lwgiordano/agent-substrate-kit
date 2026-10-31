@@ -1302,8 +1302,8 @@
     {
       "id": "package-zip-excludes-receipts",
       "file": "package_release.sh",
-      "find": "\"*/.substrate/receipts/*\" \"*/.superpowers/*\" )",
-      "replace": "\"*/.substrate/receipts-never/*\" \"*/.superpowers-never/*\" )",
+      "find": "\"*/.substrate/receipts/*\" \"*/.substrate/usage/*\" \"*/.superpowers/*\" )",
+      "replace": "\"*/.substrate/receipts-never/*\" \"*/.substrate/usage/*\" \"*/.superpowers-never/*\" )",
       "tests": [
         "tests/test_project_status.py::test_release_package_really_leaves_out_local_state"
       ],
@@ -1587,8 +1587,8 @@
     {
       "id": "untracked-memory-chain-is-outside-the-fingerprint",
       "file": "scripts/_task_evidence.py",
-      "find": "_RUNTIME_STATE = (\".substrate/receipts/\", \".substrate/memory/\")",
-      "replace": "_RUNTIME_STATE = (\".substrate/receipts/\",)",
+      "find": "_RUNTIME_STATE = (\".substrate/receipts/\", \".substrate/memory/\", \".substrate/usage/\")",
+      "replace": "_RUNTIME_STATE = (\".substrate/receipts/\", \".substrate/usage/\")",
       "tests": [
         "tests/test_task_receipt.py::test_every_record_is_chained_in_the_receipts_own_repository"
       ],
@@ -1754,6 +1754,96 @@
         "tests/test_doc_consistency.py::test_workflow_actions_are_pinned_to_commit_shas"
       ],
       "why": "the job that signs releases runs whatever the movable v3 tag points to"
+    },
+    {
+      "id": "usage-log-records-the-rule-not-the-command",
+      "file": "scripts/check_exfil_guard.py",
+      "find": "        _usage(_r, \"deny\", reason, started)\n",
+      "replace": "        _usage(_r, \"deny\", cmd, started)\n",
+      "tests": [
+        "tests/test_harness_usage.py::test_guard_records_the_rule_never_the_command"
+      ],
+      "why": "a usage log that kept the command would be a second copy of what the guard keeps in place"
+    },
+    {
+      "id": "usage-override-names-the-bypassed-rule",
+      "file": "scripts/check_exfil_guard.py",
+      "find": "        _usage(_r, \"override\", bypassed, started)\n",
+      "replace": "        _usage(_r, \"override\", None, started)\n",
+      "tests": [
+        "tests/test_harness_usage.py::test_override_names_the_rule_it_bypassed"
+      ],
+      "why": "an override is the false-positive evidence; without the rule it cannot be attributed"
+    },
+    {
+      "id": "usage-log-refuses-a-linked-leaf",
+      "file": "scripts/harness_usage.py",
+      "find": "os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK",
+      "replace": "os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NONBLOCK",
+      "tests": [
+        "tests/test_harness_usage.py::test_an_unsafe_log_is_skipped_and_the_verdict_stands"
+      ],
+      "why": "a planted symlink would turn every hook call into a write to a file outside the repo"
+    },
+    {
+      "id": "usage-report-judges-no-lesson-on-thin-evidence",
+      "file": "scripts/harness_usage.py",
+      "find": "if inventory is not None and len(starts) >= MIN_SESSIONS:",
+      "replace": "if inventory is not None:",
+      "tests": [
+        "tests/test_harness_usage.py::test_report_judges_no_lesson_until_enough_sessions"
+      ],
+      "why": "with a handful of sessions every lesson reads as never injected, a false prune list"
+    },
+    {
+      "id": "usage-log-is-runtime-state-for-receipts",
+      "file": "scripts/_task_evidence.py",
+      "find": "_RUNTIME_STATE = (\".substrate/receipts/\", \".substrate/memory/\", \".substrate/usage/\")",
+      "replace": "_RUNTIME_STATE = (\".substrate/receipts/\", \".substrate/memory/\")",
+      "tests": [
+        "tests/test_task_receipt.py::test_the_hooks_usage_log_is_not_a_change_to_the_tree"
+      ],
+      "why": "every hook call appends to the log, so without the exclusion no receipt check stays current"
+    },
+    {
+      "id": "usage-report-shows-no-free-text",
+      "file": "scripts/harness_usage.py",
+      "find": "    return rule if not rule or rule in known else UNRECOGNIZED\n",
+      "replace": "    return rule\n",
+      "tests": [
+        "tests/test_harness_usage.py::test_report_shows_no_free_text_from_the_log"
+      ],
+      "why": "the log is appendable by anything local and an agent reads the report"
+    },
+    {
+      "id": "usage-report-survives-deep-nesting",
+      "file": "scripts/harness_usage.py",
+      "find": "            except (ValueError, RecursionError):\n                malformed += 1\n",
+      "replace": "            except ValueError:\n                malformed += 1\n",
+      "tests": [
+        "tests/test_harness_usage.py::test_report_survives_hostile_lines"
+      ],
+      "why": "one forged line of nested brackets crashed the report"
+    },
+    {
+      "id": "usage-timestamps-are-ascii-digits",
+      "file": "scripts/harness_usage.py",
+      "find": "_TS = re.compile(r\"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\")",
+      "replace": "_TS = re.compile(r\"\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z\")",
+      "tests": [
+        "tests/test_harness_usage.py::test_report_survives_hostile_lines"
+      ],
+      "why": "a timestamp in non-ASCII digits sorts above every real one and never leaves the window"
+    },
+    {
+      "id": "package-zip-excludes-usage-log",
+      "file": "package_release.sh",
+      "find": "\"*/.substrate/usage/*\" \"*/.superpowers/*\" )",
+      "replace": "\"*/.substrate/usage-never/*\" \"*/.superpowers/*\" )",
+      "tests": [
+        "tests/test_project_status.py::test_release_package_really_leaves_out_local_state"
+      ],
+      "why": "a maintainer's own usage log would ship inside the release zip"
     }
   ]
 }

@@ -320,11 +320,12 @@ case "$cmd" in
   brief) run_py_system scripts/task_brief.py "$@" ;;
   receipt) run_py_system scripts/task_receipt.py "$@" ;;
   projects) run_py_system scripts/project_status.py "$@" ;;
+  usage) run_py_system scripts/harness_usage.py "$@" ;;
   bus) run_py scripts/bus_claims.py "$@" ;;
   new-validator) run_py scripts/new_validator.py "$@" ;;
   design-init) mkdir -p design-system/pages design-system/tokens; echo "design-system/ scaffolded" ;;
   *) cat <<'HELP'
-Usage: ./manage.sh setup|doctor|go-live|context-report|code-shape|verify-release|upgrade|enable|security|check|evals|audit|full-audit|release|manifest|agent-system-audit|handoff|memory|reject|prove|recall|sync-pins|brief|receipt|projects|bus|design-init|new-validator
+Usage: ./manage.sh setup|doctor|go-live|context-report|code-shape|verify-release|upgrade|enable|security|check|evals|audit|full-audit|release|manifest|agent-system-audit|handoff|memory|reject|prove|recall|sync-pins|brief|receipt|projects|usage|bus|design-init|new-validator
   evals                                       adversarial behavior evals (block-rate / FP-rate, writes a trace)
   doctor [--quick|--security|--operational]   readiness levels
   go-live [--json]                            local/remote/deep readiness map (offline, side-effect-light)
@@ -342,6 +343,8 @@ Usage: ./manage.sh setup|doctor|go-live|context-report|code-shape|verify-release
           | annotate ID --completion complete|incomplete [--note] [--author] [--review-ref] | show ID [--json]
                                               local record of a task, the checks run for it, and whether they still apply
   projects --root DIR [--root DIR ...] [--json]  read-only status of the projects you name (runs none of their code)
+  usage [--days N] [--json]                   what the hooks did: blocks/overrides by rule, lint findings, injected
+                                              context and lessons (local log; measures, never changes a rule)
   reject --what "<X>" --why "<Y>"             log a rejected approach (injected at SessionStart so it is not re-proposed)
   bus [--all|--strict]                        AGENT_BUS.md claim-lease report (expired leases are reclaimable)
 Config: .substrate/config (profile, language, LINT_CMD/TYPECHECK_CMD/TEST_CMD indirection)

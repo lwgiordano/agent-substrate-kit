@@ -36,6 +36,7 @@ Usage:
   memory_log.py append --type <t> --json '<data>'   # or --message TEXT
   memory_log.py verify [--anchor]   # walk chain; --anchor checks head note
   memory_log.py anchor              # write head hash to a git note
+  memory_log.py ephemeral           # rc 0 if this clone will not outlive its session
   memory_log.py tail [N]
   memory_log.py tasks
   memory_log.py record docs/HISTORY.md   # attest unrecorded append-only entries
@@ -1081,13 +1082,23 @@ def anchor(force: bool = False) -> int:
     if prior is not None and not force:
         commit, anchored = prior
         if anchored not in seen:
+            # The receipt picks the explanation, never the outcome (ADR 0004): both
+            # branches refuse, and --force with its evidence event is the one way on.
+            cause = (
+                "That is the shape of a replaced or truncated log. If the log was "
+                "legitimately reset, re-run with --force, which records the break as "
+                "an event in the new chain rather than hiding it."
+                if anchored in _held_here(commit) else
+                "This clone holds no receipt for that anchor, so it was written in "
+                "another clone (an ephemeral cloud session, or a note recreated from a "
+                "release payload) or before receipts existed. To start anchoring THIS "
+                "clone's chain, re-run with --force, which records the jump as an "
+                "event in the new chain rather than hiding it.")
             print(
                 f"memory-log: REFUSING to re-anchor — the hash anchored at commit "
                 f"{commit[:12]} ({anchored[:12]}) is NOT in the current chain, so this "
                 "would move the anchor onto a chain that does not descend from the "
-                "anchored state. That is the shape of a replaced or truncated log. If "
-                "the log was legitimately reset, re-run with --force, which records the "
-                "break as an event in the new chain rather than hiding it.",
+                f"anchored state. {cause}",
                 file=sys.stderr,
             )
             return 1
@@ -1148,6 +1159,16 @@ def anchor(force: bool = False) -> int:
         if sha.returncode != 0:
             print("memory-log: anchor needs a git repo with at least one commit", file=sys.stderr)
             return 1
+        # RECEIPT FIRST (ADR 0004). It is what lets this clone later tell its own
+        # chain losing history (MISMATCH) from a note another clone wrote
+        # (UNVERIFIABLE HERE). Evidence is a precondition here as it is for
+        # --force: if it cannot be written, the note is not written either.
+        if not _write_receipt(sha.stdout.strip(), head):
+            print("memory-log: REFUSING to anchor: could not write this clone's receipt "
+                  f"(refs/notes/{HELD_REF}; see the error above). Without it, a later loss "
+                  "of this chain would be reported as an anchor from another clone instead "
+                  "of a mismatch. The note is UNCHANGED.", file=sys.stderr)
+            return 1
         r = subprocess.run(
             ["git", "notes", "--ref", "substrate-memory", "add", "-f",
              "-m", f"substrate-memory-head:{head}", sha.stdout.strip()],
@@ -1206,6 +1227,95 @@ def _nearest_anchor() -> tuple[str, str] | None:
     except Exception:
         return None
     return None
+
+
+# --- Receipts: which anchors THIS clone wrote (ADR 0004) --------------------
+# A note says "the chain was at H when commit C was anchored"; it cannot say
+# which chain. The log is Git-ignored, so the chain a note names exists only in
+# the clone that wrote it. Every other clone that fetches the note (a fresh cloud
+# session, the operator's machine after recreating it from a release payload)
+# holds a different chain, and "H is not in this chain" there is not evidence of
+# a rewrite. Observed for the v3.10.8 anchor, written in a cloud container that
+# was then reclaimed: every clone that fetched the note reported ANCHOR MISMATCH.
+#
+# So `anchor` leaves a receipt in a second, local-only notes ref before it writes
+# the note. Git carries neither notes ref on a normal clone, fetch, or push, and
+# the release gate pushes only refs/notes/substrate-memory. The receipt picks the
+# DIAGNOSIS that `verify --anchor` and `anchor` print, never their exit code:
+# deleting one can soften a message, never turn a failure into a pass; planting
+# one can only sharpen a message.
+HELD_REF = "substrate-memory-held"
+_HELD_PREFIX = "substrate-memory-held:"
+
+
+def _held_here(commit: str) -> set[str]:
+    """Chain heads this clone anchored at `commit` (its receipts); empty if none
+    or unreadable. Only ever used to choose a message."""
+    try:
+        r = subprocess.run(["git", "notes", "--ref", HELD_REF, "show", commit],
+                           cwd=ROOT, capture_output=True, text=True, timeout=10,
+                           env=_clean_env())
+    except Exception:
+        return set()
+    if r.returncode != 0:
+        return set()
+    return {ln[len(_HELD_PREFIX):].strip() for ln in r.stdout.splitlines()
+            if ln.startswith(_HELD_PREFIX)}
+
+
+def _write_receipt(commit: str, head: str) -> bool:
+    """Record that this clone anchored `head` at `commit`. Appended, so a second
+    anchor on the same commit keeps the first receipt."""
+    try:
+        r = subprocess.run(["git", "notes", "--ref", HELD_REF, "append",
+                            "-m", f"{_HELD_PREFIX}{head}", commit],
+                           cwd=ROOT, capture_output=True, text=True, timeout=10,
+                           env=_clean_env())
+    except Exception as e:
+        print(f"memory-log: receipt error: {e}", file=sys.stderr)
+        return False
+    if r.returncode != 0:
+        print(f"memory-log: receipt failed: {r.stderr.strip()[:160]}", file=sys.stderr)
+        return False
+    return True
+
+
+def _ephemeral_clone() -> str | None:
+    """Why this clone will not outlive its session, or None.
+
+    An anchor bounds only the clone that holds its chain. A clone whose container
+    is reclaimed after the session is about to stop existing, so an anchor
+    published from it can never be checked again, and every clone that later
+    fetches it can only report it unverifiable. `SUBSTRATE_EPHEMERAL_CLONE` is
+    the operator's word and wins either way ("1" ephemeral; "0" persistent, for a
+    self-hosted runner that keeps its disk). Otherwise the one signal the kit
+    knows is Claude Code's cloud-session flag. An unrecognised host reads as
+    persistent: a miss costs the old publication advice, never a weaker check,
+    because no verdict depends on this.
+    """
+    declared = os.environ.get("SUBSTRATE_EPHEMERAL_CLONE", "").strip()
+    if declared == "1":
+        return "SUBSTRATE_EPHEMERAL_CLONE=1 declares this clone ephemeral"
+    if declared == "0":
+        return None
+    if os.environ.get("CLAUDE_CODE_REMOTE", "").strip().lower() == "true":
+        return ("this is a Claude Code cloud session (CLAUDE_CODE_REMOTE=true), whose "
+                "container is reclaimed when the session ends")
+    return None
+
+
+def _publish_advice() -> str:
+    """What to do about an anchor origin does not publish. That depends on whether
+    this clone, the only one holding the chain, will still exist to verify it."""
+    why = _ephemeral_clone()
+    if why is None:
+        return ("Publish FROM THIS CLONE: `git push origin refs/notes/substrate-memory` "
+                "(a normal push/clone does not carry refs/notes/*, so no other clone can "
+                "publish it for you).")
+    return (f"Do NOT publish it: EPHEMERAL CLONE ({why}). The chain it anchors ends "
+            "with this session, so nobody could verify a published copy, and every "
+            "clone that later fetched it would hold a different chain. Publish "
+            "anchors from a persistent clone.")
 
 
 def _require_published_anchor() -> bool:
@@ -1388,6 +1498,22 @@ def verify(check_anchor: bool = False) -> int:
             return 1
         commit, anchored = found
         seen = {ZERO} | {ev.get("hash") for ev in events}
+        # WHOSE anchor is missing (ADR 0004). With a receipt, this clone wrote the
+        # anchor and its own chain lost history: MISMATCH. Without one the note
+        # names a chain held elsewhere, or predates receipts; a rewrite cannot be
+        # told apart from that here, and either way it is no anchor for THIS chain,
+        # the same state as NO ANCHOR. Both exit 1; only the explanation differs.
+        if anchored not in seen and anchored not in _held_here(commit):
+            print(f"memory-log: ANCHOR UNVERIFIABLE HERE: the head anchored at commit "
+                  f"{commit[:12]} ({anchored[:12]}) is not in this chain, and this clone "
+                  "holds no receipt for writing that anchor: it names a chain held by "
+                  "another clone (an ephemeral cloud session, or a note recreated from a "
+                  "release payload), or it predates receipts. Without a receipt this "
+                  "clone cannot tell that apart from a rewrite here, so it reports "
+                  "neither; either way it is no anchor for this chain. "
+                  "`memory_log.py anchor --force` starts anchoring this clone's own "
+                  "chain and records the jump in it.", file=sys.stderr)
+            return 1
         if anchored not in seen:
             print(f"memory-log: ANCHOR MISMATCH — the head anchored at commit {commit[:12]} "
                   f"({anchored[:12]}) is not in the current chain: history was replaced "
@@ -1419,10 +1545,17 @@ def verify(check_anchor: bool = False) -> int:
         # descent, and re-anchoring onto it is still gated by monotonicity and
         # the --force evidence event, so this narrows the message, not the check.
         if published is not None and published not in seen:
+            # Same verdict either way; the receipt says which story it is.
+            whose = (": this clone wrote that anchor, so its chain lost history since"
+                     if published in _held_here(commit) else
+                     ". This clone holds no receipt for it, so it was written elsewhere: "
+                     "another clone that anchored this commit first (an ephemeral cloud "
+                     "session, say), or whoever rewrote origin's note. Anchor a later "
+                     "commit from this clone")
             print(f"memory-log: ANCHOR CONFLICT — the note at commit {commit[:12]} "
                   f"records {anchored[:12]} locally, but what origin publishes "
                   f"({published[:12]}) is NOT in this chain: the published anchor "
-                  "does not describe this log", file=sys.stderr)
+                  f"does not describe this log{whose}", file=sys.stderr)
             return 1
         ahead = published is not None
         if _require_published_anchor():
@@ -1431,26 +1564,22 @@ def verify(check_anchor: bool = False) -> int:
                      "new head was never pushed. " if ahead else
                      "exists only locally, where whatever can rewrite the log can "
                      "rewrite it too. ")
-                  + "Strict requires the anchor to be on the protected remote: "
-                  "`git push origin refs/notes/substrate-memory` FROM THIS CLONE (a "
-                  "normal push/clone does not carry refs/notes/*, so no other clone "
-                  "can publish it for you).", file=sys.stderr)
+                  + "Strict requires the anchor to be on the protected remote. "
+                  + _publish_advice(), file=sys.stderr)
             return 1
         if ahead:
             print(f"memory-log: chain OK + anchor LOCAL AHEAD of origin ({len(events)} "
                   f"events; anchored at commit {commit[:12]}, chain seq {at}) — origin "
                   f"still publishes {published[:12]}, which IS in this chain, so the "
                   "log descends from the published anchor; the newer note was not "
-                  "pushed. Publish FROM THIS CLONE: `git push origin "
-                  "refs/notes/substrate-memory`")
+                  "pushed. " + _publish_advice())
             return 0
         if _has_origin():
             print(f"memory-log: chain OK + anchor present LOCAL-ONLY ({len(events)} "
                   f"events; anchored at commit {commit[:12]}, chain seq {at}) — an "
                   "origin exists but does not publish it, so it bounds accident and a "
                   "single re-anchor, not an adversary with write access to "
-                  "refs/notes/. Publish FROM THIS CLONE: `git push origin "
-                  "refs/notes/substrate-memory`")
+                  "refs/notes/. " + _publish_advice())
             return 0
         print(f"memory-log: chain OK + anchor verified LOCAL (no remote) ({len(events)} "
               f"events; anchored at commit {commit[:12]}, chain seq {at}) — local is "
@@ -1502,6 +1631,8 @@ def main(argv: list[str]) -> int:
         help="advance the anchor even though the previously anchored head is no "
              "longer in the chain (a legitimate log reset). The break is APPENDED "
              "to the new chain as an `anchor-forced` event, never hidden.")
+    sub.add_parser("ephemeral", help="exit 0 and say why if this clone will not outlive "
+                                     "its session (the release gate then does not publish)")
     ap_tail = sub.add_parser("tail")
     ap_tail.add_argument("n", nargs="?", type=int, default=10)
     sub.add_parser("tasks")
@@ -1544,6 +1675,10 @@ def main(argv: list[str]) -> int:
         return verify(check_anchor=a.anchor)
     if a.cmd == "anchor":
         return anchor(force=a.force)
+    if a.cmd == "ephemeral":
+        why = _ephemeral_clone()
+        print(f"ephemeral: {why}" if why else "persistent: no ephemeral-host signal")
+        return 0 if why else 1
     if a.cmd == "tail":
         return tail(a.n)
     if a.cmd == "tasks":

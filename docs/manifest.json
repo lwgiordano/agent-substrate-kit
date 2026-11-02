@@ -14,6 +14,11 @@
       "path": "docs/decisions/0003-harness-usage-observability.md",
       "status": "Accepted",
       "title": "0003: Record what the hooks decide, and let people judge it"
+    },
+    {
+      "path": "docs/decisions/0004-anchors-bound-the-clone-that-holds-the-chain.md",
+      "status": "Accepted",
+      "title": "0004: An anchor bounds only the clone that holds its chain"
     }
   ],
   "knowledge_docs": [
@@ -42,7 +47,7 @@
         "scripts/update_manifest.py",
         "scripts/write_install_json.py"
       ],
-      "last_human_reviewed": "2026-10-31",
+      "last_human_reviewed": "2026-11-02",
       "path": "docs/knowledge/01_install_adoption.md",
       "purpose": "Installation and adoption across new and existing repositories."
     },
@@ -76,9 +81,9 @@
         "scripts/session_handoff.py",
         "scripts/todo_state_hook.py"
       ],
-      "last_human_reviewed": "2026-10-31",
+      "last_human_reviewed": "2026-11-02",
       "path": "docs/knowledge/03_memory_sessions.md",
-      "purpose": "Tamper-evident memory, session restore, completion, and append-only logs."
+      "purpose": "Tamper-evident memory and session restore, plus the completion gate and append-only logs."
     },
     {
       "covers": [
@@ -124,7 +129,7 @@
         "scripts/prove_guards.py",
         "scripts/substrate_audit.py"
       ],
-      "last_human_reviewed": "2026-10-31",
+      "last_human_reviewed": "2026-11-02",
       "path": "docs/knowledge/05_evals_assurance.md",
       "purpose": "Behavioral evals, the malicious and benign corpus, and assurance limits."
     },
@@ -142,9 +147,9 @@
         "scripts/verify_release.py",
         "scripts/write_install_json.py"
       ],
-      "last_human_reviewed": "2026-10-31",
+      "last_human_reviewed": "2026-11-02",
       "path": "docs/knowledge/06_release_distribution.md",
-      "purpose": "Release packaging, signing, manifests, and artifact verification."
+      "purpose": "Release packaging and signing, with manifest and artifact verification."
     },
     {
       "covers": [
@@ -173,9 +178,9 @@
         "scripts/memory_log.py",
         "scripts/release_gate.sh"
       ],
-      "last_human_reviewed": "2026-10-28",
+      "last_human_reviewed": "2026-11-02",
       "path": "docs/knowledge/08_memory_anchor.md",
-      "purpose": "The memory trust anchor \u2014 monotonic advance, remote confirmation, and limits."
+      "purpose": "The memory trust anchor: monotonic advance, remote confirmation, and limits."
     },
     {
       "covers": [
@@ -210,7 +215,7 @@
         "scripts/check_history_sha.py",
         "scripts/session_handoff.py"
       ],
-      "last_human_reviewed": "2026-10-31",
+      "last_human_reviewed": "2026-11-02",
       "path": "docs/knowledge/10_lessons_recall.md",
       "purpose": "Lessons with evidence, the record the chain attests, outcome labels, and recall."
     },

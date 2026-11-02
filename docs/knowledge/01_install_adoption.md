@@ -4,7 +4,7 @@ asserts:
   - bootstrap.sh::_safe_mkdir_p
   - bootstrap.sh::wappend
   - scripts/run_python_gate.sh::_ruff_args
-last_human_reviewed: 2026-10-31
+last_human_reviewed: 2026-11-02
 covers:
   - bootstrap.sh
   - manage.sh
@@ -118,7 +118,10 @@ anchor confirmed against the remote, `pass` for a local anchor in a repo with no
 remote (offline-complete is the documented base, so local is then the strongest
 anchor obtainable), `warn` when an origin exists but does not publish it, and
 `fail` for a strict repo with an unpublished anchor or a local note that
-disagrees with the remote.
+disagrees with the remote. A note this clone holds no receipt for (another
+clone wrote it, for a chain this one never held) is `warn` like no anchor, never
+the mismatch catch-all. On an ephemeral clone the row advises against
+publishing rather than telling the operator to push.
 
 
 A present-but-unusable `.substrate/config` is tampering, not an absent config.

@@ -255,6 +255,188 @@
       "why": "a first-match parser reads standard-then-strict as base tier: gate says strict, anchor publication says not"
     },
     {
+      "id": "anchor-foreign-is-unverifiable",
+      "file": "scripts/memory_log.py",
+      "find": "        if anchored not in seen and anchored not in _held_here(commit):",
+      "replace": "        if False:",
+      "tests": [
+        "tests/test_hook_scripts.py::test_memory_anchor_from_another_clone_is_unverifiable_not_tampering"
+      ],
+      "why": "every clone that fetches a note written elsewhere reports a chain it never held as tampering"
+    },
+    {
+      "id": "anchor-foreign-still-fails",
+      "file": "scripts/memory_log.py",
+      "find": "chain and records the jump in it.\", file=sys.stderr)\n            return 1",
+      "replace": "chain and records the jump in it.\", file=sys.stderr)\n            return 0",
+      "tests": [
+        "tests/test_hook_scripts.py::test_memory_anchor_from_another_clone_is_unverifiable_not_tampering",
+        "tests/test_hook_scripts.py::test_memory_anchor_receipt_changes_the_message_never_the_verdict"
+      ],
+      "why": "deleting a receipt (or replacing a chain anchored before receipts) turns a detected rewrite into a pass"
+    },
+    {
+      "id": "anchor-receipt-read",
+      "file": "scripts/memory_log.py",
+      "find": "    return {ln[len(_HELD_PREFIX):].strip() for ln in r.stdout.splitlines()\n            if ln.startswith(_HELD_PREFIX)}",
+      "replace": "    return set()",
+      "tests": [
+        "tests/test_hook_scripts.py::test_memory_anchor_rewrite_in_the_producing_clone_is_still_a_mismatch"
+      ],
+      "why": "a rewrite in the clone that wrote the anchor is reported as an anchor from another clone"
+    },
+    {
+      "id": "anchor-receipt-written",
+      "file": "scripts/memory_log.py",
+      "find": "        if not _write_receipt(sha.stdout.strip(), head):",
+      "replace": "        if False:",
+      "tests": [
+        "tests/test_hook_scripts.py::test_memory_anchor_rewrite_in_the_producing_clone_is_still_a_mismatch",
+        "tests/test_hook_scripts.py::test_memory_anchor_receipt_changes_the_message_never_the_verdict"
+      ],
+      "why": "anchor writes no receipt, so its own clone's rewrite later reads as someone else's anchor"
+    },
+    {
+      "id": "anchor-receipt-precondition",
+      "file": "scripts/memory_log.py",
+      "find": "        if not _write_receipt(sha.stdout.strip(), head):",
+      "replace": "        if not (_write_receipt(sha.stdout.strip(), head) or True):",
+      "tests": [
+        "tests/test_hook_scripts.py::test_memory_anchor_refuses_when_its_receipt_cannot_be_written"
+      ],
+      "why": "a note is written whose receipt is missing, so the evidence that names its loss never existed"
+    },
+    {
+      "id": "anchor-refusal-names-foreign",
+      "file": "scripts/memory_log.py",
+      "find": "                if anchored in _held_here(commit) else",
+      "replace": "                if True else",
+      "tests": [
+        "tests/test_hook_scripts.py::test_memory_anchor_refusal_in_another_clone_names_it_and_force_starts_its_own"
+      ],
+      "why": "anchor in a clone that never held the chain tells the operator their log was replaced"
+    },
+    {
+      "id": "anchor-conflict-names-foreign",
+      "file": "scripts/memory_log.py",
+      "find": "                     if published in _held_here(commit) else",
+      "replace": "                     if True else",
+      "tests": [
+        "tests/test_hook_scripts.py::test_memory_anchor_conflict_with_another_clones_anchor_says_so"
+      ],
+      "why": "a conflict with another clone's published anchor is told as this chain losing history"
+    },
+    {
+      "id": "ephemeral-detects-claude-cloud",
+      "file": "scripts/memory_log.py",
+      "find": "    if os.environ.get(\"CLAUDE_CODE_REMOTE\", \"\").strip().lower() == \"true\":",
+      "replace": "    if False:",
+      "tests": [
+        "tests/test_hook_scripts.py::test_memory_ephemeral_clone_detection"
+      ],
+      "why": "a Claude Code cloud session reads as persistent and publishes an anchor nobody can verify"
+    },
+    {
+      "id": "ephemeral-operator-override",
+      "file": "scripts/memory_log.py",
+      "find": "    if declared == \"0\":\n        return None\n",
+      "replace": "",
+      "tests": [
+        "tests/test_hook_scripts.py::test_memory_ephemeral_clone_detection"
+      ],
+      "why": "a persistent self-hosted runner cannot declare itself persistent and is never told to publish"
+    },
+    {
+      "id": "verify-advice-ephemeral",
+      "file": "scripts/memory_log.py",
+      "find": "    why = _ephemeral_clone()\n    if why is None:",
+      "replace": "    why = None\n    if why is None:",
+      "tests": [
+        "tests/test_hook_scripts.py::test_memory_anchor_advice_on_an_ephemeral_clone_is_not_to_publish"
+      ],
+      "why": "verify tells a cloud session to publish an anchor for a chain about to be deleted"
+    },
+    {
+      "id": "gate-ephemeral-does-not-publish",
+      "file": "scripts/release_gate.sh",
+      "find": "  if [ \"${_ephemeral#ephemeral: }\" != \"$_ephemeral\" ]; then",
+      "replace": "  if false; then",
+      "tests": [
+        "tests/test_hook_scripts.py::test_release_gate_does_not_publish_an_anchor_from_an_ephemeral_clone"
+      ],
+      "why": "the gate publishes, or hands out a payload to publish, an anchor for a chain that dies with the session"
+    },
+    {
+      "id": "doctor-foreign-anchor-warn",
+      "file": "scripts/substrate_doctor.py",
+      "find": "            elif 'ANCHOR UNVERIFIABLE' in out_anc:",
+      "replace": "            elif False:",
+      "tests": [
+        "tests/test_hook_scripts.py::test_go_live_memory_anchor_from_another_clone_is_warn_not_mismatch"
+      ],
+      "why": "go-live reports a note from another clone as MISMATCH (tampering) through its catch-all"
+    },
+    {
+      "id": "anchor-refusal-names-replaced",
+      "file": "scripts/memory_log.py",
+      "find": "                if anchored in _held_here(commit) else",
+      "replace": "                if False else",
+      "tests": [
+        "tests/test_hook_scripts.py::test_memory_anchor_rewrite_in_the_producing_clone_is_still_a_mismatch"
+      ],
+      "why": "anchor's refusal in the clone that wrote the anchor stops naming a replaced or truncated log"
+    },
+    {
+      "id": "anchor-receipt-appended",
+      "file": "scripts/memory_log.py",
+      "find": "        r = subprocess.run([\"git\", \"notes\", \"--ref\", HELD_REF, \"append\",",
+      "replace": "        r = subprocess.run([\"git\", \"notes\", \"--ref\", HELD_REF, \"add\", \"-f\",",
+      "tests": [
+        "tests/test_hook_scripts.py::test_memory_anchor_conflict_in_the_publishing_clone_says_its_chain_lost_history"
+      ],
+      "why": "a second anchor on one commit erases the receipt for the first, so this clone's own loss reads as another clone's anchor"
+    },
+    {
+      "id": "anchor-conflict-names-own",
+      "file": "scripts/memory_log.py",
+      "find": "                     if published in _held_here(commit) else",
+      "replace": "                     if False else",
+      "tests": [
+        "tests/test_hook_scripts.py::test_memory_anchor_conflict_in_the_publishing_clone_says_its_chain_lost_history"
+      ],
+      "why": "a conflict with this clone's own published anchor is told as someone else's"
+    },
+    {
+      "id": "verify-advice-local-ahead",
+      "file": "scripts/memory_log.py",
+      "find": "                  \"pushed. \" + _publish_advice())",
+      "replace": "                  \"pushed. Publish FROM THIS CLONE.\")",
+      "tests": [
+        "tests/test_hook_scripts.py::test_memory_anchor_local_ahead_advice_on_an_ephemeral_clone"
+      ],
+      "why": "LOCAL AHEAD tells a cloud session to push a note for a chain about to be deleted"
+    },
+    {
+      "id": "doctor-ephemeral-advice",
+      "file": "scripts/substrate_doctor.py",
+      "find": "                        'persistent clone' if 'EPHEMERAL CLONE' in out_anc else",
+      "replace": "                        'persistent clone' if False else",
+      "tests": [
+        "tests/test_hook_scripts.py::test_go_live_memory_anchor_advice_on_an_ephemeral_clone_and_conflict_wording"
+      ],
+      "why": "go-live tells a cloud session to push an anchor nobody can verify after the session"
+    },
+    {
+      "id": "doctor-conflict-not-accusing",
+      "file": "scripts/substrate_doctor.py",
+      "find": "                                                  'chain; `./manage.sh memory verify --anchor` says whether this '",
+      "replace": "                                                  'chain: the local note was rewritten; `./manage.sh memory verify --anchor` says whether this '",
+      "tests": [
+        "tests/test_hook_scripts.py::test_go_live_memory_anchor_advice_on_an_ephemeral_clone_and_conflict_wording"
+      ],
+      "why": "go-live accuses the operator of rewriting the local note when another clone published first"
+    },
+    {
       "id": "gate-memory-presence-e",
       "file": "scripts/release_gate.sh",
       "find": "if [ -e .substrate/memory/events.jsonl ] && { [ -L .substrate/memory/events.jsonl ] || [ ! -f .substrate/memory/events.jsonl ]; }; then",

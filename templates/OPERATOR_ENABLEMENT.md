@@ -1,7 +1,7 @@
 # Operator enablement checklist
 
 The substrate has three responsibilities the kit cannot fulfill on
-its own — each requires a human (or an authorized agent acting on
+its own: each requires a human (or an authorized agent acting on
 your behalf) to click through GitHub UI or local IDE settings.
 
 Do these once after `bash bootstrap.sh` + first commit.
@@ -12,7 +12,7 @@ Do these once after `bash bootstrap.sh` + first commit.
 
 The substrate's gates run locally via pre-commit AND in CI via the
 GitHub Actions workflow. Branch protection ensures CI must pass
-before merge — the third line of defense after pre-commit
+before merge, the third line of defense after pre-commit
 (local) and CI (cloud).
 
 **Steps:**
@@ -30,13 +30,13 @@ before merge — the third line of defense after pre-commit
    - **"Include administrators"** (no bypass for repo owners)
 7. Save.
 
-**Why**: without branch protection, a contributor can merge directly
+Without branch protection, a contributor can merge directly
 to main bypassing CI. The substrate's "second line of defense" only
 holds when CI is required.
 
 ---
 
-## 2. Dependabot — enable version updates
+## 2. Dependabot: enable version updates
 
 The kit ships `.github/dependabot.yml` configured for weekly
 updates of Python dependencies + GitHub Actions versions, with
@@ -63,7 +63,7 @@ merge time.
 If you use VS Code or another editor with the Dev Containers
 extension, you can ship a `.devcontainer/devcontainer.json` that
 captures the project's Python version + dep-manager + pre-commit
-state. The kit doesn't ship one by default — consider adding when
+state. The kit doesn't ship one by default; consider adding when
 the team grows beyond 1-2 contributors.
 
 **Quick-start template** (drop in `.devcontainer/devcontainer.json`
@@ -92,11 +92,11 @@ The kit wires deterministic hooks for Codex (`.codex/hooks.json`) and
 Copilot (`.github/hooks/`) in addition to Claude.
 
 - **Codex** requires you to review and TRUST each command hook before it
-  runs — Codex records the hook's hash and skips it until approved.
+  runs: Codex records the hook's hash and skips it until approved.
   Review `.codex/hooks.json`, confirm the commands only invoke
   repo-local `scripts/*.py`, then trust them.
 - Never enable `--dangerously-bypass-hook-trust` (Codex) or
-  `--dangerously-skip-permissions` (Claude) in committed config —
+  `--dangerously-skip-permissions` (Claude) in committed config:
   `check_agent_harness.py` flags both as BLOCK.
 - The exfil guard is a **tripwire, not a sandbox**. For high-stakes
   work, also run the agent without ambient access to real secrets.
@@ -104,6 +104,10 @@ Copilot (`.github/hooks/`) in addition to Claude.
   `./manage.sh memory anchor` writes the head hash to a git note; push
   `refs/notes/substrate-memory` to a protected remote so a local
   rewrite is detectable (`./manage.sh memory verify --anchor`).
+  Anchor and push from a persistent clone: the chain is not committed,
+  so only the clone that wrote the anchor can verify it later. A cloud
+  session's container is reclaimed afterwards, and the release gate
+  does not publish from one (`./manage.sh memory ephemeral`).
 
 ---
 
@@ -119,10 +123,10 @@ Copilot (`.github/hooks/`) in addition to Claude.
 - **Branch protection:** `scripts/setup_branch_protection.sh --plan` prints the
   exact strict-mode GitHub settings to enable; `--check` (in CI, admin token)
   verifies them via `check_github_governance.py --require`. There is no
-  auto-apply — enabling protection is your explicit action.
+  auto-apply; enabling protection is your explicit action.
 - **Sandbox (egress containment, opt-in):** set `SUBSTRATE_SANDBOX=1` in
-  `.substrate/config` and run agent commands through `scripts/sandbox_exec.sh`
-  — it composes the OS sandbox (macOS `sandbox-exec` / Linux `bwrap`) to **deny
+  `.substrate/config` and run agent commands through `scripts/sandbox_exec.sh`,
+  which composes the OS sandbox (macOS `sandbox-exec` / Linux `bwrap`) to **deny
   network egress at the kernel**, turning exfil from a *detected* tripwire into
   a *contained* one. Fail-closed: refuses (exit 3) if no OS sandbox is present
   rather than running unsandboxed. macOS + Linux only (no Windows). To enforce
@@ -130,7 +134,7 @@ Copilot (`.github/hooks/`) in addition to Claude.
   agent itself under it). `./manage.sh go-live` shows whether it's active.
 - **Reserved namespace:** in strict mode `scripts/` is **substrate-owned** and
   frozen by the trusted-base guard. Put PROJECT scripts in `tools/`, `bin/`, or
-  `project-scripts/` — a project file under `scripts/` will trip the freeze.
+  `project-scripts/`; a project file under `scripts/` will trip the freeze.
 
 ## Optional: completion gate (v3.8.3, default OFF)
 
@@ -141,7 +145,7 @@ warning at Stop telling it to run the self-audit skill and record it
 `SUBSTRATE_COMPLETION_GATE=1`, or repo-wide with `COMPLETION_GATE="1"`
 in `.substrate/config` (env `=0` is the kill-switch either way).
 Warning-only in this release; a strict blocking mode ships only after
-the warn mode has been dogfooded. Fail-open by contract — it can
+the warn mode has been dogfooded. Fail-open by contract: it can
 never wedge a session.
 
 Note: upgrading to v3.8.3 changes `.claude/settings.json` (adds the
@@ -150,10 +154,10 @@ project hooks.
 
 ## After all three are done
 
-The substrate is fully active:
-- **Local**: pre-commit hooks fire on every `git commit`.
-- **CI**: branch protection requires CI green; CI re-runs pre-commit + pip-audit.
-- **Updates**: dependabot opens weekly PRs; CI catches CVEs.
+The substrate is fully active. Pre-commit hooks fire on every
+`git commit`. Branch protection requires CI to be green, and CI re-runs
+pre-commit and pip-audit. Dependabot opens weekly PRs, and CI catches the
+CVEs in them.
 
 First product work can start now. Read `AGENTS.md` before composing
 any non-trivial commit.

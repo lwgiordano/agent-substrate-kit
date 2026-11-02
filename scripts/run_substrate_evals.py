@@ -614,8 +614,15 @@ def t_handoff_injection(markdown_only: bool):
         return (not leaked), ("clean" if not leaked else "LEAKED")
 
 
+_HOST_EPHEMERAL_SIGNALS = ("CLAUDE_CODE_REMOTE", "SUBSTRATE_EPHEMERAL_CLONE")
+
+
 def _ml_env(td):
-    return {**os.environ, "SUBSTRATE_PROJECT_DIR": str(td)}
+    """The fixture's environment. The host's ephemeral-clone signals are dropped:
+    on an ephemeral host the release gate skips publishing (ADR 0004), so a task
+    built around a REFUSED push would pass there without ever pushing."""
+    env = {k: v for k, v in os.environ.items() if k not in _HOST_EPHEMERAL_SIGNALS}
+    return {**env, "SUBSTRATE_PROJECT_DIR": str(td)}
 
 
 def t_memory_chain_rewrite_detected():

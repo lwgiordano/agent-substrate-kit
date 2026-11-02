@@ -3,6 +3,8 @@
 - Forces direct linters (no `uv run` venv creation — the v3.2 hang source).
 - Turns the hooks' usage log off (v3.11.0): the suite runs the hooks hundreds of
   times, and those runs are not the agent's work. Usage tests turn it back on.
+- Clears the ephemeral-clone signals (CLAUDE_CODE_REMOTE, SUBSTRATE_EPHEMERAL_CLONE)
+  so fixtures are persistent clones on every host; tests that need one set it.
 - Arms a faulthandler watchdog: if the whole session runs past 30 minutes,
   Python dumps every thread's traceback to .pytest_cache/watchdog-dump.txt and
   exits 1, so a hang is bounded AND diagnosable. The dump used to go to stderr,
@@ -49,6 +51,12 @@ def pytest_configure(config):
     global _watchdog_file
     os.environ.setdefault("SUBSTRATE_LINT_DIRECT", "1")
     os.environ["SUBSTRATE_USAGE_LOG"] = "0"
+    # The host's ephemeral-clone signals change what the release gate publishes and
+    # what the anchor verifier advises (ADR 0004). Fixtures are persistent clones
+    # unless a test says otherwise, so the suite behaves the same on a laptop and in
+    # a cloud session. Tests that need the signal pass it explicitly.
+    os.environ.pop("CLAUDE_CODE_REMOTE", None)
+    os.environ.pop("SUBSTRATE_EPHEMERAL_CLONE", None)
     # Watchdog over the WHOLE session. The full suite measured 602.85s on the
     # slow supported host in v3.8.32; 1800s keeps a finite bound with ~3x margin.
     # The dump file is best-effort; the watchdog is not. A dump path that cannot be

@@ -1,6 +1,6 @@
 ---
 purpose: Lessons with evidence, the record the chain attests, outcome labels, and recall.
-last_human_reviewed: 2026-10-31
+last_human_reviewed: 2026-11-02
 covers:
   - scripts/check_lessons.py
   - scripts/recall.py
@@ -185,6 +185,6 @@ runtime state and stay out of the fingerprint even without a `.gitignore` line. 
 not protection against concurrent same-user rewriting (ADR 0002).
 
 `check_knowledge_narrative.py` warns (it never blocks) when a knowledge doc
-narrates release history — past-tense change verbs, version stamps, audit-round
-references — instead of stating the current contract. Narrative belongs in
-HISTORY, postmortems, and ADRs.
+narrates release history (past-tense change verbs, version stamps, audit-round
+references) instead of stating the current contract. Narrative belongs in
+HISTORY and postmortems, and design reasoning in ADRs.

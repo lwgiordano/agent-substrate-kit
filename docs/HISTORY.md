@@ -509,3 +509,10 @@ This file is `merge=union` in `.gitattributes` so concurrent branch entries comb
 **Knowledge:** A local file that an agent will read back is an input channel even when only local processes can write it: the usage report first printed whatever rule text the log held, so a forged line could put instructions in front of the agent reading it. The report now shows only rule names a hook can write, the policy's reasons read from the policy itself, and anything else reads as unrecognized. Extending a line that a registered guard anchors on breaks that guard; the pre-push suite caught two, and they were re-anchored to the new text and proven again.
 **Outcome:** shipped-green
 
+## 2026-11-02T16:54:49Z — NO_SESSION — 2d989f86330e26475134351fb515b18b0ffbaee6
+**Summary:** v3.11.1: a Claude Code cloud session keeps its memory anchor local and says there is nothing to publish, so no anchor outlives the only log it fits; strict still requires publication, and a mismatch now names both possible causes.
+**Files:** scripts/memory_log.py,scripts/release_gate.sh,scripts/run_substrate_evals.py,tests/conftest.py,tests/test_hook_scripts.py,tests/guards.json,docs/knowledge/06_release_distribution.md,docs/knowledge/08_memory_anchor.md,VERSION,README.md,BENCHMARK.md
+**Intent:** After v3.11.0 the operator asked what was left and whether it would add process; the recycled cloud container showed the published anchor reading as tampering, and the operator chose to fix the kit rather than remember not to publish.
+**Knowledge:** Advice a gate prints is part of its behavior: the release gate told a cloud session's operator to recreate the anchor on another clone, the operator did, and once the container was recycled every later clone read that anchor as a replaced history. The gate now asks memory_log whether this clone's log ends with its session and stops giving advice that cannot work there. The security audit caught that naming only the benign cause of a mismatch would excuse a real replacement, so both are named.
+**Outcome:** shipped-green
+

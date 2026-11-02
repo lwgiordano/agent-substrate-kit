@@ -1261,6 +1261,38 @@ def _has_origin() -> bool:
         return False
 
 
+def _ephemeral_clone() -> str | None:
+    """What makes this clone's memory log end with its session, or None (v3.11.1).
+
+    The log is Git-ignored local state, so it lives exactly as long as the clone
+    that holds it. A Claude Code cloud session (CLAUDE_CODE_REMOTE=true) runs in a
+    container that is reclaimed when the session ends, and the log goes with it:
+    an anchor published from there points at a log no clone will ever hold again,
+    so every later clone that fetches it reads a replaced history. This only
+    changes what the anchor messages and the release gate SAY and whether a base
+    tier gate publishes; no verdict depends on it. SUBSTRATE_EPHEMERAL_CLONE=1 or
+    0 states it outright, for other hosts and for tests.
+    """
+    flag = os.environ.get("SUBSTRATE_EPHEMERAL_CLONE", "").strip()
+    if flag in ("0", "1"):
+        return "marked short-lived by SUBSTRATE_EPHEMERAL_CLONE=1" if flag == "1" else None
+    if os.environ.get("CLAUDE_CODE_REMOTE", "").strip().lower() == "true":
+        return "a Claude Code cloud session"
+    return None
+
+
+def ephemeral() -> int:
+    """`memory_log.py ephemeral`: rc 0 and the reason when this clone's log ends with
+    its session, rc 1 when it persists. The release gate asks here, so the rule is
+    written once."""
+    why = _ephemeral_clone()
+    if why is None:
+        print("memory-log: this clone keeps its memory log between sessions")
+        return 1
+    print(f"memory-log: this clone's memory log ends with its session ({why})")
+    return 0
+
+
 def _diagnose_unreachable_remote() -> None:
     """Say WHY the remote could not be reached when user config is the reason.
 
@@ -1381,6 +1413,11 @@ def verify(check_anchor: bool = False) -> int:
         # push the note to a protected remote; that is the documented limit.
         found = _nearest_anchor()
         if found is None:
+            if _ephemeral_clone():
+                print(f"memory-log: this clone is {_ephemeral_clone()}: its log started "
+                      "empty when the session did, and git notes are not cloned, so an "
+                      "anchor from an earlier session cannot be found here.",
+                      file=sys.stderr)
             print("memory-log: NO ANCHOR in the ancestry of HEAD — the chain cannot be "
                   "tied to any known-good state. Establish one with "
                   "`memory_log.py anchor` (a release does this after its gate passes).",
@@ -1392,6 +1429,19 @@ def verify(check_anchor: bool = False) -> int:
             print(f"memory-log: ANCHOR MISMATCH — the head anchored at commit {commit[:12]} "
                   f"({anchored[:12]}) is not in the current chain: history was replaced "
                   "or truncated past the anchor", file=sys.stderr)
+            # Same verdict either way: a clone that never held the anchored log looks
+            # exactly like one whose log was wiped. Say which cause fits (v3.11.1).
+            if _ephemeral_clone():
+                print(f"  This clone is {_ephemeral_clone()}, whose log started empty when "
+                      "the session did. If an earlier session wrote that anchor, this clone "
+                      "never held the anchored log, and that alone produces this mismatch. "
+                      "If this session wrote it, the log was replaced.",
+                      file=sys.stderr)
+            else:
+                print("  A clone that never held the anchored log (a fresh clone, or one "
+                      "whose anchor another clone published) reads the same way. Only in "
+                      "the clone that wrote the anchor does this mean the log was replaced.",
+                      file=sys.stderr)
             return 1
         at = next((ev.get("seq") for ev in events if ev.get("hash") == anchored), "genesis")
         # LOCAL-ONLY vs REMOTE-CONFIRMED (v3.8.52, round-34 P1). A git note is
@@ -1435,22 +1485,25 @@ def verify(check_anchor: bool = False) -> int:
                   "`git push origin refs/notes/substrate-memory` FROM THIS CLONE (a "
                   "normal push/clone does not carry refs/notes/*, so no other clone "
                   "can publish it for you).", file=sys.stderr)
+            if _ephemeral_clone():
+                print(f"  This clone is {_ephemeral_clone()}: its log is deleted when the "
+                      "session ends, so an anchor published from it could not be verified "
+                      "afterwards. Run strict releases from a clone that keeps its log, "
+                      "such as your own computer.", file=sys.stderr)
             return 1
         if ahead:
             print(f"memory-log: chain OK + anchor LOCAL AHEAD of origin ({len(events)} "
                   f"events; anchored at commit {commit[:12]}, chain seq {at}) — origin "
                   f"still publishes {published[:12]}, which IS in this chain, so the "
                   "log descends from the published anchor; the newer note was not "
-                  "pushed. Publish FROM THIS CLONE: `git push origin "
-                  "refs/notes/substrate-memory`")
+                  "pushed. " + _publish_hint())
             return 0
         if _has_origin():
             print(f"memory-log: chain OK + anchor present LOCAL-ONLY ({len(events)} "
                   f"events; anchored at commit {commit[:12]}, chain seq {at}) — an "
                   "origin exists but does not publish it, so it bounds accident and a "
                   "single re-anchor, not an adversary with write access to "
-                  "refs/notes/. Publish FROM THIS CLONE: `git push origin "
-                  "refs/notes/substrate-memory`")
+                  "refs/notes/. " + _publish_hint())
             return 0
         print(f"memory-log: chain OK + anchor verified LOCAL (no remote) ({len(events)} "
               f"events; anchored at commit {commit[:12]}, chain seq {at}) — local is "
@@ -1459,6 +1512,17 @@ def verify(check_anchor: bool = False) -> int:
         return 0
     print(f"memory-log: chain OK ({len(events)} events)")
     return 0
+
+
+def _publish_hint() -> str:
+    """The closing advice of a base-tier anchor line. A clone whose log ends with its
+    session is told not to publish: the anchor would outlive the only log it fits."""
+    why = _ephemeral_clone()
+    if why:
+        return (f"Not published on purpose: this clone is {why}, and its log is deleted "
+                "when the session ends, so an anchor published from it could never be "
+                "verified afterwards. Nothing to do.")
+    return "Publish FROM THIS CLONE: `git push origin refs/notes/substrate-memory`"
 
 
 def tail(n: int) -> int:
@@ -1505,6 +1569,7 @@ def main(argv: list[str]) -> int:
     ap_tail = sub.add_parser("tail")
     ap_tail.add_argument("n", nargs="?", type=int, default=10)
     sub.add_parser("tasks")
+    sub.add_parser("ephemeral", help="rc 0 when this clone's log ends with its session")
     ap_rec = sub.add_parser("record", help="record unrecorded entries of an append-only file")
     ap_rec.add_argument("file", choices=RECORD_FILES)
     ap_rp = sub.add_parser("release-pass", help="(release gate only) record gates passed")
@@ -1548,6 +1613,8 @@ def main(argv: list[str]) -> int:
         return tail(a.n)
     if a.cmd == "tasks":
         return tasks()
+    if a.cmd == "ephemeral":
+        return ephemeral()
     ap.print_help()
     return 0
 

@@ -42,7 +42,9 @@ bash /path/to/agent_substrate_kit_v3/bootstrap.sh --profile standard --lang auto
 | 4-field bug-fix commit protocol + postmortem-per-bugfix hooks | — | — | yes |
 | Extras (calibration, stale-phrases, license headers) | — | — | yes |
 
-## Current status (v3.11.0)
+## Current status (v3.11.1)
+
+**v3.11.1** — a cloud session no longer asks you to publish a memory anchor nobody can check later. The memory log lives only as long as the copy of the repository that holds it, and a Claude Code cloud session's copy is deleted when the session ends. Following the release gate's old advice published an anchor for a log that then disappeared, and every later copy that fetched it read "history was replaced": a false tamper alarm. In a cloud session the gate now keeps the anchor local and says there is nothing to do. Strict still requires a published anchor and still fails without one, but it tells you to release from a copy that keeps its log instead of recreating the note elsewhere. `verify --anchor` keeps every result; a mismatch now names both possible causes.
 
 **v3.11.0** — the hooks record what they decide, and `./manage.sh usage` reports it. Each decision of the exfil guard, lint-on-write, the completion gate and session start appends one line to the Git-ignored `.substrate/usage/events.jsonl`: the outcome and the fixed name of the rule that decided, never the command, a path or file contents. The report shows blocks and overrides per rule, kept apart (an override where a rule would have blocked is someone calling that block a false positive), lint findings, the size of the injected session context, and lessons that are never injected. It changes nothing: pruning a rule or a lesson is still a reviewed change (ADR 0003). Recording cannot change a verdict, skips a linked or shared log file, is off with `SUBSTRATE_USAGE_LOG=0`, and is off for the test suite, evals and hook smoke. The Copilot adapter does not record yet.
 

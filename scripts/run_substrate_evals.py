@@ -2207,6 +2207,9 @@ def main(argv) -> int:
     # The evals run the hooks on attack fixtures; none of that is the agent's own
     # work, so it stays out of the usage log the operator reads (v3.11.0).
     os.environ["SUBSTRATE_USAGE_LOG"] = "0"
+    # Same results in a cloud session as anywhere else (v3.11.1): CLAUDE_CODE_REMOTE
+    # changes what the anchor messages say, so the evals state the host outright.
+    os.environ["SUBSTRATE_EPHEMERAL_CLONE"] = "0"
 
     # --run-one <id>: run exactly ONE task in THIS process and emit its record.
     # Lets a constrained runtime isolate any single (heavy) task in a fresh

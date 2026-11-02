@@ -209,9 +209,28 @@ if [ "$_MEMORY_IN_RELEASE" = "1" ]; then
     echo "release-pass: HEAD has no commit — nothing to record" >&2
   fi
   echo "==> Memory anchor"; run_py scripts/memory_log.py anchor
-  if git remote | grep -qx origin; then
+  # A clone whose Git-ignored log ends with its session (a Claude Code cloud
+  # session) must not publish (v3.11.1): the anchor would outlive the only log it
+  # fits, and every later clone that fetches it would read a replaced history.
+  # memory_log decides, so the rule is written once. Base tiers do not require
+  # publication, so they skip it. Strict still requires it and still tries, but is
+  # never told to recreate the note on another clone. Deciding from the
+  # start-of-run profile is safe here: a config raised to strict mid-run still
+  # fails the end-state check below, and any config change fails the gate.
+  _ephemeral_log=0
+  run_py scripts/memory_log.py ephemeral >/dev/null 2>&1 && _ephemeral_log=1
+  if [ "$_ephemeral_log" = "1" ] && [ "${SUBSTRATE_PROFILE:-}" != "strict" ]; then
+    echo "memory-anchor: not published — this clone's memory log is deleted when its session"
+    echo "  ends (a cloud session), so an anchor published from it could never be verified"
+    echo "  afterwards. The anchor stays local to this session. Nothing to do."
+  elif git remote | grep -qx origin; then
     if git push --quiet origin refs/notes/substrate-memory 2>/dev/null; then
       echo "memory-anchor: published refs/notes/substrate-memory to origin"
+    elif [ "$_ephemeral_log" = "1" ]; then
+      echo "memory-anchor: WARNING — could not push refs/notes/substrate-memory to origin." >&2
+      echo "  Do not recreate it on another clone: this clone's memory log is deleted when" >&2
+      echo "  its session ends, so that anchor could never be verified. Strict needs a" >&2
+      echo "  published anchor, so run strict releases from a clone that keeps its log." >&2
     else
       _anchor_commit="$(git rev-parse HEAD)"
       _anchor_payload="$(git notes --ref=substrate-memory show "$_anchor_commit" 2>/dev/null | head -1)"

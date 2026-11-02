@@ -8,7 +8,7 @@ asserts:
   - scripts/session_handoff.py::_rejected_block
   - scripts/session_handoff.py::(?<!\w-)
   - scripts/append_history.py::def _withheld_at_session_start
-last_human_reviewed: 2026-10-31
+last_human_reviewed: 2026-11-02
 covers:
   - manage.sh
   - scripts/_doc_common.py

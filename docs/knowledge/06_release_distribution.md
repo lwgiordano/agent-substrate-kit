@@ -1,6 +1,6 @@
 ---
 purpose: Release packaging, signing, manifests, and artifact verification.
-last_human_reviewed: 2026-10-31
+last_human_reviewed: 2026-11-02
 covers:
   - manage.sh
   - package_release.sh
@@ -127,7 +127,11 @@ exactly that, which was impossible anywhere but the producing clone. When the
 push is refused (no remote, no permission, an egress policy) the gate prints the
 note payload and the `git notes --ref=substrate-memory add -f -m` command that
 recreates it on any clone, because the payload travels in text where the ref
-does not.
+does not. A clone whose Git-ignored log ends with its session (a Claude Code
+cloud session, or `SUBSTRATE_EPHEMERAL_CLONE=1`) is the exception: an anchor
+published from it would outlive the only log it fits. There a base-tier gate
+keeps the anchor local and says so, and a strict gate still tries to publish but
+never suggests recreating the note on another clone.
 
 The release gate runs deterministic validators, project tests, the guard proof
 (`prove`, when `tests/guards.json` exists), policy evals, and artifact

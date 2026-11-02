@@ -1,6 +1,6 @@
 ---
 purpose: The memory trust anchor — monotonic advance, remote confirmation, and limits.
-last_human_reviewed: 2026-10-28
+last_human_reviewed: 2026-11-02
 covers:
   - scripts/memory_log.py
   - scripts/release_gate.sh
@@ -93,6 +93,21 @@ it — delegating that step is an impossible instruction. The release gate pushe
 the note itself and, when refused, prints the payload plus the `git notes
 --ref=substrate-memory add -f -m` command that recreates it anywhere: the
 payload travels in text where the ref does not.
+
+A clone that does not keep its log cannot produce a useful anchor. The log is
+Git-ignored, so it lives as long as its clone, and a Claude Code cloud session's
+container is reclaimed when the session ends. An anchor published from there
+points at a log no clone will hold again, so every later clone that fetches it
+reads `ANCHOR MISMATCH`. `memory_log.py ephemeral` decides: `CLAUDE_CODE_REMOTE=true`,
+or `SUBSTRATE_EPHEMERAL_CLONE=1` or `0` stated outright, which the test suite and
+evals pin so they read the same everywhere. Only messages and base-tier
+publication depend on it. A base-tier gate there keeps the anchor local and its
+end-state line says nothing needs publishing; strict still tries to publish,
+fails as before when it cannot, and advises releasing from a clone that keeps
+its log instead of recreating the note elsewhere. `verify --anchor` keeps every
+verdict. A mismatch names both causes, because a clone that never held the
+anchored log looks exactly like one whose log was wiped: only whoever knows
+which session wrote the anchor can tell them apart.
 
 The gate records its `release-pass` event BEFORE writing the note, so the
 anchor covers that evidence. The event's `clean_start` needs both the gate's

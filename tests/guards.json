@@ -1844,6 +1844,58 @@
         "tests/test_project_status.py::test_release_package_really_leaves_out_local_state"
       ],
       "why": "a maintainer's own usage log would ship inside the release zip"
+    },
+    {
+      "id": "cloud-session-gate-keeps-the-anchor-local",
+      "file": "scripts/release_gate.sh",
+      "find": "  if [ \"$_ephemeral_log\" = \"1\" ] && [ \"${SUBSTRATE_PROFILE:-}\" != \"strict\" ]; then\n",
+      "replace": "  if false; then\n",
+      "tests": [
+        "tests/test_hook_scripts.py::test_release_gate_in_a_cloud_session_does_not_publish_the_anchor",
+        "tests/test_hook_scripts.py::test_release_gate_in_a_cloud_session_raised_to_strict_mid_run_still_fails"
+      ],
+      "why": "an anchor published from a cloud session outlives its log and reads as tampering to every later clone"
+    },
+    {
+      "id": "cloud-session-strict-gate-never-suggests-another-clone",
+      "file": "scripts/release_gate.sh",
+      "find": "    elif [ \"$_ephemeral_log\" = \"1\" ]; then\n",
+      "replace": "    elif false; then\n",
+      "tests": [
+        "tests/test_hook_scripts.py::test_release_gate_in_a_cloud_session_strict_never_suggests_another_clone"
+      ],
+      "why": "recreating a cloud session's note elsewhere publishes an anchor nobody can verify"
+    },
+    {
+      "id": "cloud-session-anchor-line-does-not-ask-to-publish",
+      "file": "scripts/memory_log.py",
+      "find": "    if why:\n        return (f\"Not published on purpose",
+      "replace": "    if False:\n        return (f\"Not published on purpose",
+      "tests": [
+        "tests/test_hook_scripts.py::test_release_gate_in_a_cloud_session_does_not_publish_the_anchor"
+      ],
+      "why": "the end-state line would tell a cloud session to publish what the gate kept local"
+    },
+    {
+      "id": "anchor-mismatch-names-the-cause-that-is-not-tampering",
+      "file": "scripts/memory_log.py",
+      "find": "                      \"If this session wrote it, the log was replaced.\",\n",
+      "replace": "                      \"\",\n",
+      "tests": [
+        "tests/test_hook_scripts.py::test_memory_anchor_mismatch_explains_a_clone_that_never_held_the_log"
+      ],
+      "why": "a fresh cloud session read the previous session's anchor as an attack, and stating the benign cause alone would excuse a real replacement"
+    },
+    {
+      "id": "ephemeral-override-wins-over-the-cloud-signal",
+      "file": "scripts/memory_log.py",
+      "find": "    if flag in (\"0\", \"1\"):\n        return \"marked short-lived by SUBSTRATE_EPHEMERAL_CLONE=1\" if flag == \"1\" else None\n",
+      "replace": "    if flag == \"1\":\n        return \"marked short-lived by SUBSTRATE_EPHEMERAL_CLONE=1\"\n",
+      "tests": [
+        "tests/test_hook_scripts.py::test_memory_log_ephemeral_command_reads_the_cloud_flag",
+        "tests/test_hook_scripts.py::test_release_gate_outside_a_cloud_session_still_publishes"
+      ],
+      "why": "a persistent clone could not opt out, and the suite would read differently in the cloud"
     }
   ]
 }

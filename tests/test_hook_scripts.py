@@ -13113,6 +13113,138 @@ def test_release_gate_fails_when_the_fresh_anchor_cannot_be_published(tmp_path) 
         "the failure must be the unpublished anchor, not an unrelated error: " + r.stdout + r.stderr
 
 
+def _memlog(td, extra, *args):
+    """memory_log.py in an anchor fixture with extra environment, e.g. the cloud flag."""
+    env = {**os.environ, "SUBSTRATE_PROJECT_DIR": str(td), **extra}
+    return subprocess.run([sys.executable, "-I", str(td / "scripts" / "memory_log.py"), *args],
+                          cwd=str(td), env=env, capture_output=True, text=True, timeout=20)
+
+
+def _refuse_notes(bare):
+    hook = bare / "hooks" / "pre-receive"
+    hook.write_text('#!/bin/sh\nwhile read _o _n ref; do\n'
+                    '  case "$ref" in refs/notes/*) exit 1;; esac\ndone\nexit 0\n', encoding="utf-8")
+    hook.chmod(0o755)
+
+
+def _gate_run(td, extra, profile_line="SUBSTRATE_PROFILE=standard"):
+    return subprocess.run(["bash", str(_gate_tail(td, profile_line=profile_line))], cwd=str(td),
+                          env={**os.environ, "SUBSTRATE_PROJECT_DIR": str(td), **extra},
+                          capture_output=True, text=True, timeout=120)
+
+
+def _origin_note_ref(bare):
+    return subprocess.run(["git", "rev-parse", "-q", "--verify", "refs/notes/substrate-memory"],
+                          cwd=str(bare), capture_output=True, text=True, timeout=20).stdout.strip()
+
+
+def test_memory_log_ephemeral_command_reads_the_cloud_flag(tmp_path) -> None:
+    """v3.11.1: one place decides whether this clone's log ends with its session.
+    The explicit override wins over the cloud signal in both directions."""
+    td, g, m = _anchor_repo(tmp_path)
+    clear = {"SUBSTRATE_EPHEMERAL_CLONE": "", "CLAUDE_CODE_REMOTE": ""}
+    assert _memlog(td, clear, "ephemeral").returncode == 1
+    assert _memlog(td, {**clear, "CLAUDE_CODE_REMOTE": "true"}, "ephemeral").returncode == 0
+    assert _memlog(td, {"SUBSTRATE_EPHEMERAL_CLONE": "0", "CLAUDE_CODE_REMOTE": "true"},
+                   "ephemeral").returncode == 1
+    r = _memlog(td, {**clear, "SUBSTRATE_EPHEMERAL_CLONE": "1"}, "ephemeral")
+    assert r.returncode == 0 and "ends with its session" in r.stdout
+
+
+def test_release_gate_in_a_cloud_session_does_not_publish_the_anchor(tmp_path) -> None:
+    """v3.11.1: an anchor published from a cloud session outlives the only log it fits,
+    so every later clone that fetched it read a replaced history (lived through after
+    v3.10.8). A base-tier gate there keeps the anchor local, says so, and passes;
+    nobody is asked to recreate the note somewhere else."""
+    td, g, m, bare, commit = _published_anchor_repo(tmp_path)
+    m("append", "--type", "note", "--message", "two")
+    before = _origin_note_ref(bare)
+    r = _gate_run(td, {"SUBSTRATE_EPHEMERAL_CLONE": "", "CLAUDE_CODE_REMOTE": "true"})
+    out = r.stdout + r.stderr
+    assert r.returncode == 0, out
+    assert _origin_note_ref(bare) == before, "a cloud session must not publish its anchor"
+    assert "memory-anchor: not published" in r.stdout
+    assert "Not published on purpose" in r.stdout, "the end-state line must not ask to publish"
+    assert "notes --ref=substrate-memory add" not in out and "Publish FROM THIS CLONE" not in out
+
+
+def test_release_gate_in_a_cloud_session_strict_never_suggests_another_clone(tmp_path) -> None:
+    """Strict still requires a published anchor, so it still tries and still fails when
+    the push is refused, but the advice changes: recreating the note elsewhere would
+    publish an anchor that can never be verified."""
+    td, g, m, bare, commit = _published_anchor_repo(tmp_path)
+    (td / ".substrate" / "config").write_text('SUBSTRATE_PROFILE="strict"\n', encoding="utf-8")
+    _refuse_notes(bare)
+    m("append", "--type", "note", "--message", "two")
+    r = _gate_run(td, {"SUBSTRATE_EPHEMERAL_CLONE": "1"}, profile_line="SUBSTRATE_PROFILE=strict")
+    assert r.returncode != 0, r.stdout + r.stderr
+    assert "ANCHOR NOT PUBLISHED" in r.stderr
+    assert "Do not recreate it on another clone" in r.stderr
+    assert "notes --ref=substrate-memory add" not in r.stderr
+    assert "Run strict releases from a clone that keeps its log" in r.stderr
+
+
+def test_release_gate_in_a_cloud_session_raised_to_strict_mid_run_still_fails(tmp_path) -> None:
+    """Security audit: the skip reads the profile the gate STARTED with, so a config
+    raised to strict mid-run skips publication. The end-state check reads the live
+    config and must still fail the release, so the skip can never leave strict green."""
+    td, g, m, bare, commit = _published_anchor_repo(tmp_path)
+    m("append", "--type", "note", "--message", "two")
+    (td / ".substrate" / "config").write_text('SUBSTRATE_PROFILE="strict"\n', encoding="utf-8")
+    r = _gate_run(td, {"SUBSTRATE_EPHEMERAL_CLONE": "1"})  # shell still says standard
+    assert r.returncode != 0, r.stdout + r.stderr
+    assert "memory-anchor: not published" in r.stdout
+    assert "ANCHOR NOT PUBLISHED" in r.stderr
+    assert "release-gate: passed" not in r.stdout
+
+
+def test_release_gate_in_a_cloud_session_strict_publishes_when_it_can(tmp_path) -> None:
+    """Strict still requires publication, so where the push is allowed it publishes and
+    passes: the cloud flag changes advice, never what strict demands."""
+    td, g, m, bare, commit = _published_anchor_repo(tmp_path)
+    (td / ".substrate" / "config").write_text('SUBSTRATE_PROFILE="strict"\n', encoding="utf-8")
+    m("append", "--type", "note", "--message", "two")
+    before = _origin_note_ref(bare)
+    r = _gate_run(td, {"SUBSTRATE_EPHEMERAL_CLONE": "1"}, profile_line="SUBSTRATE_PROFILE=strict")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "published refs/notes/substrate-memory to origin" in r.stdout
+    assert _origin_note_ref(bare) != before
+
+
+def test_release_gate_outside_a_cloud_session_still_publishes(tmp_path) -> None:
+    """The override wins over the cloud signal: a persistent clone that happens to
+    carry CLAUDE_CODE_REMOTE but says SUBSTRATE_EPHEMERAL_CLONE=0 publishes as before."""
+    td, g, m, bare, commit = _published_anchor_repo(tmp_path)
+    m("append", "--type", "note", "--message", "two")
+    before = _origin_note_ref(bare)
+    r = _gate_run(td, {"SUBSTRATE_EPHEMERAL_CLONE": "0", "CLAUDE_CODE_REMOTE": "true"})
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "published refs/notes/substrate-memory to origin" in r.stdout
+    assert _origin_note_ref(bare) != before
+
+
+def test_memory_anchor_mismatch_explains_a_clone_that_never_held_the_log(tmp_path) -> None:
+    """The verdict stays MISMATCH and rc 1: a clone that never held the anchored log
+    looks exactly like one whose log was wiped. What changes is that the message
+    names the cause that is not tampering, so nobody reads a fresh clone as an attack."""
+    td, g, m = _anchor_repo(tmp_path)
+    m("append", "--type", "note", "--message", "one")
+    if m("anchor").returncode != 0:
+        pytest.skip("git notes unavailable on this host")
+    _events_path(td).unlink()
+    m("append", "--type", "note", "--message", "fresh session")
+    here = _memlog(td, {"SUBSTRATE_EPHEMERAL_CLONE": "0"}, "verify", "--anchor")
+    assert here.returncode == 1 and "ANCHOR MISMATCH" in here.stderr
+    assert "A clone that never held the anchored log" in here.stderr
+    cloud = _memlog(td, {"SUBSTRATE_EPHEMERAL_CLONE": "1"}, "verify", "--anchor")
+    assert cloud.returncode == 1 and "ANCHOR MISMATCH" in cloud.stderr
+    # Security audit: both causes are named, because a session whose own log was
+    # replaced after it anchored reads exactly like a fresh one.
+    assert "If an earlier session wrote that anchor" in cloud.stderr
+    assert "If this session wrote it, the log was replaced" in cloud.stderr
+    assert "not evidence of tampering" not in cloud.stderr
+
+
 def _gate_tail(td, profile_line="SUBSTRATE_PROFILE=standard", start_fingerprint=None):
     """The REAL tail of scripts/release_gate.sh, split at its own marker comment and
     otherwise unmodified, wrapped with the two definitions it inherits from the top

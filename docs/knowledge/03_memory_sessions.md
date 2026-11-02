@@ -1,5 +1,5 @@
 ---
-purpose: Tamper-evident memory, session restore, completion, and append-only logs.
+purpose: Tamper-evident memory and session restore, plus the completion gate and append-only logs.
 asserts:
   - scripts/memory_log.py::_raw_tracked_hash
   - scripts/memory_log.py::_write_tree_oid
@@ -8,7 +8,7 @@ asserts:
   - scripts/session_handoff.py::_rejected_block
   - scripts/session_handoff.py::(?<!\w-)
   - scripts/append_history.py::def _withheld_at_session_start
-last_human_reviewed: 2026-10-31
+last_human_reviewed: 2026-11-02
 covers:
   - manage.sh
   - scripts/_doc_common.py
@@ -27,11 +27,12 @@ covers:
 
 The durable event log is hash-chained. Verification checks sequence, previous
 hash, event hash, and any optional Git-note anchor. An absent anchor is distinct
-from a broken or mismatched anchor; go-live reports those states separately.
+from a broken or mismatched one, and both from another clone's anchor; go-live
+reports those states separately.
 
-The anchor itself — what `verify --anchor` requires, why advancing it is
+The anchor itself (what `verify --anchor` requires, why advancing it is
 monotonic, where remote confirmation comes from, the reported tiers, and how a
-release publishes it — has its own doc: [the memory trust
+release publishes it) has its own doc: [the memory trust
 anchor](08_memory_anchor.md). It moved there in v3.8.54 because the anchor
 material had grown to half of this file and this file to the top of its size
 budget, and a doc that cannot take its next paragraph is one nobody updates.
@@ -45,7 +46,7 @@ the index, and raw filesystem identity and content for tracked paths. Length
 prefixing keeps the hash encoding unambiguous.
 
 Git routing and configuration variables are stripped. Files are read directly
-with lstat identity, mode, link target, device, inode, and link count. Escaping
+with lstat identity: mode, link target, device and inode numbers, link count. Escaping
 ancestors, untracked symlink targets, unreadable state, and tracked gitlinks fail
 closed. Check tools must be regular tracked files inside the repository; a
 symlinked or escaping tool is not executed. The second signature includes check
@@ -71,11 +72,11 @@ restore can never be redirected to pull an outside file into context.
 
 Restore sanitizes untrusted text and enforces separate budgets, summing to the
 unchanged 6000-char ceiling, for: structured handoff content; the INTENT.md
-Objectives (numbered items, lead sentence each — the operator's goals survive
+Objectives (numbered items, lead sentence each, so the operator's goals survive
 compaction); the last five HISTORY summaries; the lead sentence of each recent
 entry's **Knowledge:** field, tagged with its sha (the lesson, not the
-narrative); and the newest rejected approaches. `_safe_history_line` strips
-selected control characters, markup, and role-like prefixes and cuts at a word
+narrative); and the newest rejected approaches. `_safe_history_line` removes
+role-like prefixes and selected control characters and markup, then cuts at a word
 boundary; it is not a terminal-control filter. A summary that names a shell
 tool as a word of its own (`curl`, `bash`, `python3`, `node`, also by path or
 with a version suffix), or contains `$(` or a backtick, is withheld whole. A
@@ -91,23 +92,23 @@ scan and at most 256 KiB of any input is read, so hostile text cannot make the
 filter slow. Task reports additionally use
 the bus display sanitizer for terminal controls. The new
 blocks drop a stripped line rather than spend budget on a marker. Every block
-fits newest-first — a blind slice cut the newest entry, the one most needed.
+fits newest-first: a blind slice cut the newest entry, the one most needed.
 
 ## Append-only coordination logs
 
 Each appended entry is also recorded in the memory chain, so a later edit is a
 `RECORD MISMATCH`; outcome labels and lessons are in
-[lessons, records, and recall](10_lessons_recall.md).
+[the lessons and records doc](10_lessons_recall.md).
 
 HISTORY and REJECTED share `_doc_common.locked_atomic_append`. It takes a bounded,
 nonblocking exclusive lock on the parent directory, rereads under the lock,
-writes a same-directory temporary file, and replaces the leaf before unlocking.
+writes a same-directory temporary file, and replaces the leaf before releasing the lock.
 Directory locking survives target inode replacement; target-inode locking would
 not. Replacement preserves the no-write-through-symlink-or-hard-link property
 that direct append would lose, but the reread of existing content happens BEFORE
 the replace, so the target leaf itself is guarded first: `refuse_linked_leaf`
-rejects an unsafe leaf — symlink, extra links (`st_nlink > 1`), or non-regular
-type (a FIFO would otherwise block the read forever) — before any read.
+rejects an unsafe leaf (symlink, extra links (`st_nlink > 1`), or non-regular
+type (a FIFO would otherwise block the read forever) before any read.
 
 Guards that run before a blocking wait have not run. Containment is therefore
 re-validated AFTER the directory lock is acquired, and every post-lock operation
@@ -121,7 +122,7 @@ is the load-bearing part. It never resolves a multi-component path: `open_dir_ch
 opens the ROOT once and descends ONE COMPONENT AT A TIME with
 `O_DIRECTORY|O_NOFOLLOW` and `dir_fd=`, then the temp file is created, written and
 `os.replace`d entirely through that fd using basenames. A dev/ino re-validation
-after a whole-path open cannot work — by the time it runs the kernel has already
+after a whole-path open cannot work: by the time it runs the kernel has already
 followed a swapped intermediate ancestor and the comparison approves the rerouted
 directory against itself. Descending component by component removes the window
 instead of checking for it, which makes containment a property of how the work is
@@ -136,13 +137,13 @@ same applies to reads, which return None rather than detached bytes.
 
 `safe_mkdir` completes the set. A raw `mkdir(parents=True)` followed by a guarded
 write creates the directory through a symlinked ancestor and only then gets
-refused — the mutation has already happened outside the repo. Building the mkdir
+refused, and the mutation has already happened outside the repo. Building the mkdir
 on the same descent means every component is created inside the tree or not at
 all. Order is part of the guard: the FIRST operation that touches the filesystem
 is the one that needs it.
 
 Where a guarded stat is followed by an open, the opened fd is re-verified against
-the inode the stat approved — statting a path and then opening it by name is
+the inode the stat approved: statting a path and then opening it by name is
 check-then-use however well the stat is guarded. The memory chain's own signature
 hasher reads every tracked file through the guarded reader for exactly this
 reason: an `lstat` reporting `S_ISREG` is passed by a hard link too, and a
@@ -150,15 +151,15 @@ signature computed over bytes the guard never approved is the one thing a chain
 must not produce.
 
 Readers carry the same guarantees as writers. `safe_read_text` is the read-side
-counterpart — containment, `O_NOFOLLOW | O_NONBLOCK`, `S_ISREG`, single link,
-bounded read, lossy decode — and `memory_log`, `append_history`'s session-token
+counterpart (containment, `O_NOFOLLOW | O_NONBLOCK`, `S_ISREG`, single link,
+bounded read, lossy decode), and `memory_log`, `append_history`'s session-token
 read, the session-handoff HISTORY/REJECTED tails, and the completion gate all
 route through it. Size policy is per-caller because truncation is not uniformly
 safe: the memory chain reads unbounded (a short read would verify as a clean
 chain), tail consumers pass `tail_bytes`, and small bounded files treat
 oversize as malformed. A refused read must stay distinguishable from an absent
 one: an absent memory log is a legitimately empty chain, while a present but
-linked or non-regular one BREAKs. Lossy decoding is not sanitization either —
+linked or non-regular one BREAKs. Lossy decoding is not sanitization either:
 the session token is charset-validated before it can enter a HISTORY header.
 Interrupted lock calls retry, invalid timeout overrides fall back to the
 default, and lock or I/O failure maps to each CLI's existing nonzero contract.
@@ -179,16 +180,16 @@ evidence counts as no evidence, so the gate nudges rather than going quiet.
 
 The structured handoff snapshot is untracked, agent-writable state whose
 writer is not authenticated, so restore validates and sanitizes every field at
-READ time. Validation is two layers: TYPE/SHAPE — scalar fields must be
+READ time. Validation is two layers: TYPE/SHAPE: scalar fields must be
 scalars, list fields lists of strings, and todo lines must match the exact
 grammar the capture hook writes; a forged wrong-typed field is discarded, and
 any shape the builder did not anticipate degrades to no-state rather than
-crashing the SessionStart hook. LEXICAL — every surviving string passes the
+crashing the SessionStart hook. LEXICAL: every surviving string passes the
 same chain HISTORY and REJECTED lines use.
 
 STATED LIMIT: these filters decide SHAPE, not INTENT. A hostile directive
 phrased as a grammatically valid, innocuous-looking task label passes any
-deterministic filter — semantic detection is not claimed and would violate the
+deterministic filter; semantic detection is not claimed and would violate the
 determinism the gates depend on. That residual is contained by FRAMING, not
 detection, and the framing must not re-arm the forgery: restored todos are
 injected as UNVERIFIED labels to confirm against git/HISTORY, and the recovery

@@ -209,7 +209,22 @@ if [ "$_MEMORY_IN_RELEASE" = "1" ]; then
     echo "release-pass: HEAD has no commit — nothing to record" >&2
   fi
   echo "==> Memory anchor"; run_py scripts/memory_log.py anchor
-  if git remote | grep -qx origin; then
+  # AN EPHEMERAL CLONE DOES NOT PUBLISH (ADR 0004). The chain this note names is
+  # Git-ignored local state, so this clone is the only place it will ever exist.
+  # On a host reclaimed after the session (a Claude Code cloud container) that
+  # clone is about to disappear: a published copy could never be verified again,
+  # and every clone that later fetched it would hold a different chain. The
+  # "recreate it anywhere" payload below sent operators to publish exactly that,
+  # observed for v3.10.8. The note stays local; strict, which requires a
+  # published anchor, then fails at the end-state check, which is the truth.
+  _ephemeral="$(run_py scripts/memory_log.py ephemeral 2>/dev/null)" || _ephemeral=""
+  if [ "${_ephemeral#ephemeral: }" != "$_ephemeral" ]; then
+    echo "memory-anchor: NOT publishing refs/notes/substrate-memory: ${_ephemeral#ephemeral: }." >&2
+    echo "  This clone will not outlive the session and the chain the anchor names" >&2
+    echo "  exists nowhere else, so nobody could verify a published copy later. The" >&2
+    echo "  anchor stays in this clone. Run releases that must publish one (strict)" >&2
+    echo "  from a persistent clone." >&2
+  elif git remote | grep -qx origin; then
     if git push --quiet origin refs/notes/substrate-memory 2>/dev/null; then
       echo "memory-anchor: published refs/notes/substrate-memory to origin"
     else
@@ -224,6 +239,8 @@ if [ "$_MEMORY_IN_RELEASE" = "1" ]; then
       echo "    git notes --ref=substrate-memory add -f -m '${_anchor_payload}' ${_anchor_commit}" >&2
       echo "    git push origin refs/notes/substrate-memory" >&2
       echo "  Confirm either way with: git ls-remote origin 'refs/notes/*'" >&2
+      echo "  Only this clone holds the chain the anchor names, so only this clone can" >&2
+      echo "  verify it later; other clones will report it unverifiable, not tampered." >&2
     fi
   else
     echo "memory-anchor: no 'origin' remote — the anchor is local-only by construction" >&2

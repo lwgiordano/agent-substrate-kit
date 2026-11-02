@@ -1,6 +1,6 @@
 ---
 purpose: Behavioral evals, the malicious and benign corpus, and assurance limits.
-last_human_reviewed: 2026-10-31
+last_human_reviewed: 2026-11-02
 covers:
   - manage.sh
   - extras/calibrate_diy_ultrareview.py
@@ -78,7 +78,7 @@ locations. A missing required fixture is an error, not a vacuous pass.
 
 Some invariants are cheap to state and impossible to keep by review alone.
 `check_raw_file_io.py` fails the gate when raw file I/O targets a path rooted at
-the process's own repo root — the set an attacker can pre-link, swap, or replace
+the process's own repo root: the set an attacker can pre-link, swap, or replace
 with a FIFO before the process runs. Detection is AST-based, so a string literal
 naming a primitive cannot false-positive, and paths rooted at a freshly created
 temporary directory inside a fixture are deliberately ignored: the code creates
@@ -87,7 +87,7 @@ would be the noise that gets a gate switched off. Resolution is scope-aware and 
 scanned: import bindings are a property of the module's shape, not of the order
 a walker reaches them, so a module-level import binds everywhere regardless of
 textual position while a function's own import binds only inside it. Learning
-bindings during the walk instead produced three separate escapes at once —
+bindings during the walk instead produced three separate escapes at once:
 use-before-import dropped, a nested import clobbering a sibling's alias, and a
 nested definition suppressing a star import.
 
@@ -113,7 +113,7 @@ file that is governed in the install but sits elsewhere in the source would
 otherwise never be audited. Findings and exemptions from a staging tree are
 namespaced by tree so they cannot share identity with a same-named file.
 
-The gate also runs in generated CONSUMERS — wired into the manage.sh and
+The gate also runs in generated CONSUMERS, wired into the manage.sh and
 pre-commit templates, with a derived parity test asserting that every validator
 the kit's own `check` runs reaches those templates. A gate that runs only in the
 repo that authored it protects nobody else, and a hand-maintained parity list
@@ -121,8 +121,8 @@ agrees with itself.
 
 Exemptions live in a small
 allowlist where every entry carries a reason AND an expected match COUNT, and an
-entry that no longer matches any call site — or that silently starts covering
-more sites than were reviewed — is itself a failure. An exemption is granted to a
+entry that no longer matches any call site (or that silently starts covering
+more sites than were reviewed) is itself a failure. An exemption is granted to a
 call site a human actually read, not to a shape. Reviewed openat-style component
 walks can also consume an otherwise unresolved single-component call through the
 same allowlist accounting, so intentional helper internals are not left as
@@ -141,7 +141,7 @@ covers the gate that reads forged evidence, not only the gate that writes it.
 
 A NONZERO exit is not evidence of the failure a task means: by exit code alone, a
 missing file, a typo, or an unbound variable scores as a block. Two release-gate
-tasks did exactly that — one referencing a variable defined above its split, one
+tasks did exactly that, one referencing a variable defined above its split, one
 running a script never staged. Assert the REASON the refusal prints. The sandbox
 containment task runs a positive control first and accepts only its probe's own
 exit code: a backend installed but unable to execute code scored as containment.
@@ -171,9 +171,12 @@ test this.
 
 A task that SKIPS has left the denominator. Skips exist for absent backends, so a
 task whose setup stops reproducing its own baseline reports exactly as a missing
-sandbox does and measures nothing without failing — which happened when narrowing
+sandbox does and measures nothing without failing, which happened when narrowing
 the anchor-conflict semantics turned one setup into a non-conflict. Read the skip
-lines on any release that changes a semantic the corpus depends on.
+lines on any release that changes a semantic the corpus depends on. Fixtures also
+drop the host's ephemeral-clone signals (`CLAUDE_CODE_REMOTE`,
+`SUBSTRATE_EPHEMERAL_CLONE`): on a cloud host the release gate skips publishing,
+so a task built on a refused push would pass there without pushing.
 
 A detection task needs a companion asking whether the detection can be ERASED.
 `memory_anchor_mismatch_detected` proves a replaced memory chain is caught, and
@@ -188,6 +191,6 @@ and a reproduction command. Exact commit, source-tree, and artifact provenance
 belongs to the release manifest rather than a mutable pre-commit hash embedded in
 the benchmark.
 
-The deterministic validators that run alongside these evals — syntax, config,
+The deterministic validators that run alongside these evals (syntax, config,
 secrets, AST pins, coverage floors, doc assertions, the append-only HISTORY
-gate — are described in [deterministic validators](09_deterministic_validators.md).
+gate) are described in [deterministic validators](09_deterministic_validators.md).

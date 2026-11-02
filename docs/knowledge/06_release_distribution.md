@@ -1,6 +1,6 @@
 ---
-purpose: Release packaging, signing, manifests, and artifact verification.
-last_human_reviewed: 2026-10-31
+purpose: Release packaging and signing, with manifest and artifact verification.
+last_human_reviewed: 2026-11-02
 covers:
   - manage.sh
   - package_release.sh
@@ -60,8 +60,8 @@ releases; consumers receive new pins with each kit upgrade.
 
 `docs/manifest.json` is generated from source knowledge docs and ADRs. It is not
 hand-edited. `.substrate/install.json` is generated after render and records the
-installed answers, owned-file hashes, version, and source tree used by later
-drift checks.
+installed answers and owned-file hashes, plus the version and source tree that
+later drift checks use.
 Its stripped-install inventory fallback mirrors the canonical install-owned
 surface lists exactly while deliberately excluding governed project-authored
 knowledge directories from provenance, so a missing helper import does not
@@ -80,7 +80,7 @@ provenance to that manifest. Review bundles include the evidence required for a
 human or another agent to reproduce the decision.
 
 The gate also verifies the tamper-evident memory chain, and in the strict
-profile requires its git-note anchor unconditionally — an absent anchor is a
+profile requires its git-note anchor unconditionally: an absent anchor is a
 named failure, never a silent downgrade to the unanchored check (that hedge was
 the v3.8.50 self-audit's P1: a trust anchor failing open on absence). Once every
 other gate has passed, each profile's release writes a fresh anchor for that
@@ -89,23 +89,23 @@ strict release in a repo needs a one-time `./manage.sh memory anchor`.
 
 The success line comes AFTER that, not before. The gate certifies the state it
 LEAVES: the anchor is written, published, and re-verified, and only then is the
-release called passed. The re-verification asks no shell variable — branching on
+release called passed. The re-verification asks no shell variable; branching on
 the profile loaded at gate start let a config raised to strict mid-run be
 certified by the standard-tier check, so `verify --anchor` runs unconditionally
 and reads the live profile itself. The gate also pins `.substrate/config` with a
 fingerprint taken before its first validator and refuses to announce success if
 that file changed while it ran: a run cannot certify a configuration the
 repository no longer has. That pin is taken BEFORE the config is loaded, and the
-load is proved not to have changed it — fingerprinting afterwards left the
-already-cached profile, lang and test command outside what was pinned. Whether
+load is proved not to have changed it, since fingerprinting afterwards left every
+value already cached from it, the test command included, outside what was pinned. Whether
 the memory log is part of the release is likewise decided once, at the chain
 check, and any change to that afterwards is a refusal rather than a skipped
 verification. See [the memory trust anchor](08_memory_anchor.md).
 
 The gate's own trusted inputs are SNAPSHOTTED, not re-read. Comparing
-`.substrate/config` before and after the load still admitted A-B-A — swap the
+`.substrate/config` before and after the load still admitted A-B-A (swap the
 file for exactly as long as the loader reads, restore it, and both fingerprints
-match while the run carries the swapped values — so the gate copies the config to
+match while the run carries the swapped values), so the gate copies the config to
 a private directory and loads FROM the copy. There is no window rather than a
 checked one. The config LOADER is treated the same way, because a loader sourced before
 any validator attests it could act during the trusted release and restore itself
@@ -116,24 +116,28 @@ with `-e`, not `-f`: `-f` is false for a FIFO, so a non-regular `events.jsonl`
 read as absent at both ends and every memory check was skipped while the gate
 passed. Present-but-not-regular is a refusal, as is a symlinked config.
 
-The runner array is expanded as `${RUN[@]+"${RUN[@]}"}`. On Bash 3.2 — still
-`/bin/bash` on macOS — expanding an empty array under `set -u` aborts, so the
+The runner array is expanded as `${RUN[@]+"${RUN[@]}"}`. On Bash 3.2 (still
+`/bin/bash` on macOS) expanding an empty array under `set -u` aborts, so the
 no-venv fallback was unreachable on exactly the hosts that needed it.
 
 The gate PUBLISHES that anchor itself rather than delegating it. Git does not
 transport `refs/notes/*` on a normal push, clone, or fetch, so a different clone
-never receives the ref and cannot push it — v3.8.51 asked an operator to do
+never receives the ref and cannot push it; v3.8.51 asked an operator to do
 exactly that, which was impossible anywhere but the producing clone. When the
 push is refused (no remote, no permission, an egress policy) the gate prints the
 note payload and the `git notes --ref=substrate-memory add -f -m` command that
 recreates it on any clone, because the payload travels in text where the ref
-does not.
+does not. The chain the note names does not travel, so only the producing clone
+can verify it later. On an ephemeral clone (`memory_log.py ephemeral`, for
+example a Claude Code cloud session) the gate keeps the note local and prints no
+payload: a published anchor for a chain that ends with the session is one
+nobody could verify. Strict therefore releases from a persistent clone.
 
 The release gate runs deterministic validators, project tests, the guard proof
 (`prove`, when `tests/guards.json` exists), policy evals, and artifact
 verification in sequence, then records a `release-pass` memory event for the
 commit it started on before writing the anchor (see
-[lessons, records, and recall](10_lessons_recall.md)). A finalizer or verifier failure is a release
+[the lessons and records doc](10_lessons_recall.md)). A finalizer or verifier failure is a release
 failure. Published HISTORY entries refer to real immutable commit objects, so
 published release commits must merge without squash rewriting.
 

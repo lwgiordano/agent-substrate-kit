@@ -1,6 +1,6 @@
 ---
-purpose: The memory trust anchor — monotonic advance, remote confirmation, and limits.
-last_human_reviewed: 2026-10-28
+purpose: The memory trust anchor: monotonic advance, remote confirmation, and limits.
+last_human_reviewed: 2026-11-02
 covers:
   - scripts/memory_log.py
   - scripts/release_gate.sh
@@ -13,7 +13,7 @@ described in [memory and sessions](03_memory_sessions.md).
 
 A hash chain proves internal consistency, not that it is the same chain as
 yesterday: anyone who can edit an event can recompute every hash after it. The
-anchor is what bounds that — the chain head recorded in a git note
+anchor is what bounds that: the chain head recorded in a git note
 (`refs/notes/substrate-memory`) on a commit, checked against the chain later.
 
 ## What verification requires
@@ -35,6 +35,26 @@ record the Git-ignored store has lost. Hiding a deleted attempt therefore means
 removing its event too, and once a published anchor covers that event the
 rewrite fails `verify --anchor`.
 
+## Which clone an anchor bounds
+
+The chain is Git-ignored and the note is not, so a note names a chain that
+exists only in the clone that wrote it, and only that clone can verify it. In
+any other clone (a fresh cloud session, a machine that recreated the note from a
+payload) the anchored head is missing for a reason that is not a rewrite, yet
+looks exactly like a chain replaced wholesale.
+
+So `anchor` first writes a receipt, `substrate-memory-held:<head>` on the
+anchored commit in the local-only ref `refs/notes/substrate-memory-held`; if it
+cannot, it refuses with the note untouched. The receipt picks the diagnosis,
+never the exit code: a missing head with a receipt is `ANCHOR MISMATCH` (this
+clone's chain lost history), without one `ANCHOR UNVERIFIABLE HERE` (a chain
+held elsewhere, or an anchor older than receipts). Both fail, as `NO ANCHOR`
+does, and `anchor --force` starts this clone's own anchor with the jump
+recorded. Deleting a receipt only softens a message. Linked worktrees share
+receipts and so still see each other's anchors as mismatches.
+[ADR 0004](../decisions/0004-anchors-bound-the-clone-that-holds-the-chain.md)
+gives the rejected alternatives.
+
 ## Advancing is monotonic
 
 A note is mutable state in the same writable repo as the log, so detection alone
@@ -45,8 +65,8 @@ which first appends an `anchor-forced` event naming the abandoned hash and
 aborts, note untouched, if it cannot: the discontinuity is a precondition, not a
 side effect.
 
-`anchor` reads the chain ONCE and anchors the hash that read produced — for
-`--force`, the hash returned by the evidence append itself. Deciding from one
+`anchor` reads the chain ONCE and anchors the hash that read produced (for
+`--force`, the hash returned by the evidence append itself). Deciding from one
 read and then re-reading a mutable file to pick the payload let a concurrent
 writer swap in a chain the checks never saw. A second read remains, but it can
 only REFUSE: if the chain no longer contains the hash about to be certified, the
@@ -54,13 +74,13 @@ note is left alone. Check and use must name the same bytes.
 
 ## Confirmation comes from the remote, in this process
 
-An existence check on origin, then a fetch whose return code is checked — never
+An existence check on origin, then a fetch whose return code is checked, never
 the local `origin-substrate-memory` ref, which any writer can forge. Those calls
 run isolated from user and system git CONFIG FILES as well as from the routing
 variables: `XDG_CONFIG_HOME` or `HOME` selecting a `url.<attacker>.insteadOf`
 entry chose which server answered and turned a real conflict into "verified
 against origin". Config files are therefore taken out of the loop rather than
-one variable deleted, and on git older than 2.32 — where they cannot be — the
+one variable deleted, and on git older than 2.32 (where they cannot be) the
 anchor is reported unconfirmed instead of confirmed on weaker evidence. What
 survives is the repository's own config, the same trust boundary as the working
 tree. The purely local reads and the note write keep the ordinary sanitized env:
@@ -69,7 +89,7 @@ user config cannot change which repository they reach, the write needs
 
 Isolation costs a globally configured credential helper, proxy, or
 `safe.directory`. A remote reachable only through a file outside the repository
-is not evidence about that repository, so the trade stands — but it is named:
+is not evidence about that repository, so the trade stands, but it is named:
 the fetch is retried once, purely to classify the failure, and the message says
 that user config is why. That retry never contributes to a verdict.
 
@@ -78,21 +98,30 @@ that user config is why. That retry never contributes to a verdict.
 `verify --anchor` reports which anchor it has, not one line for all:
 `verified against origin`; `ANCHOR CONFLICT` (fail) when what origin publishes
 is NOT in this chain; `LOCAL AHEAD` when the local note advanced past a
-published anchor that IS still in the chain — a refused push, not a rewrite, and
+published anchor that IS still in the chain: a refused push, not a rewrite, and
 saying otherwise accused operators of tampering for a failure the tooling
 reported itself; `LOCAL-ONLY` when an origin exists but publishes nothing; and
 `LOCAL (no remote)`, which PASSES because the base tier is offline-complete, so
 local is then the strongest anchor obtainable. Strict requires publication and
-fails closed on every tier below the first.
+fails closed on every tier below the first. `ANCHOR CONFLICT` also uses the
+receipt to say whether this clone or another one wrote what origin publishes.
 
 ## Publishing, and the release gate
 
 Publish FROM THE PRODUCING CLONE. Git does not transport `refs/notes/*` on a
 normal push, clone, or fetch, so another clone never receives it and cannot push
-it — delegating that step is an impossible instruction. The release gate pushes
+it: delegating that step is an impossible instruction. The release gate pushes
 the note itself and, when refused, prints the payload plus the `git notes
---ref=substrate-memory add -f -m` command that recreates it anywhere: the
-payload travels in text where the ref does not.
+--ref=substrate-memory add -f -m` command that recreates the note on any clone.
+The chain does not travel, so the note stays verifiable only in this clone.
+
+Anchors therefore bound a persistent clone, and an ephemeral one does not
+publish. `memory_log.py ephemeral` exits 0 when this clone will not outlive its
+session: `SUBSTRATE_EPHEMERAL_CLONE=1`/`0` is the operator's word, otherwise
+`CLAUDE_CODE_REMOTE=true` (a Claude Code cloud session) decides, and an unknown
+host reads as persistent. There the gate keeps the note local, prints no
+payload, and says why; `verify --anchor` and go-live advise against publishing.
+No exit code depends on the host, so strict cannot release from such a clone.
 
 The gate records its `release-pass` event BEFORE writing the note, so the
 anchor covers that evidence. The event's `clean_start` needs both the gate's
@@ -117,7 +146,7 @@ removed it.
 
 That re-check asks no shell variable. Branching on the `SUBSTRATE_PROFILE` loaded
 at gate start meant a config raised to strict DURING the run was certified by the
-standard-tier check — the anchor was re-read but the policy was not, so the end
+standard-tier check: the anchor was re-read but the policy was not, so the end
 state was judged by a rule from a different moment. `verify --anchor` runs
 unconditionally instead and decides strictness inside `memory_log` from the live
 config at the instant it runs; the base tiers all pass with an unpublished anchor,
@@ -125,8 +154,8 @@ so being unconditional costs the offline-complete promise nothing. The gate also
 fingerprints `.substrate/config` before its first validator and REFUSES to report
 success if that file changed while it ran: every result was produced under the
 configuration loaded at start, so a run cannot certify a configuration the
-repository no longer has. Absent and non-regular are distinct fingerprints — a
-config swapped for a FIFO is drift even where none existed — and a fingerprint
+repository no longer has. Absent and non-regular are distinct fingerprints (a
+config swapped for a FIFO is drift even where none existed), and a fingerprint
 the tool could not COMPUTE is not a value at all: it refuses under its own
 message rather than claiming the file changed.
 
@@ -134,12 +163,12 @@ One policy file needs one parser. `_require_published_anchor` read
 `SUBSTRATE_PROFILE` by first-match-and-substring while the shell loader and
 `check_substrate_config.py` both take the LAST assignment, so a config saying
 standard then strict was strict for the release gate and base-tier for
-publication enforcement — the file said one thing and its readers disagreed. The
+publication enforcement: the file said one thing and its readers disagreed. The
 Python side now mirrors the canonical rule exactly (last assignment, exact key,
 exact value), pinned by a parity test that runs both against generated configs.
 
 Readers of those tiers must key on the tier they mean. `substrate_doctor`
-selected its strongest row — "anchor verified against the remote" — by
+selected its strongest row ("anchor verified against the remote") by
 ELIMINATION, so adding a fifth passing tier made it claim remote verification
 for an anchor that was never published. The remote row now requires the verifier
 to have said `verified against origin`, and an unrecognised tier degrades to a
@@ -155,7 +184,7 @@ This is worth stating concretely, because it is what `LOCAL AHEAD` does and does
 not give up. Keep the chain prefix through the published anchor, refabricate
 every event after it, and leave the note alone: that verifies, prints
 `verified against origin`, and always has. Advancing the local note as well used
-to be caught — but it is the same attack plus a step that gains nothing, so
+to be caught, but it is the same attack plus a step that gains nothing, so
 catching it protected nothing. Both are bounded the same way: by how recently
 the published anchor was advanced. `anchor` also re-checks membership immediately
 before writing the note and refuses if the chain moved under it; a replacement in

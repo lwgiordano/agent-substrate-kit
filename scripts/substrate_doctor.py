@@ -379,6 +379,8 @@ def _go_live(blocks, warns, as_json=False):
     # ancestor; anchored hash must be a MEMBER of the link-verified chain) and map its
     # outcome. 4-state: no-log → warn | chain-broken → fail | anchor verified → pass |
     # no anchor in ancestry → warn | anchor not in chain (replaced/truncated) → fail.
+    # An anchor written in ANOTHER clone (no local receipt) is the no-anchor case for
+    # this chain → warn, never the MISMATCH catch-all (ADR 0004).
     mem_events = ROOT / '.substrate' / 'memory' / 'events.jsonl'
     if not mem_events.exists():
         mem_status, mem_reason = 'warn', 'no memory log yet (events.jsonl absent)'
@@ -402,6 +404,13 @@ def _go_live(blocks, warns, as_json=False):
             # rest on positive evidence, never on the absence of known
             # negatives, so the remote row now requires the verifier to have
             # SAID so and an unrecognised tier degrades to warn.
+            # On an EPHEMERAL clone the verifier says so, and "push it" is the wrong
+            # advice: the chain ends with the session, so nobody could verify a
+            # published copy (ADR 0004). The status never depends on the host.
+            _publish = ('do NOT publish it: the verifier reports an EPHEMERAL CLONE, whose chain ends with '
+                        'the session, so a published anchor could never be verified; publish from a '
+                        'persistent clone' if 'EPHEMERAL CLONE' in out_anc else
+                        'push it FROM THIS CLONE with `git push origin refs/notes/substrate-memory`')
             if rc_anc == 0 and 'verified against origin' in out_anc:
                 mem_status, mem_reason = 'pass', 'hash-chain ok + anchor verified against the remote'
             elif rc_anc == 0 and 'LOCAL (no remote)' in out_anc:
@@ -410,28 +419,37 @@ def _go_live(blocks, warns, as_json=False):
             elif rc_anc == 0 and 'LOCAL-ONLY' in out_anc:
                 mem_status, mem_reason = 'warn', ('hash-chain ok + anchor present but LOCAL-ONLY — not published to '
                                                   'the remote, so it bounds accident and a single re-anchor, not an '
-                                                  'adversary with write access to refs/notes/; push it FROM THIS '
-                                                  'CLONE with `git push origin refs/notes/substrate-memory`')
+                                                  'adversary with write access to refs/notes/; ' + _publish)
             elif rc_anc == 0 and 'LOCAL AHEAD' in out_anc:
                 mem_status, mem_reason = 'warn', ('hash-chain ok but the local anchor has ADVANCED PAST the '
                                                   'published one — the chain still descends from what the remote '
-                                                  'publishes, but the newer note was never pushed; push it FROM '
-                                                  'THIS CLONE with `git push origin refs/notes/substrate-memory`')
+                                                  'publishes, but the newer note was never pushed; ' + _publish)
             elif rc_anc == 0:
                 mem_status, mem_reason = 'warn', ('hash-chain ok but the anchor tier was not recognised — treat as '
                                                   'UNVERIFIED and read the verifier output: '
                                                   + (out_anc.strip().splitlines() or [''])[0][:160])
             elif 'NO ANCHOR' in out_anc:
                 mem_status, mem_reason = 'warn', 'hash-chain ok but not anchored — run `./manage.sh memory anchor`'
+            elif 'ANCHOR UNVERIFIABLE' in out_anc:
+                # A note this clone holds no receipt for: written in another clone for
+                # a chain this one never held, or before receipts existed. It is no
+                # anchor for this chain, so it reads like NO ANCHOR (ADR 0004); the
+                # verifier still exits 1. An anchor older than receipts whose chain
+                # WAS rewritten also lands here until this clone anchors again.
+                mem_status, mem_reason = 'warn', ('hash-chain ok but the nearest anchor has no receipt in this clone: '
+                                                  'another clone wrote it, or it predates receipts, so it cannot be '
+                                                  'verified here and a rewrite cannot be ruled out either; this chain '
+                                                  'is unanchored, so run `./manage.sh memory anchor --force`, which '
+                                                  'records the jump')
             elif 'ANCHOR NOT PUBLISHED' in out_anc:
                 mem_status, mem_reason = 'fail', ('strict requires a PUBLISHED anchor — the note exists only locally; '
-                                                  'push it FROM THIS CLONE with `git push origin '
-                                                  'refs/notes/substrate-memory` (a normal push/clone does not carry '
-                                                  'refs/notes/*, so no other clone can publish it for you)')
+                                                  + _publish + ('' if 'EPHEMERAL CLONE' in out_anc else
+                                                                ' (a normal push/clone does not carry refs/notes/*, '
+                                                                'so no other clone can publish it for you)'))
             elif 'ANCHOR CONFLICT' in out_anc:
-                mem_status, mem_reason = 'fail', ('memory anchor CONFLICT — the local note disagrees with the one the '
-                                                  'remote publishes: the local note was rewritten; run '
-                                                  '`./manage.sh memory verify --anchor`')
+                mem_status, mem_reason = 'fail', ('memory anchor CONFLICT: what the remote publishes is not in this '
+                                                  'chain; `./manage.sh memory verify --anchor` says whether this '
+                                                  'clone wrote that anchor (its chain lost history) or another did')
             else:
                 mem_status, mem_reason = 'fail', ('memory anchor MISMATCH — the anchored head is not in the current '
                                                   'chain (history replaced or truncated past the anchor); run '

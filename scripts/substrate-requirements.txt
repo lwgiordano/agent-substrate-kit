@@ -7,7 +7,7 @@
 # new pins with each kit upgrade. A test fails if setup installs a tool that is
 # not pinned here.
 pip==26.2.2
-uv==0.13.4
+uv==0.13.5
 pre-commit==4.7.0
 PyYAML==6.0.3
 pytest==9.1.1
@@ -16,8 +16,8 @@ cryptography==50.0.2
 pytest-cov==7.1.0
 pytest-randomly==5.0.0
 pytest-rerunfailures==16.7
-hypothesis==6.170.5
-ruff==0.17.1
+hypothesis==6.170.11
+ruff==0.17.2
 mypy==2.4.0
 bandit==1.9.4
 pip-audit==2.10.1

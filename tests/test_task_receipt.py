@@ -341,9 +341,13 @@ def test_a_group_of_zombies_only_at_a_timeout_is_still_a_timeout(project, monkey
 
 
 def test_a_timed_out_leader_gets_the_grace_period_to_finish_after_term(project, monkeypatch):
+    """The leader loops; it does not `wait` on a background child. macOS TERMs a
+    group newest member first, so a waiting leader saw its child die, ran off the
+    end of its script and exited before its own TERM arrived. Under load that
+    script lost its trap in 5 of 12 runs, with the grace period intact."""
     r = api()
     monkeypatch.setattr(r, "KILL_GRACE", 20)
-    stub(project, "trap 'sleep 1; touch cleaned-up; exit 0' TERM\nsleep 60 &\nwait")
+    stub(project, "trap 'sleep 1; touch cleaned-up; exit 0' TERM\nwhile :; do sleep 0.1; done")
     task_id = r.start(project, "task")
     assert r.run_check(project, task_id, "check", 3)["outcome"] == "timeout"
     assert (project / "cleaned-up").exists()

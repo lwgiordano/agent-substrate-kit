@@ -99,7 +99,14 @@ def git(root: Path, *args: str, limit: int = GIT_LIMIT) -> bytes:
             return b"".join(chunks)
         finally:
             if proc.poll() is None:
-                os.killpg(proc.pid, signal.SIGKILL)
+                # Freeze the group, then kill it (v3.11.3): on macOS a group
+                # signal lands member by member, and a stopped member cannot act
+                # between a sibling's KILL and its own. See task_receipt._kill_group.
+                try:
+                    os.killpg(proc.pid, signal.SIGSTOP)
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass  # already gone: raising here would replace the real error
                 proc.wait()
 
 

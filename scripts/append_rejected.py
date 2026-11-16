@@ -94,6 +94,16 @@ def main(argv=None) -> int:
 
     root = repo_root()
     target = root / "docs" / "REJECTED.md"
+    # v3.11.3: an entry is never edited, so it is checked against the scans that
+    # will read it BEFORE it is recorded (see _stale_text).
+    try:
+        import _stale_text
+        stale = _stale_text.refusal(entry, root)
+    except ImportError:  # pragma: no cover - stripped install
+        stale = None
+    if stale:
+        print(f"append_rejected: nothing was recorded: {stale}", file=sys.stderr)
+        return 1
     try:
         atomic_append(target, entry)
     except OSError as e:

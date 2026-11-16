@@ -1,6 +1,6 @@
 ---
 purpose: Behavioral evals, the malicious and benign corpus, and assurance limits.
-last_human_reviewed: 2026-11-02
+last_human_reviewed: 2026-11-16
 covers:
   - manage.sh
   - extras/calibrate_diy_ultrareview.py
@@ -162,7 +162,12 @@ guard neutralized its tests must fail with pytest rc 1. A collection error, a
 typo'd node id, or a broken import is not proof. Tests run without a bytecode
 cache: a neutralization the guard's own length reused a stale `.pyc` and
 credited one guard's failure to another. A redundant guard is registered as an
-`edits` pair, reverted together, because reverting one proves nothing.
+`edits` pair, reverted together, because reverting one proves nothing. The copy
+holds tracked files only, so its tests get the proven tree's tool directories
+(`.venv/bin`, `.substrate/venv/bin`) appended to `PATH`. Without that, a test
+that needs a tool living only in the tree's environment (the linter, under
+`uv`) skips with the guard and without it, and the guard survives for want of
+the tool. Appended, so no name the caller's `PATH` resolves is shadowed.
 
 Generated shell must quote what it interpolates: a gate fragment built around a
 bare interpreter path split on the first space, so under a directory with a space

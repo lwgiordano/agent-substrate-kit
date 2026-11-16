@@ -85,7 +85,7 @@ def _exp(b64: str) -> str:
     return base64.b64decode(b64).decode().replace("{T}", uuid.uuid4().hex)
 
 
-def _run(args: list[str], stdin: str, cwd=None):
+def _run(args: list[str], stdin: str, cwd=None, timeout: int = 15):
     """Subprocess with its OWN process group so a hung child (or grandchild)
     is SIGKILLed on timeout instead of orphaned — the v3.2.23 reviewer hit a
     wedged hook subprocess in a constrained runtime. Kept FEW: the heavy
@@ -95,10 +95,17 @@ def _run(args: list[str], stdin: str, cwd=None):
                             stderr=subprocess.PIPE, text=True,
                             cwd=str(cwd) if cwd else str(ROOT), start_new_session=True)
     try:
-        out, err = proc.communicate(stdin, timeout=15)
+        out, err = proc.communicate(stdin, timeout=timeout)
     except subprocess.TimeoutExpired:
         try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            # Freeze the group, then kill it (v3.11.3). A group signal is not one
+            # event on every kernel: macOS delivers it member by member, so a
+            # parent whose child just died of KILL can run its next command
+            # before its own KILL lands (found in the receipt timeout, v3.11.2).
+            # STOP wakes nobody, so a stopped parent cannot act.
+            pgid = os.getpgid(proc.pid)
+            os.killpg(pgid, signal.SIGSTOP)
+            os.killpg(pgid, signal.SIGKILL)
         except Exception:
             proc.kill()
         proc.communicate()

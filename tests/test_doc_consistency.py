@@ -135,7 +135,8 @@ def _scannable() -> list[Path]:
     in any of these become bad agent context or broken config."""
     # CHANGES_V3.md = changelog (cites old versions); BENCHMARK.md = generated result
     # report (records the host's runtime Python, which may legitimately be 3.13+).
-    skip = {"CHANGES_V3.md", "test_doc_consistency.py", "BENCHMARK.md"}
+    # _stale_text.py names the stale strings these scans look for, as this file does.
+    skip = {"CHANGES_V3.md", "test_doc_consistency.py", "BENCHMARK.md", "_stale_text.py"}
     out = []
     for ext in ("*.md", "*.py", "*.sh", "*.template", "*.toml.template"):
         for p in KIT.rglob(ext):
@@ -229,38 +230,48 @@ def test_superpowers_execution_docs_are_governed_context() -> None:
     )
 
 
+def _stale():
+    """scripts/_stale_text.py: the scans this suite and the record writers share."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "_stale_text", KIT / "scripts" / "_stale_text.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _stale_lines(key: str, paths) -> list[str]:
+    """Every line under `paths` that trips the shared scan `key`."""
+    stale, offenders = _stale(), []
+    for p in paths:
+        for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
+            if stale.is_stale(key, line):
+                offenders.append(f"{p.relative_to(KIT)}: {line.strip()[:80]}")
+    return offenders
+
+
 def test_no_old_product_names() -> None:
-    offenders = []
-    for p in _scannable():
-        text = p.read_text(encoding="utf-8", errors="replace")
-        if "META_SYSTEM_KIT" in text or "META_SYSTEM_SPEC" in text:
-            offenders.append(f"{p.relative_to(KIT)}: META_SYSTEM reference")
-        if re.search(r"\bKit v2\b|agent_substrate_kit_v2", text):
-            offenders.append(f"{p.relative_to(KIT)}: v2 reference")
+    offenders = _stale_lines("old-product-name", _scannable())
     assert not offenders, "stale product names:\n" + "\n".join(offenders)
 
 
 def test_no_deprecated_codex_flag() -> None:
     # `codex_hooks` is the deprecated alias; canonical is `hooks`.
     # Allowed only when the line explicitly documents the deprecation.
-    ctx = re.compile(r"(?i)deprecat|was\s+`?codex_hooks|alias")
-    # \b...\b excludes identifiers like `_codex_hooks_use_...`.
-    flag = re.compile(r"\bcodex_hooks\b")
-    offenders = []
-    for p in _scannable():
-        for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
-            if flag.search(line) and not ctx.search(line):
-                offenders.append(f"{p.relative_to(KIT)}: {line.strip()[:80]}")
+    offenders = _stale_lines("deprecated-codex-flag", _scannable())
     assert not offenders, "deprecated codex_hooks flag:\n" + "\n".join(offenders)
 
 
 def test_no_stale_python_version() -> None:
-    # The substrate targets 3.11+. A pinned 3.13 in templates is stale.
-    offenders = []
-    for p in _scannable():
-        for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
-            if re.search(r"python[:/ -]?3\.13", line, re.IGNORECASE):
-                offenders.append(f"{p.relative_to(KIT)}: {line.strip()[:80]}")
+    """The substrate targets 3.11+. A pinned 3.13 in templates is stale.
+
+    v3.11.3: the append-only records are not read. A HISTORY or bus entry states
+    which interpreter a release gate ran on, a fact about that run and not a pin,
+    the same reason BENCHMARK.md is left out. Releasing v3.11.2 from a host on that
+    interpreter, the entry saying so failed this scan after it was recorded, could
+    not be reworded, and was abandoned along with the gate run behind it."""
+    records = {KIT / rel for rel in _stale().RUN_RECORDS}
+    offenders = _stale_lines("python-pin", [p for p in _scannable() if p not in records])
     assert not offenders, "stale Python 3.13 pin:\n" + "\n".join(offenders)
 
 
@@ -315,14 +326,7 @@ def test_referenced_github_paths_are_generated() -> None:
 
 def test_no_references_to_removed_scripts() -> None:
     # A mention is stale only if it's NOT in a removal/changelog context.
-    removed = ["snapshot_session.py"]
-    removal_ctx = re.compile(r"(?i)remov|deprecat|superseded|no longer|changelog")
-    offenders = []
-    for p in _docs():
-        for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
-            for r in removed:
-                if r in line and not removal_ctx.search(line):
-                    offenders.append(f"{p.relative_to(KIT)}: {line.strip()[:80]}")
+    offenders = _stale_lines("removed-script", _docs())
     assert not offenders, "live references to removed scripts:\n" + "\n".join(offenders)
 
 
@@ -334,25 +338,15 @@ def test_documented_manage_commands_exist() -> None:
         assert re.search(rf"\b{cmd}[)|]", manage), f"manage.sh missing '{cmd}' command"
     # A removed command must not be advertised as usable (changelog
     # mentions of its removal are fine).
-    removal_ctx = re.compile(r"(?i)remov|deprecat|superseded|no longer")
-    for p in _docs():
-        for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
-            if "manage.sh tools" in line and not removal_ctx.search(line):
-                raise AssertionError(
-                    f"{p.relative_to(KIT)} advertises removed 'manage.sh tools': {line.strip()[:80]}"
-                )
+    offenders = _stale_lines("removed-manage-command", _docs())
+    assert not offenders, "advertises removed 'manage.sh tools':\n" + "\n".join(offenders)
 
 
 def test_docs_do_not_recommend_sourcing_substrate_config() -> None:
     """No agent-facing doc/script should recommend `. .substrate/config`
     or `source .substrate/config` (re-introduces the config-as-shell P0).
     Changelog history is exempt (it documents the fix)."""
-    ctx = re.compile(r"(?i)remov|deprecat|no longer|do not source|don't source|history|v3\.2\.1[01]|sourced as shell|was \. \.substrate")
-    offenders = []
-    for p in _scannable():
-        for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
-            if re.search(r"(?<![\w/])\.\s+\.substrate/config|source\s+\.substrate/config", line) and not ctx.search(line):
-                offenders.append(f"{p.relative_to(KIT)}: {line.strip()[:80]}")
+    offenders = _stale_lines("sources-config", _scannable())
     assert not offenders, "docs recommend sourcing .substrate/config:\n" + "\n".join(offenders)
 
 
@@ -911,3 +905,192 @@ def test_setup_and_ci_install_only_pinned_tools() -> None:
     assert {"ci.yml", "scheduled-audit.yml", "ci.yml.template", "scheduled-audit.yml.template",
             "release-keyless.yml.template", "release-ci-minisign.yml.template",
             "auto-upgrade.yml.template"} <= seen, seen
+
+
+# --- v3.11.3: the stale-text scans are shared with the record writers ----------
+
+_STALE_SAMPLES = {
+    # key: (lines that are stale, lines that are not)
+    "old-product-name": (
+        ["see META_SYSTEM_KIT for the layout", "read META_SYSTEM_SPEC first",
+         "the Kit v2 layout", "unzip agent_substrate_kit_v2.zip"],
+        ["the Kit v20 layout", "a toolKit v2", "META_SYSTEM_OTHER"]),
+    "deprecated-codex-flag": (
+        ["set codex_hooks = true"],
+        ["codex_hooks is the deprecated alias for hooks", "_codex_hooks_use_x = 1"]),
+    "python-pin": (
+        ["FROM python:3.13-slim", "needs Python 3.13", "run python3.13 -m venv",
+         "actions/python-3.13"],
+        ["needs Python 3.11 or newer", "cpython 3.12", "python 3.1 then 13 items"]),
+    "sources-config": (
+        ["run `. .substrate/config` first", "source .substrate/config"],
+        ["do not source .substrate/config", "cat docs/.substrate/config",
+         "v3.2.10 stopped the `. .substrate/config` idiom"]),
+    "removed-script": (
+        ["then run snapshot_session.py"],
+        ["snapshot_session.py was removed in v3"]),
+    "removed-manage-command": (
+        ["run ./manage.sh tools to list them"],
+        ["./manage.sh tools is no longer available"]),
+}
+
+
+def test_shared_stale_scans_catch_exactly_what_they_name() -> None:
+    """The six whole-tree scans moved into scripts/_stale_text.py so the record
+    writers can apply them. Every scan keeps what it caught and what it let through."""
+    stale = _stale()
+    assert set(stale.SCANS) == set(_STALE_SAMPLES)
+    for key, (bad, good) in _STALE_SAMPLES.items():
+        for line in bad:
+            assert stale.is_stale(key, line), f"{key} no longer catches: {line}"
+        for line in good:
+            assert not stale.is_stale(key, line), f"{key} now catches: {line}"
+
+
+def test_a_run_record_may_state_the_interpreter_and_nothing_else_stale() -> None:
+    """A record of what ran states which interpreter it ran on. Every other stale
+    string is as stale in a record as anywhere, and is named so it can be reworded."""
+    stale = _stale()
+    assert stale.RUN_RECORDS == ("docs/HISTORY.md", "docs/REJECTED.md", "AGENT_BUS.md")
+    assert stale.record_findings("The gate ran on Python 3.13.\nSecond line.") == []
+    for key, (bad, _good) in _STALE_SAMPLES.items():
+        expected = [] if key == "python-pin" else [key]
+        assert stale.record_findings("a clean line\n" + bad[0]) == expected
+    both = stale.record_findings(_STALE_SAMPLES["removed-script"][0][0] + "\n"
+                                 + _STALE_SAMPLES["old-product-name"][0][0])
+    assert both == ["old-product-name", "removed-script"]
+
+
+def test_a_refusal_names_each_scan_and_says_which_can_be_excused(tmp_path) -> None:
+    """The message is all the writer's caller has to reword the entry with."""
+    stale = _stale()
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_doc_consistency.py").write_text("", encoding="utf-8")
+    assert stale.refusal("a clean entry\nwith two lines", tmp_path) is None
+    text = stale.refusal(_STALE_SAMPLES["removed-script"][0][0] + "\n"
+                         + _STALE_SAMPLES["old-product-name"][0][0], tmp_path)
+    assert "an old product name; and a reference to a removed script" in text
+    # Only a scan that has an excuse offers it: an old product name has none.
+    excuse = "(a line that says it was removed or deprecated passes)"
+    assert text.count(excuse) == 1 and "a reference to a removed script " + excuse in text
+    assert "never edited" in text
+
+
+def test_the_pin_scan_reads_templates_but_not_run_records(tmp_path, monkeypatch) -> None:
+    """The scan itself, on a planted tree: the same sentence is a stale pin in a
+    template and a fact in HISTORY, REJECTED and the bus."""
+    import shutil
+    import sys
+    records = _stale().RUN_RECORDS
+    (tmp_path / "scripts").mkdir()
+    shutil.copy(KIT / "scripts" / "_stale_text.py", tmp_path / "scripts" / "_stale_text.py")
+    for rel in (*records, "templates/ci.yml.template", "docs/notes.md"):
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text("the gate ran on Python 3.13\n", encoding="utf-8")
+    monkeypatch.setattr(sys.modules[__name__], "KIT", tmp_path)
+    with pytest.raises(AssertionError) as caught:
+        test_no_stale_python_version()
+    report = str(caught.value)
+    assert "templates/ci.yml.template" in report and "docs/notes.md" in report
+    assert not any(rel in report for rel in records)
+
+
+def _record_fixture(tmp_path, suite: bool = True):
+    """A git repository holding the kit's scripts, with or without this suite."""
+    import shutil
+    import subprocess
+    root = tmp_path / "records"
+    shutil.copytree(KIT / "scripts", root / "scripts",
+                    ignore=shutil.ignore_patterns("__pycache__"))
+    shutil.copy(KIT / "agentsync.sh", root / "agentsync.sh")
+    (root / "AGENT_BUS.md").write_text("# bus\n", encoding="utf-8")
+    (root / ".gitignore").write_text("__pycache__/\n", encoding="utf-8")  # as the kit has
+    if suite:
+        (root / "tests").mkdir()
+        (root / "tests" / "test_doc_consistency.py").write_text("", encoding="utf-8")
+
+    def git(*args):
+        return subprocess.run(["git", *args], cwd=root, check=True, capture_output=True,
+                              text=True, timeout=30).stdout.strip()
+
+    git("init", "-q")
+    git("config", "user.email", "fixture@example.invalid")
+    git("config", "user.name", "Fixture")
+    git("config", "commit.gpgsign", "false")
+    git("add", "-A")
+    git("commit", "-qm", "fixture")
+    return root, git("rev-parse", "--short", "HEAD")
+
+
+def _history(root, sha, knowledge):
+    import subprocess
+    import sys
+    return subprocess.run(
+        [sys.executable, "-I", str(root / "scripts" / "append_history.py"),
+         "--summary", "A release whose entry is long enough to count",
+         "--files", "a.py", "--intent", "Why this was done in the fixture",
+         "--knowledge", knowledge, "--commit-hash", sha],
+        cwd=root, capture_output=True, text=True, timeout=60)
+
+
+def test_history_refuses_a_stale_entry_before_it_is_recorded(tmp_path) -> None:
+    """Releasing v3.11.2: an entry failed a doc scan once it was in HISTORY, could
+    not be reworded, and cost the gate run behind it. The writer now asks first."""
+    root, sha = _record_fixture(tmp_path)
+    history = root / "docs" / "HISTORY.md"
+    stale = "The fixture is clean. " + _STALE_SAMPLES["deprecated-codex-flag"][0][0] + "."
+    r = _history(root, sha, stale)
+    assert r.returncode == 1 and "nothing was recorded" in r.stderr, r.stdout + r.stderr
+    assert "deprecated codex_hooks flag" in r.stderr and not history.exists()
+    # The interpreter a gate ran on is a fact about that run, so it is recorded.
+    r = _history(root, sha, "The gate needed two runs. It ran on Python 3.13 on the Mac.")
+    assert r.returncode in (0, 2), r.stdout + r.stderr  # 2: recorded, no memory chain here
+    assert "Python 3.13" in history.read_text(encoding="utf-8")
+
+
+def test_a_repository_without_the_suite_records_the_entry(tmp_path) -> None:
+    """A consumer install strips this suite, so nothing there would fail on the entry
+    afterwards. Refusing it would be friction with no check behind it."""
+    root, sha = _record_fixture(tmp_path, suite=False)
+    stale = "The fixture is clean. " + _STALE_SAMPLES["deprecated-codex-flag"][0][0] + "."
+    r = _history(root, sha, stale)
+    assert r.returncode in (0, 2), r.stdout + r.stderr
+    assert "codex_hooks" in (root / "docs" / "HISTORY.md").read_text(encoding="utf-8")
+
+
+def test_rejected_and_the_bus_refuse_a_stale_entry_before_it_is_recorded(tmp_path) -> None:
+    import os
+    import subprocess
+    import sys
+    root, _sha = _record_fixture(tmp_path)
+    stale = _STALE_SAMPLES["removed-script"][0][0]
+    r = subprocess.run([sys.executable, "-I", str(root / "scripts" / "append_rejected.py"),
+                        "--what", "Wire it into the session hook: " + stale,
+                        "--why", "It would run on every session start"],
+                       cwd=root, capture_output=True, text=True, timeout=60)
+    assert r.returncode == 1 and "nothing was recorded" in r.stderr, r.stdout + r.stderr
+    assert not (root / "docs" / "REJECTED.md").exists()
+    # A clean entry, and one that only states an interpreter, are recorded.
+    r = subprocess.run([sys.executable, "-I", str(root / "scripts" / "append_rejected.py"),
+                        "--what", "Run the release gate on Python 3.13 only",
+                        "--why", "The kit supports every interpreter from 3.11 up"],
+                       cwd=root, capture_output=True, text=True, timeout=60)
+    assert r.returncode in (0, 2), r.stdout + r.stderr  # 2: recorded, no memory chain here
+    assert "Python 3.13" in (root / "docs" / "REJECTED.md").read_text(encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=root, check=True, timeout=30)
+    subprocess.run(["git", "commit", "-qm", "rejected"], cwd=root, check=True, timeout=30)
+    bus = root / "AGENT_BUS.md"
+    r = subprocess.run(["bash", "agentsync.sh", "msg", "CLAIM: " + stale], cwd=root,
+                       env={**os.environ, "AGENT_NAME": "claude"},
+                       capture_output=True, text=True, timeout=60)
+    assert r.returncode == 2 and "nothing was written" in r.stderr, r.stdout + r.stderr
+    assert bus.read_text(encoding="utf-8") == "# bus\n"
+    # The agent name is written on the same line, so it is scanned with the message.
+    r = subprocess.run(["bash", "agentsync.sh", "msg", "CLAIM: a clean message"], cwd=root,
+                       env={**os.environ, "AGENT_NAME": stale.split()[-1]},
+                       capture_output=True, text=True, timeout=60)
+    assert r.returncode == 2 and "nothing was written" in r.stderr, r.stdout + r.stderr
+    assert bus.read_text(encoding="utf-8") == "# bus\n"
+    status = subprocess.run(["git", "status", "--porcelain"], cwd=root, capture_output=True,
+                            text=True, timeout=30).stdout
+    assert status == "", "a refused entry must leave nothing staged or written: " + status

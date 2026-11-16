@@ -1,6 +1,6 @@
 ---
 purpose: Deterministic validator layers, pinned copies, and append-only gates.
-last_human_reviewed: 2026-10-31
+last_human_reviewed: 2026-11-16
 covers:
   - extras/check_license_headers.py
   - extras/check_stale_phrases.py
@@ -15,6 +15,7 @@ covers:
   - scripts/check_leaks.py
   - scripts/check_secrets.py
   - scripts/code_shape.py
+  - scripts/_stale_text.py
   - scripts/run_security_scanners.py
 ---
 
@@ -94,3 +95,23 @@ replace deterministic gates.
 The eval corpus measures its listed attacks and benign tasks. A perfect reported
 rate is not a proof against unmodeled classes, host compromise, or an attacker
 who can replace the gate and every integrity anchor together.
+
+## Stale-text scans and the record writers
+
+The doc-consistency suite reads the tree for strings that are stale as agent
+context: an old product name, the deprecated Codex flag, a pin on one
+interpreter version, advice to load `.substrate/config` as shell, and a removed
+script or `manage.sh` command. `_stale_text.py` holds those six scans once. A
+line that says the thing is removed or deprecated passes the scans that have
+that excuse.
+
+The suite also reads the append-only records (`docs/HISTORY.md`,
+`docs/REJECTED.md`, `AGENT_BUS.md`), and an entry there is never edited. So the
+writers (`append_history`, `append_rejected`, `agentsync.sh msg`) apply the same
+list before they record. They refuse an entry the suite would fail on and name
+the scan, while the entry can still be reworded. They do this only where the
+suite is present: a consumer install strips it, so nothing there would fail
+afterwards. The interpreter-pin scan does not read the records. An entry states
+which interpreter a gate ran on, which is a fact about that run and not a pin,
+the same reason `BENCHMARK.md` is left out. The agent-harness scanner and the
+leak scanner also read these records, and neither is applied before recording.

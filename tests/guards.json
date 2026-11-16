@@ -2017,6 +2017,16 @@
         "tests/test_task_receipt.py::test_a_kill_pass_that_outlasts_the_grace_period_is_followed_by_one_more"
       ],
       "why": "under load one KILL pass outlasts the grace period, and the member it missed is left running"
+    },
+    {
+      "id": "prove-does-not-call-a-skipped-test-a-pass",
+      "file": "scripts/prove_guards.py",
+      "find": "            elif not passed:\n",
+      "replace": "            elif False:\n",
+      "tests": [
+        "tests/test_hook_scripts.py::test_prove_does_not_call_a_skipped_test_a_pass"
+      ],
+      "why": "a guard whose tests never ran on the host is reported as one its tests passed without"
     }
   ]
 }

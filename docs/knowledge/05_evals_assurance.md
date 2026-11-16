@@ -1,6 +1,6 @@
 ---
 purpose: Behavioral evals, the malicious and benign corpus, and assurance limits.
-last_human_reviewed: 2026-11-02
+last_human_reviewed: 2026-11-16
 covers:
   - manage.sh
   - extras/calibrate_diy_ultrareview.py
@@ -159,7 +159,9 @@ source snippet, its neutralized form, and the pytest node ids that must catch
 it. In a private copy of the working tree, never the live one, every snippet
 must occur exactly once, the mapped tests must pass unmodified, and with each
 guard neutralized its tests must fail with pytest rc 1. A collection error, a
-typo'd node id, or a broken import is not proof. Tests run without a bytecode
+typo'd node id, or a broken import is not proof. Nor is a skip: a guard whose
+mapped tests were all skipped on the host is reported as not run, with each
+skip reason, and fails the run. Tests run without a bytecode
 cache: a neutralization the guard's own length reused a stale `.pyc` and
 credited one guard's failure to another. A redundant guard is registered as an
 `edits` pair, reverted together, because reverting one proves nothing.

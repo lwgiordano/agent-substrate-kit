@@ -34,15 +34,20 @@ interrupted run must not leave a guard neutralized in place):
      test. rc 2/3/4/5 (collection error, internal error, usage, nothing
      collected) is NOT proof: a nonzero exit is not evidence of the failure you
      meant, and a typo'd node id is the most common way to get one.
+  4. A guard whose mapped tests were all SKIPPED here is reported as NOT RUN,
+     with each skip reason: a skipped test exits 0 with the guard and without
+     it, so it is neither proof nor a survival. It still fails the run.
 
-Exit codes: 0 every guard proven | 1 a guard survived its removal, a snippet
-is stale/ambiguous, or the baseline failed | 2 usage / environment error.
+Exit codes: 0 every guard proven | 1 a guard survived its removal, none of its
+tests ran on this host, a snippet is stale/ambiguous, or the baseline failed |
+2 usage / environment error.
 """
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -158,7 +163,8 @@ def _path_with_tree_tools(root: Path, path: str) -> str:
     return os.pathsep.join(([path] if path else []) + extra)
 
 
-def run_tests(copy: Path, nodes: list[str], root: Path | None = None) -> tuple[int, str]:
+def run_tests(copy: Path, nodes: list[str], root: Path | None = None,
+              report: str = "fE") -> tuple[int, str]:
     # Strip, never set: a project-dir variable naming the live repo would point
     # the copy's tests back at it, and setting it to the copy overrides the
     # temp-repo fixtures the tests build for themselves.
@@ -174,8 +180,8 @@ def run_tests(copy: Path, nodes: list[str], root: Path | None = None) -> tuple[i
     if root is not None:
         env["PATH"] = _path_with_tree_tools(root, env.get("PATH", ""))
     try:
-        p = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:randomly",
-                            "-p", "no:cacheprovider", *nodes], cwd=copy, env=env,
+        p = subprocess.run([sys.executable, "-m", "pytest", "-q", f"-r{report}", "-p",
+                            "no:randomly", "-p", "no:cacheprovider", *nodes], cwd=copy, env=env,
                            capture_output=True, text=True, timeout=_TIMEOUT)
     except subprocess.TimeoutExpired:
         return 124, "timed out"
@@ -184,6 +190,27 @@ def run_tests(copy: Path, nodes: list[str], root: Path | None = None) -> tuple[i
 
 def _tail(out: str, n: int = 6) -> str:
     return "\n".join("      " + ln for ln in out.strip().splitlines()[-n:])
+
+
+# Short-summary lines of a `-rfEsXp` run. They name each test that passed or was
+# skipped whatever the -q level; the totals line does not survive the second -q
+# that the kit's own pytest.ini adds.
+_RAN_LINE = re.compile(r"^(?:PASSED|XPASS) ", re.MULTILINE)
+_SKIP_LINE = re.compile(r"^SKIPPED \[(\d+)\] (.+)$", re.MULTILINE)
+
+
+def _skipped(out: str) -> tuple[bool, int, list[str]]:
+    """Of a run that exited 0: whether any test passed, how many were skipped, and
+    why. pytest folds skips with one reason into a single `SKIPPED [n]` line.
+
+    Found releasing v3.11.2: a guard whose only test skipped on the host exits 0
+    with the guard and without it, and was reported as `its tests still PASS
+    without it`. Nothing had run. `_path_with_tree_tools` removed the cause of
+    that one skip; a test skipped for any other reason read the same way. Output
+    that names no skip counts as a pass, which is the verdict it had before."""
+    skips = _SKIP_LINE.findall(out)
+    return (_RAN_LINE.search(out) is not None or not skips,
+            sum(int(n) for n, _ in skips), [why for _, why in skips])
 
 
 def prove(root: Path, guards: list[dict]) -> int:
@@ -225,7 +252,7 @@ def prove(root: Path, guards: list[dict]) -> int:
                   f"tree (pytest rc {rc}), so their failing later would prove nothing:\n"
                   + _tail(out, 12), file=sys.stderr)
             return 1
-        proven, survived = 0, []
+        proven, survived, not_run = 0, [], []
         for gd in guards:
             mutated: dict[str, str] = {}
             for e in _edits(gd) or []:
@@ -234,24 +261,40 @@ def prove(root: Path, guards: list[dict]) -> int:
             try:
                 for f, txt in mutated.items():
                     (copy / f).write_text(txt, encoding="utf-8")
-                rc, out = run_tests(copy, gd["tests"], root)
+                rc, out = run_tests(copy, gd["tests"], root, report="fEsXp")
             finally:
                 for f in mutated:
                     (copy / f).write_text(originals[f], encoding="utf-8")
+            passed, n_skipped, skips = _skipped(out) if rc == 0 else (True, 0, [])
             if rc == 1 and ("failed" in out or "FAILED" in out):
                 proven += 1
                 print(f"  proven   {gd['id']}")
+            elif not passed:
+                not_run.append(gd["id"])
+                print(f"  NOT RUN  {gd['id']}: every test mapped to it was skipped here, so "
+                      "nothing was proven\n" + "".join(f"      skipped: {s}\n" for s in skips)
+                      + f"      guards against: {gd['why']}", file=sys.stderr)
             else:
                 why = ("its tests still PASS without it" if rc == 0 else
                        f"pytest rc {rc} is not a test failure (collection/usage/timeout)")
+                if skips:
+                    why += f" ({n_skipped} skipped here: {'; '.join(skips)})"
                 survived.append(gd["id"])
                 print(f"  SURVIVED {gd['id']} — {why}\n      guards against: {gd['why']}"
                       + ("\n" + _tail(out) if rc not in (0, 1) else ""), file=sys.stderr)
     dt = time.time() - t0
-    if survived:
-        print(f"prove: FAIL — {len(survived)}/{len(guards)} guard(s) survived their own "
-              f"removal: {', '.join(survived)}. A test that passes without its guard is "
-              f"not evidence for it. ({dt:.0f}s)", file=sys.stderr)
+    if survived or not_run:
+        said = []
+        if survived:
+            said.append(f"{len(survived)}/{len(guards)} guard(s) survived their own removal: "
+                        f"{', '.join(survived)}. A test that passes without its guard is not "
+                        "evidence for it.")
+        if not_run:
+            said.append(f"{len(not_run)}/{len(guards)} guard(s) could not be proven on this "
+                        f"host: {', '.join(not_run)}. Every test mapped to them was skipped, "
+                        "and a skipped test is not evidence either. Make them runnable here "
+                        "(each skip reason is above) and run again.")
+        print(f"prove: FAIL — {' '.join(said)} ({dt:.0f}s)", file=sys.stderr)
         return 1
     print(f"prove: {proven}/{len(guards)} guards proven — removing each one made its "
           f"tests fail ({dt:.0f}s)")

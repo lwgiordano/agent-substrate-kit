@@ -72,6 +72,33 @@ def inventory(root):
     return out
 
 
+LINE = 120  # bytes of a root the text report prints; the JSON keeps the whole root
+
+
+def shown(root):
+    """A root as the text report prints it."""
+    return api("_task_evidence").clip_bytes(str(root), LINE)
+
+
+def root_lines(text):
+    """The text report's one line per project: `<root>  [<status>]`."""
+    return [line for line in text.splitlines() if re.search(r"  \[(ok|error)\]$", line)]
+
+
+@pytest.fixture
+def tmp_path(tmp_path):
+    """Every root in this file is longer than the text report's root line.
+
+    Found on v3.11.1: a macOS temp dir is about 120 bytes before a fixture adds a name,
+    so two tests that looked for a whole root in the text failed on every Mac while Linux
+    CI, where the same roots fit, stayed green. Padding gives every platform the long case."""
+    pad = LINE - len(os.fsencode(tmp_path))
+    if pad > 0:
+        tmp_path = tmp_path / ("m" * pad)
+        tmp_path.mkdir()
+    return tmp_path
+
+
 @pytest.fixture
 def markers(tmp_path):
     d = tmp_path / "markers"
@@ -205,7 +232,16 @@ def test_a_root_naming_a_tool_is_shown_as_its_path(tmp_path, markers):
     roots = [make_project(tmp_path / "python" / name, markers) for name in ("node", "bash")]
     rep = api().report(roots)
     assert [r["root"] for r in rep["projects"]] == [str(r) for r in roots]
-    assert str(roots[0]) in api().render_text(rep)
+    assert root_lines(api().render_text(rep)) == [f"{shown(r)}  [ok]" for r in roots]
+
+
+def test_a_root_longer_than_the_text_line_is_cut_there_and_whole_in_json(project):
+    """The text report cuts a long root at LINE bytes; only the JSON names it in full."""
+    rep = api().report([project])
+    assert rep["projects"][0]["root"] == str(project)
+    assert len(os.fsencode(project)) > LINE >= len(shown(project).encode())
+    assert root_lines(api().render_text(rep)) == [f"{shown(project)}  [ok]"]
+
 
 def test_hostile_metadata_values_are_bounded_and_sanitized(project):
     (project / ".substrate/install.json").write_text(json.dumps(
@@ -309,8 +345,8 @@ def test_a_hooks_path_symlink_loop_is_an_unknown_not_a_crash(project, tmp_path):
     rep = api().report([project, other])
     first, second = rep["projects"]
     assert set(first["hooks"]["git_hooks"].values()) <= {"unknown", "missing"}
-    assert second["status"] == "ok"
-    assert "after loop" in api().render_text(rep)
+    assert second["status"] == "ok" and second["root"] == str(other)
+    assert root_lines(api().render_text(rep))[1:] == [f"{shown(other)}  [ok]"]
 
 
 def test_target_text_is_bounded_so_one_project_cannot_crowd_out_the_rest(project, tmp_path):

@@ -251,21 +251,59 @@ def _drain(proc, deadline: float, keep_tail: bool) -> tuple[str, int, str, bytes
     return "exited", size, digest.hexdigest(), tail
 
 
+# Linux signals a forking member and its child together: a fork fails while a fatal
+# signal is pending (kernel/fork.c, copy_process), so one KILL pass reaches every
+# member of a group. No other kernel is assumed to promise that.
+_ONE_PASS_KILLS_GROUP = sys.platform.startswith("linux")
+
+
+def _kill_group(pgid: int) -> None:
+    """Freeze a process group, then KILL it until the kernel finds no member left.
+
+    Found on macOS, v3.11.1: a signal to a group reaches its members one at a
+    time, newest first. The KILL reached a subshell's child first, the subshell
+    woke, and it ran its next command before its own KILL landed, after the
+    receipt had recorded `timeout`. STOP wakes nobody, so the group is stopped
+    first and a stopped parent cannot run on when its child dies.
+
+    A member that forks on its own during a pass adds one the pass never
+    listed, so the KILL repeats until none is left to signal, and once more
+    after KILL_GRACE ends. macOS answers EPERM for a group of zombies only,
+    which ends it. Linux answers for a zombie as for a live member, so
+    repeating there would only wait out the grace period, and needs one pass.
+
+    EPERM also means a member this user may not signal. That member survives,
+    as does one that started its own session; nothing here can reach them."""
+    try:
+        os.killpg(pgid, signal.SIGSTOP)
+    except (ProcessLookupError, PermissionError):
+        pass
+    deadline, last = time.monotonic() + KILL_GRACE, _ONE_PASS_KILLS_GROUP
+    while True:
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            return
+        if last:
+            return
+        time.sleep(0.01)
+        last = time.monotonic() >= deadline
+
+
 def _stop(proc) -> None:
     """TERM the whole process group, give the leader the grace period, then KILL
-    the whole group regardless: members that ignore TERM must not outlive it."""
+    the whole group whether or not it went: members that ignore TERM must not
+    outlive it. The leader stays unreaped until then, as in `_exited`."""
     try:
         os.killpg(proc.pid, signal.SIGTERM)
-    except ProcessLookupError:
+    except (ProcessLookupError, PermissionError):
         pass
-    try:
-        proc.wait(timeout=KILL_GRACE)
-    except subprocess.TimeoutExpired:
-        pass
-    try:
-        os.killpg(proc.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
+    if proc.returncode is None:
+        try:
+            _exited(proc, time.monotonic() + KILL_GRACE)
+        except ChildProcessError:
+            pass  # SIGCHLD is ignored here, so the kernel reaped the leader itself
+    _kill_group(proc.pid)
     try:
         proc.wait(timeout=KILL_GRACE)
     except subprocess.TimeoutExpired:
@@ -345,10 +383,7 @@ def _exited(proc, deadline: float) -> bool:
 def _sweep(proc) -> None:
     """KILL members that outlived a leader which exited on its own, then reap."""
     if hasattr(os, "waitid"):
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            pass
+        _kill_group(proc.pid)
     proc.wait()
 
 

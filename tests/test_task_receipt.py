@@ -1,4 +1,6 @@
 """Work receipt contracts; self-contained so copied consumer tests can run."""
+import contextlib
+import errno
 import importlib
 import json
 import os
@@ -193,6 +195,203 @@ def test_members_that_outlive_a_normally_exiting_check_are_killed(project):
     assert r.run_check(project, task_id, "check", 30)["outcome"] == "passed"
     time.sleep(4)
     assert not (project / "outlived").exists()
+
+
+class Group:
+    """A check's process group as the receipt's signals see it on macOS, where a
+    signal to a group is not atomic. A pass reaches the members listed when it
+    began, newest first, one at a time. Between two of them a parent whose child
+    just died runs on and forks its next command, unless it is stopped. A group
+    with no live member answers EPERM."""
+
+    def __init__(self, straggler=None):
+        self.live = ["subshell", "sleep 4"]  # oldest first; `touch` is the subshell's next command
+        self.parent, self.script = {"sleep 4": "subshell"}, {"subshell": ["touch"]}
+        self.stopped, self.ran, self.straggler = set(), [], straggler
+
+    def killpg(self, pgid, sig):
+        if not self.live:
+            raise PermissionError(errno.EPERM, "Operation not permitted")
+        listed = self.live[::-1]
+        if sig == signal.SIGKILL and self.straggler:
+            self.live.append(self.straggler)  # forked on its own during this pass: not listed
+            self.straggler = None
+        for member in listed:
+            if sig == signal.SIGSTOP:
+                self.stopped.add(member)
+            elif sig == signal.SIGKILL:
+                self.live.remove(member)
+                parent = self.parent.get(member)
+                if parent in self.live and parent not in self.stopped and self.script.get(parent):
+                    self.ran.append(self.script[parent].pop(0))
+                    self.live.append(self.ran[-1])
+
+
+class Leader:
+    """A check's leader that has exited; its pid is above every real pid."""
+    pid, returncode = 1 << 30, 0
+
+    def wait(self, timeout=None):
+        return 0
+
+
+ENDINGS = ["_stop", pytest.param("_sweep", marks=pytest.mark.skipif(
+    not hasattr(os, "waitid"), reason="leftover sweep needs waitid"))]
+
+
+@pytest.mark.parametrize("ending", ENDINGS)
+def test_killing_a_child_does_not_let_its_parent_run_the_next_command(monkeypatch, ending):
+    """Found on macOS, v3.11.1: the KILL reached `sleep 4` first, its parent subshell
+    woke and ran `touch` before its own KILL landed, after the receipt said `timeout`."""
+    r = api()
+    monkeypatch.setattr(r, "_ONE_PASS_KILLS_GROUP", False)
+    group = Group()
+    monkeypatch.setattr(os, "killpg", group.killpg)
+    getattr(r, ending)(Leader())
+    assert group.ran == [] and group.live == []
+
+
+@pytest.mark.parametrize("ending", ENDINGS)
+def test_a_member_forked_while_the_group_is_killed_is_killed_too(monkeypatch, ending):
+    """A member that forks on its own during a KILL pass adds one the pass never listed."""
+    r = api()
+    monkeypatch.setattr(r, "_ONE_PASS_KILLS_GROUP", False)
+    group = Group(straggler="daemon")
+    monkeypatch.setattr(os, "killpg", group.killpg)
+    getattr(r, ending)(Leader())
+    assert group.live == []
+
+
+def test_a_kill_pass_that_outlasts_the_grace_period_is_followed_by_one_more(monkeypatch):
+    """Found under load on macOS: one KILL pass took longer than KILL_GRACE, and
+    giving up there left the member that pass had missed."""
+    r = api()
+    monkeypatch.setattr(r, "_ONE_PASS_KILLS_GROUP", False)
+    monkeypatch.setattr(r, "KILL_GRACE", 0.05)
+    group = Group(straggler="daemon")
+
+    def slow_killpg(pgid, sig):
+        group.killpg(pgid, sig)
+        if sig == signal.SIGKILL:
+            time.sleep(0.1)
+
+    monkeypatch.setattr(os, "killpg", slow_killpg)
+    r._stop(Leader())
+    assert group.live == []
+
+
+def test_killing_a_group_that_never_reads_empty_ends_with_the_grace_period(monkeypatch):
+    """A kernel that counts zombies as members keeps answering for a group nobody reaps."""
+    r = api()
+    monkeypatch.setattr(r, "_ONE_PASS_KILLS_GROUP", False)
+    monkeypatch.setattr(r, "KILL_GRACE", 0.2)
+    kills = []
+
+    def killpg(pgid, sig):
+        kills.append(sig)
+        assert len(kills) < 300, "the kill never gave up"
+
+    monkeypatch.setattr(os, "killpg", killpg)
+    started = time.monotonic()
+    r._stop(Leader())
+    assert 0.2 <= time.monotonic() - started < 5 and kills.count(signal.SIGKILL) > 1
+
+
+@pytest.mark.parametrize("ending", ENDINGS)
+def test_a_kernel_that_signals_a_fork_with_its_group_gets_one_kill_pass(monkeypatch, ending):
+    """Linux: an unreaped leader keeps answering, so repeating would stall every check."""
+    r = api()
+    monkeypatch.setattr(r, "_ONE_PASS_KILLS_GROUP", True)
+    monkeypatch.setattr(r, "KILL_GRACE", 0.2)
+    kills = []
+    monkeypatch.setattr(os, "killpg", lambda pgid, sig: kills.append(sig))
+    getattr(r, ending)(Leader())
+    assert kills.count(signal.SIGKILL) == 1
+
+
+def test_the_kill_repeats_on_every_platform_but_linux(monkeypatch):
+    """The platform this suite runs on gets its own rule, with nothing patched."""
+    r = api()
+    monkeypatch.setattr(r, "KILL_GRACE", 0.2)
+    kills = []
+    monkeypatch.setattr(os, "killpg", lambda pgid, sig: kills.append(sig))
+    r._stop(Leader())
+    assert (kills.count(signal.SIGKILL) == 1) == sys.platform.startswith("linux")
+
+
+@pytest.mark.parametrize("refused", [signal.SIGTERM, signal.SIGSTOP, signal.SIGKILL])
+def test_a_group_of_zombies_only_at_a_timeout_is_still_a_timeout(project, monkeypatch, refused):
+    """macOS answers EPERM for a group whose members are all zombies. v3.11.1 let
+    that out of the kill and recorded the timeout as `spawn-failed`."""
+    r = api()
+    monkeypatch.setattr(r, "KILL_GRACE", 1)
+    real = os.killpg
+
+    def killpg(pgid, sig):
+        if sig != refused:
+            return real(pgid, sig)
+        with contextlib.suppress(OSError):
+            real(pgid, sig)
+        raise PermissionError(errno.EPERM, "Operation not permitted")
+
+    monkeypatch.setattr(os, "killpg", killpg)
+    stub(project, "sleep 30")
+    task_id = r.start(project, "task")
+    assert r.run_check(project, task_id, "check", 1)["outcome"] == "timeout"
+
+
+def test_a_timed_out_leader_gets_the_grace_period_to_finish_after_term(project, monkeypatch):
+    """The leader loops; it does not `wait` on a background child. macOS TERMs a
+    group newest member first, so a waiting leader saw its child die, ran off the
+    end of its script and exited before its own TERM arrived. Under load that
+    script lost its trap in 5 of 12 runs, with the grace period intact."""
+    r = api()
+    monkeypatch.setattr(r, "KILL_GRACE", 20)
+    stub(project, "trap 'sleep 1; touch cleaned-up; exit 0' TERM\nwhile :; do sleep 0.1; done")
+    task_id = r.start(project, "task")
+    assert r.run_check(project, task_id, "check", 3)["outcome"] == "timeout"
+    assert (project / "cleaned-up").exists()
+
+
+@pytest.mark.skipif(not hasattr(os, "waitid"), reason="holding the leader needs waitid")
+def test_a_timed_out_leader_is_not_reaped_until_its_group_is_killed(project, monkeypatch):
+    """Once a leader is reaped and its last member is gone, the group id is free
+    for reuse, and a signal sent then could reach a stranger's group."""
+    r = api()
+    monkeypatch.setattr(r, "KILL_GRACE", 1)
+    real, held = os.killpg, []
+
+    def killpg(pgid, sig):
+        if sig != signal.SIGTERM:
+            try:
+                os.waitid(os.P_PID, pgid, os.WEXITED | os.WNOWAIT | os.WNOHANG)
+                held.append(True)
+            except ChildProcessError:
+                held.append(False)
+        return real(pgid, sig)
+
+    monkeypatch.setattr(os, "killpg", killpg)
+    stub(project, "sleep 30")
+    task_id = r.start(project, "task")
+    assert r.run_check(project, task_id, "check", 1)["outcome"] == "timeout"
+    assert held and all(held)
+
+
+@pytest.mark.skipif(not hasattr(os, "waitid"), reason="holding the leader needs waitid")
+def test_a_timeout_whose_leader_was_reaped_for_the_receipt_is_still_a_timeout(
+        project, monkeypatch):
+    """Where SIGCHLD is ignored the kernel reaps the leader itself, and waiting
+    for it without reaping finds no child."""
+    r = api()
+    monkeypatch.setattr(r, "KILL_GRACE", 1)
+
+    def no_child(*args):
+        raise ChildProcessError(errno.ECHILD, "No child processes")
+
+    monkeypatch.setattr(os, "waitid", no_child)
+    stub(project, "sleep 30")
+    task_id = r.start(project, "task")
+    assert r.run_check(project, task_id, "check", 1)["outcome"] == "timeout"
 
 
 @pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGHUP])

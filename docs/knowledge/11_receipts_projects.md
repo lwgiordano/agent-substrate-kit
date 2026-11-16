@@ -1,6 +1,6 @@
 ---
 purpose: Work receipts and read-only multi-project status.
-last_human_reviewed: 2026-10-28
+last_human_reviewed: 2026-11-15
 covers:
   - scripts/task_receipt.py
   - scripts/project_status.py
@@ -62,11 +62,12 @@ fingerprinted, nor with `SKIP`, `PRE_COMMIT_ALLOW_NO_CONFIG`, `PYTEST_ADDOPTS` o
 `PYTEST_PLUGINS`, so the caller's shell cannot trim which hooks or tests run.
 The credential-line match reads the first 1000 characters of a line as it will
 be displayed (invisible characters and markup removed, whitespace collapsed), so
-padding cannot push a value past it; the excerpt never shows more than 500. A timeout (1 to 7200 seconds, default 1800) sends TERM to the
-whole group, waits five seconds, then KILLs the whole group regardless, so
-children that ignore TERM die too. When the check exits on its own, group
-members it left behind are KILLed before the leader is reaped (where
-`os.waitid` exists; elsewhere they are left). Outcomes are distinct: `passed`,
+padding cannot push a value past it; the excerpt never shows more than 500. A timeout (1 to 7200 seconds, default 1800) TERMs the
+group, waits five seconds, then STOPs and KILLs it, so children that ignore
+TERM die and no parent runs on when its child dies. Outside Linux the KILL
+repeats, five seconds at most, until none is left. Members left by a check
+that exits on its own die the same way before the leader is reaped (where
+`os.waitid` exists). Outcomes are distinct: `passed`,
 `failed`, `timeout`, `interrupted` (SIGINT/SIGTERM/SIGHUP to the receipt, or
 the child killed by a signal), and `spawn-failed`. Without process-group
 control the command refuses to run. A child that starts its own session
@@ -179,7 +180,8 @@ becomes an `inspection-failed` row, so one hostile project never aborts or hides
 the others; the report finishes and exits 2. Target values are bounded: version
 and install time over 40 characters read as unknown, a hook path with `..`, an
 absolute path or a NUL reads `unsafe`, and a row keeps at most 50 diagnostics
-with an omitted count. JSON is capped at 1 MiB; projects that do not fit are
+with an omitted count. The text view prints a root's first 120 bytes, the JSON
+all of it. JSON is capped at 1 MiB; projects that do not fit are
 counted in `truncated_projects` and the command exits 2. The report names the inspecting kit's version: its
 `VERSION` file in the kit source, its install record in a consumer.
 

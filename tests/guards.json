@@ -1821,7 +1821,8 @@
       "find": "            except (ValueError, RecursionError):\n                malformed += 1\n",
       "replace": "            except ValueError:\n                malformed += 1\n",
       "tests": [
-        "tests/test_harness_usage.py::test_report_survives_hostile_lines"
+        "tests/test_harness_usage.py::test_report_survives_hostile_lines",
+        "tests/test_harness_usage.py::test_report_counts_a_line_the_parser_recursed_out_of_as_malformed"
       ],
       "why": "one forged line of nested brackets crashed the report"
     },

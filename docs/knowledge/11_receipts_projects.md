@@ -62,11 +62,12 @@ fingerprinted, nor with `SKIP`, `PRE_COMMIT_ALLOW_NO_CONFIG`, `PYTEST_ADDOPTS` o
 `PYTEST_PLUGINS`, so the caller's shell cannot trim which hooks or tests run.
 The credential-line match reads the first 1000 characters of a line as it will
 be displayed (invisible characters and markup removed, whitespace collapsed), so
-padding cannot push a value past it; the excerpt never shows more than 500. A timeout (1 to 7200 seconds, default 1800) sends TERM to the
-whole group, waits five seconds, then KILLs the whole group regardless, so
-children that ignore TERM die too. When the check exits on its own, group
-members it left behind are KILLed before the leader is reaped (where
-`os.waitid` exists; elsewhere they are left). Outcomes are distinct: `passed`,
+padding cannot push a value past it; the excerpt never shows more than 500. A timeout (1 to 7200 seconds, default 1800) TERMs the
+group, waits five seconds, then STOPs and KILLs it, so children that ignore
+TERM die and no parent runs on when its child dies. Outside Linux the KILL
+repeats, five seconds at most, until none is left. Members left by a check
+that exits on its own die the same way before the leader is reaped (where
+`os.waitid` exists). Outcomes are distinct: `passed`,
 `failed`, `timeout`, `interrupted` (SIGINT/SIGTERM/SIGHUP to the receipt, or
 the child killed by a signal), and `spawn-failed`. Without process-group
 control the command refuses to run. A child that starts its own session

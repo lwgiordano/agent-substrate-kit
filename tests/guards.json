@@ -1079,8 +1079,8 @@
     {
       "id": "receipt-kills-process-group",
       "file": "scripts/task_receipt.py",
-      "find": "    try:\n        os.killpg(proc.pid, signal.SIGKILL)\n",
-      "replace": "    try:\n        pass\n",
+      "find": "    _kill_group(proc.pid)\n    try:\n",
+      "replace": "    try:\n",
       "tests": [
         "tests/test_task_receipt.py::test_timeout_kills_the_whole_process_group_even_children_that_ignore_term"
       ],
@@ -1170,8 +1170,8 @@
     {
       "id": "receipt-sweeps-leftover-members",
       "file": "scripts/task_receipt.py",
-      "find": "            os.killpg(proc.pid, signal.SIGKILL)\n",
-      "replace": "            pass\n",
+      "find": "        _kill_group(proc.pid)\n",
+      "replace": "        pass\n",
       "tests": [
         "tests/test_task_receipt.py::test_members_that_outlive_a_normally_exiting_check_are_killed"
       ],
@@ -1896,6 +1896,126 @@
         "tests/test_hook_scripts.py::test_release_gate_outside_a_cloud_session_still_publishes"
       ],
       "why": "a persistent clone could not opt out, and the suite would read differently in the cloud"
+    },
+    {
+      "id": "receipt-kill-repeats-until-no-member-is-left",
+      "file": "scripts/task_receipt.py",
+      "find": "        if last:\n            return\n        time.sleep(0.01)\n",
+      "replace": "        return\n",
+      "tests": [
+        "tests/test_task_receipt.py::test_a_member_forked_while_the_group_is_killed_is_killed_too"
+      ],
+      "why": "on macOS a process forked while a timed-out check is being killed keeps running after the receipt says it was stopped"
+    },
+    {
+      "id": "receipt-kill-ends-with-the-grace-period",
+      "file": "scripts/task_receipt.py",
+      "find": "        last = time.monotonic() >= deadline\n",
+      "replace": "        last = False\n",
+      "tests": [
+        "tests/test_task_receipt.py::test_killing_a_group_that_never_reads_empty_ends_with_the_grace_period"
+      ],
+      "why": "a group the kernel never reports empty is killed forever, so a timed-out check never returns and no result is recorded"
+    },
+    {
+      "id": "receipt-kill-is-one-pass-on-linux",
+      "file": "scripts/task_receipt.py",
+      "find": "    deadline, last = time.monotonic() + KILL_GRACE, _ONE_PASS_KILLS_GROUP\n",
+      "replace": "    deadline, last = time.monotonic() + KILL_GRACE, False\n",
+      "tests": [
+        "tests/test_task_receipt.py::test_a_kernel_that_signals_a_fork_with_its_group_gets_one_kill_pass"
+      ],
+      "why": "on Linux an unreaped leader keeps answering the kill, so every check stalls for the grace period before its result is recorded"
+    },
+    {
+      "id": "receipt-zombie-group-at-kill-is-not-an-error",
+      "file": "scripts/task_receipt.py",
+      "find": "        except (ProcessLookupError, PermissionError):\n            return\n",
+      "replace": "        except ProcessLookupError:\n            return\n",
+      "tests": [
+        "tests/test_task_receipt.py::test_a_group_of_zombies_only_at_a_timeout_is_still_a_timeout"
+      ],
+      "why": "on macOS a timed-out check whose group holds only zombies is recorded as spawn-failed"
+    },
+    {
+      "id": "receipt-zombie-group-at-term-is-not-an-error",
+      "file": "scripts/task_receipt.py",
+      "find": "        os.killpg(proc.pid, signal.SIGTERM)\n    except (ProcessLookupError, PermissionError):\n",
+      "replace": "        os.killpg(proc.pid, signal.SIGTERM)\n    except ProcessLookupError:\n",
+      "tests": [
+        "tests/test_task_receipt.py::test_a_group_of_zombies_only_at_a_timeout_is_still_a_timeout"
+      ],
+      "why": "on macOS stopping a check whose group holds only zombies raises out of the receipt, and no result is recorded"
+    },
+    {
+      "id": "receipt-freezes-the-group-before-killing-it",
+      "file": "scripts/task_receipt.py",
+      "find": "    try:\n        os.killpg(pgid, signal.SIGSTOP)\n",
+      "replace": "    try:\n        pass\n",
+      "tests": [
+        "tests/test_task_receipt.py::test_killing_a_child_does_not_let_its_parent_run_the_next_command"
+      ],
+      "why": "on macOS killing a shell's child wakes the shell, which runs its next command after the receipt says the check was stopped"
+    },
+    {
+      "id": "receipt-zombie-group-at-freeze-is-not-an-error",
+      "file": "scripts/task_receipt.py",
+      "find": "        os.killpg(pgid, signal.SIGSTOP)\n    except (ProcessLookupError, PermissionError):\n",
+      "replace": "        os.killpg(pgid, signal.SIGSTOP)\n    except ProcessLookupError:\n",
+      "tests": [
+        "tests/test_task_receipt.py::test_a_group_of_zombies_only_at_a_timeout_is_still_a_timeout"
+      ],
+      "why": "on macOS every check that leaves only its exited leader is recorded as spawn-failed"
+    },
+    {
+      "id": "receipt-holds-the-leader-until-its-group-is-killed",
+      "file": "scripts/task_receipt.py",
+      "find": "        try:\n            _exited(proc, time.monotonic() + KILL_GRACE)\n        except ChildProcessError:\n",
+      "replace": "        try:\n            proc.wait(timeout=KILL_GRACE)\n        except subprocess.TimeoutExpired:\n",
+      "tests": [
+        "tests/test_task_receipt.py::test_a_timed_out_leader_is_not_reaped_until_its_group_is_killed"
+      ],
+      "why": "a reaped leader frees its group id, and the kill that follows can reach a stranger's group that reused it"
+    },
+    {
+      "id": "receipt-kill-repeats-off-linux-by-default",
+      "file": "scripts/task_receipt.py",
+      "find": "_ONE_PASS_KILLS_GROUP = sys.platform.startswith(\"linux\")\n",
+      "replace": "_ONE_PASS_KILLS_GROUP = not sys.platform.startswith(\"linux\")\n",
+      "tests": [
+        "tests/test_task_receipt.py::test_the_kill_repeats_on_every_platform_but_linux"
+      ],
+      "why": "macOS gets the single KILL pass that misses a member forked while it runs, and Linux stalls every check for the grace period"
+    },
+    {
+      "id": "receipt-gives-the-leader-its-grace-period",
+      "file": "scripts/task_receipt.py",
+      "find": "            _exited(proc, time.monotonic() + KILL_GRACE)\n",
+      "replace": "            pass\n",
+      "tests": [
+        "tests/test_task_receipt.py::test_a_timed_out_leader_gets_the_grace_period_to_finish_after_term"
+      ],
+      "why": "a timed-out check is killed the instant TERM is sent, so its own cleanup never runs"
+    },
+    {
+      "id": "receipt-timeout-survives-an-ignored-sigchld",
+      "file": "scripts/task_receipt.py",
+      "find": "        except ChildProcessError:\n",
+      "replace": "        except ZeroDivisionError:\n",
+      "tests": [
+        "tests/test_task_receipt.py::test_a_timeout_whose_leader_was_reaped_for_the_receipt_is_still_a_timeout"
+      ],
+      "why": "where SIGCHLD is ignored a timeout raises out of the receipt, and no result is recorded"
+    },
+    {
+      "id": "receipt-kill-makes-one-more-pass-after-the-grace-period",
+      "file": "scripts/task_receipt.py",
+      "find": "        if last:\n",
+      "replace": "        if last or time.monotonic() >= deadline:\n",
+      "tests": [
+        "tests/test_task_receipt.py::test_a_kill_pass_that_outlasts_the_grace_period_is_followed_by_one_more"
+      ],
+      "why": "under load one KILL pass outlasts the grace period, and the member it missed is left running"
     }
   ]
 }

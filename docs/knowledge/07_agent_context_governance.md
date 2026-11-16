@@ -1,6 +1,6 @@
 ---
 purpose: Agent context inventory, harness scanning, budgets, and doc drift.
-last_human_reviewed: 2026-10-31
+last_human_reviewed: 2026-11-16
 covers:
   - agentsync.sh
   - manage.sh

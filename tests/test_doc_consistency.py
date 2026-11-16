@@ -9,6 +9,7 @@ is skipped (no bootstrap.sh) inside an installed repo.
 """
 from __future__ import annotations
 
+import json
 import re
 from datetime import date
 from pathlib import Path
@@ -46,6 +47,7 @@ KNOWLEDGE_ASSERTS = {
     "bootstrap.sh::_safe_mkdir_p",
     "scripts/_doc_common.py::history_outcome_problem",
     "scripts/_doc_common.py::release_evidence_status",
+    "scripts/_doc_common.py::def wording_problem",
     "scripts/task_brief.py::build",
     "scripts/_task_evidence.py::git_facts",
     "scripts/_task_evidence.py::def trusted_executable",
@@ -229,39 +231,74 @@ def test_superpowers_execution_docs_are_governed_context() -> None:
     )
 
 
-def test_no_old_product_names() -> None:
-    offenders = []
-    for p in _scannable():
-        text = p.read_text(encoding="utf-8", errors="replace")
-        if "META_SYSTEM_KIT" in text or "META_SYSTEM_SPEC" in text:
-            offenders.append(f"{p.relative_to(KIT)}: META_SYSTEM reference")
-        if re.search(r"\bKit v2\b|agent_substrate_kit_v2", text):
-            offenders.append(f"{p.relative_to(KIT)}: v2 reference")
-    assert not offenders, "stale product names:\n" + "\n".join(offenders)
+def _wording_rules() -> list[dict]:
+    """The wording rules of tests/doc_wording_rules.json. HISTORY and REJECTED are
+    append-only and these scans read them too, so scripts/append_history.py and
+    scripts/append_rejected.py apply the same file to an entry BEFORE they record
+    it (`wording_problem`). Keeping the rules in one file is what stops the scans
+    from refusing an entry its appender accepted, which nothing could then fix."""
+    if KIT is None:
+        return []
+    return json.loads((KIT / "tests" / "doc_wording_rules.json").read_text(encoding="utf-8"))["rules"]
 
 
-def test_no_deprecated_codex_flag() -> None:
-    # `codex_hooks` is the deprecated alias; canonical is `hooks`.
-    # Allowed only when the line explicitly documents the deprecation.
-    ctx = re.compile(r"(?i)deprecat|was\s+`?codex_hooks|alias")
-    # \b...\b excludes identifiers like `_codex_hooks_use_...`.
-    flag = re.compile(r"\bcodex_hooks\b")
-    offenders = []
-    for p in _scannable():
-        for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
-            if flag.search(line) and not ctx.search(line):
-                offenders.append(f"{p.relative_to(KIT)}: {line.strip()[:80]}")
-    assert not offenders, "deprecated codex_hooks flag:\n" + "\n".join(offenders)
+_WORDING_SCOPES = {"scannable": _scannable, "docs": _docs}
 
 
-def test_no_stale_python_version() -> None:
-    # The substrate targets 3.11+. A pinned 3.13 in templates is stale.
-    offenders = []
-    for p in _scannable():
-        for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
-            if re.search(r"python[:/ -]?3\.13", line, re.IGNORECASE):
-                offenders.append(f"{p.relative_to(KIT)}: {line.strip()[:80]}")
-    assert not offenders, "stale Python 3.13 pin:\n" + "\n".join(offenders)
+@pytest.mark.parametrize("rule", _wording_rules(), ids=lambda rule: rule["id"])
+def test_agent_facing_text_passes_the_wording_rules(rule) -> None:
+    """Stale wording becomes bad agent context: an old product name, the
+    deprecated codex flag, a pinned 3.13, a removed script or command, sourcing
+    the config. A line that matches the rule's `excused_by` documents the removal
+    and is let through."""
+    pattern = re.compile(rule["pattern"])
+    excused = re.compile(rule["excused_by"]) if rule["excused_by"] else None
+    offenders = [
+        f"{p.relative_to(KIT)}: {line.strip()[:80]}"
+        for p in _WORDING_SCOPES[rule["scope"]]()
+        for line in p.read_text(encoding="utf-8", errors="replace").splitlines()
+        if pattern.search(line) and not (excused and excused.search(line))
+    ]
+    assert not offenders, f"{rule['id']} ({rule['why']}):\n" + "\n".join(offenders)
+
+
+# Lines each rule must refuse and, where it has an excuse, one it must let
+# through. Without them a rule that was weakened, or that matched nothing at all,
+# passed every test, and so did a rule file that had lost one of the six scans
+# that lived in this file before the appenders needed to read them.
+_WORDING_SAMPLES = {
+    "old-product-name": (["META_SYSTEM_KIT", "META_SYSTEM_SPEC", "the Kit v2 notes",
+                          "agent_substrate_kit_v2"], None),
+    "deprecated-codex-flag": (["set codex_hooks = true"], "codex_hooks is the deprecated alias"),
+    "stale-python-pin": (["python 3.13", "Python-3.13", "python:3.13", "python/3.13",
+                          "python3.13"], None),
+    "sourcing-substrate-config": (["then . .substrate/config", "source .substrate/config"],
+                                  "do not source .substrate/config"),
+    "removed-script": (["call snapshot_session.py first"], "snapshot_session.py was removed"),
+    "removed-manage-command": (["run ./manage.sh tools"], "manage.sh tools is no longer there"),
+}
+
+
+def test_every_wording_rule_refuses_its_samples_and_honours_its_excuse() -> None:
+    """Judged by `_doc_common.wording_problem`, the function the appenders of
+    HISTORY and REJECTED call, so the scans and the appenders are held to one
+    reading of every rule."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "_wording_doc_common", KIT / "scripts" / "_doc_common.py")
+    doc_common = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(doc_common)
+    rules_text = (KIT / "tests" / "doc_wording_rules.json").read_text(encoding="utf-8")
+    assert {rule["id"] for rule in _wording_rules()} == set(_WORDING_SAMPLES)
+    for rule in _wording_rules():
+        refused, excused = _WORDING_SAMPLES[rule["id"]]
+        for line in refused:
+            problem = doc_common.wording_problem(rules_text, line)
+            assert problem and rule["id"] in problem, (rule["id"], line)
+        assert (excused is None) == (rule["excused_by"] is None), rule["id"]
+        if excused is not None:
+            assert doc_common.wording_problem(rules_text, excused) is None, (rule["id"], excused)
+    assert doc_common.wording_problem(rules_text, "an ordinary line about Python 3.11") is None
 
 
 def test_readme_current_status_matches_version() -> None:
@@ -313,47 +350,12 @@ def test_referenced_github_paths_are_generated() -> None:
         )
 
 
-def test_no_references_to_removed_scripts() -> None:
-    # A mention is stale only if it's NOT in a removal/changelog context.
-    removed = ["snapshot_session.py"]
-    removal_ctx = re.compile(r"(?i)remov|deprecat|superseded|no longer|changelog")
-    offenders = []
-    for p in _docs():
-        for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
-            for r in removed:
-                if r in line and not removal_ctx.search(line):
-                    offenders.append(f"{p.relative_to(KIT)}: {line.strip()[:80]}")
-    assert not offenders, "live references to removed scripts:\n" + "\n".join(offenders)
-
-
 def test_documented_manage_commands_exist() -> None:
     manage = (KIT / "templates" / "manage.sh.template").read_text(encoding="utf-8")
     # Commands the README/quickstart tell operators to run.
     for cmd in ("setup", "doctor", "check", "audit", "release", "handoff"):
         # case patterns may be piped, e.g. `release|release-gate)`.
         assert re.search(rf"\b{cmd}[)|]", manage), f"manage.sh missing '{cmd}' command"
-    # A removed command must not be advertised as usable (changelog
-    # mentions of its removal are fine).
-    removal_ctx = re.compile(r"(?i)remov|deprecat|superseded|no longer")
-    for p in _docs():
-        for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
-            if "manage.sh tools" in line and not removal_ctx.search(line):
-                raise AssertionError(
-                    f"{p.relative_to(KIT)} advertises removed 'manage.sh tools': {line.strip()[:80]}"
-                )
-
-
-def test_docs_do_not_recommend_sourcing_substrate_config() -> None:
-    """No agent-facing doc/script should recommend `. .substrate/config`
-    or `source .substrate/config` (re-introduces the config-as-shell P0).
-    Changelog history is exempt (it documents the fix)."""
-    ctx = re.compile(r"(?i)remov|deprecat|no longer|do not source|don't source|history|v3\.2\.1[01]|sourced as shell|was \. \.substrate")
-    offenders = []
-    for p in _scannable():
-        for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
-            if re.search(r"(?<![\w/])\.\s+\.substrate/config|source\s+\.substrate/config", line) and not ctx.search(line):
-                offenders.append(f"{p.relative_to(KIT)}: {line.strip()[:80]}")
-    assert not offenders, "docs recommend sourcing .substrate/config:\n" + "\n".join(offenders)
 
 
 def test_pyproject_template_version_current() -> None:

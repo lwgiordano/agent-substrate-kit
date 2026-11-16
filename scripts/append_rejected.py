@@ -35,7 +35,16 @@ from pathlib import Path
 # Explicit local import path so this works under `python -I` (isolated mode
 # does NOT auto-prepend the script dir). Stdlib imports above resolve first.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _doc_common import locked_atomic_append, record_in_chain, repo_root, utc_now_iso
+from _doc_common import (
+    WORDING_RULES,
+    locked_atomic_append,
+    record_in_chain,
+    repo_root,
+    safe_read_text,
+    utc_now_iso,
+    wording_problem,
+    wording_rules_present,
+)
 
 REJECTED_HEADER = """\
 # REJECTED.md — Append-only log of rejected approaches
@@ -93,6 +102,13 @@ def main(argv=None) -> int:
     entry = compose_entry(utc_now_iso(), what, why)
 
     root = repo_root()
+    # Refused while it can still be rephrased: a recorded entry cannot be reworded.
+    if wording_rules_present(root):
+        problem = wording_problem(
+            safe_read_text(root / WORDING_RULES, root, max_bytes=1 << 20), entry)
+        if problem:
+            print(f"append_rejected: {problem}", file=sys.stderr)
+            return 1
     target = root / "docs" / "REJECTED.md"
     try:
         atomic_append(target, entry)

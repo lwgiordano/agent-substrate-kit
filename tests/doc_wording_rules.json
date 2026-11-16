@@ -1,0 +1,47 @@
+{
+  "about": "Wording the doc scans refuse in agent-facing files. tests/test_doc_consistency.py applies each rule to the files in its scope. scripts/append_history.py and scripts/append_rejected.py apply every rule to an entry before they record it, because a recorded entry cannot be reworded. A line that matches `excused_by` is let through.",
+  "rules": [
+    {
+      "id": "old-product-name",
+      "scope": "scannable",
+      "pattern": "META_SYSTEM_KIT|META_SYSTEM_SPEC|\\bKit v2\\b|agent_substrate_kit_v2",
+      "excused_by": null,
+      "why": "names the product had before v3"
+    },
+    {
+      "id": "deprecated-codex-flag",
+      "scope": "scannable",
+      "pattern": "\\bcodex_hooks\\b",
+      "excused_by": "(?i)deprecat|was\\s+`?codex_hooks|alias",
+      "why": "`codex_hooks` is the deprecated alias; the flag is `hooks`"
+    },
+    {
+      "id": "stale-python-pin",
+      "scope": "scannable",
+      "pattern": "(?i)python[:/ -]?3\\.13",
+      "excused_by": null,
+      "why": "the substrate targets 3.11 and later, so a pinned 3.13 is stale"
+    },
+    {
+      "id": "sourcing-substrate-config",
+      "scope": "scannable",
+      "pattern": "(?<![\\w/])\\.\\s+\\.substrate/config|source\\s+\\.substrate/config",
+      "excused_by": "(?i)remov|deprecat|no longer|do not source|don't source|history|v3\\.2\\.1[01]|sourced as shell|was \\. \\.substrate",
+      "why": "sourcing the config runs it as shell"
+    },
+    {
+      "id": "removed-script",
+      "scope": "docs",
+      "pattern": "snapshot_session\\.py",
+      "excused_by": "(?i)remov|deprecat|superseded|no longer|changelog",
+      "why": "the script was removed"
+    },
+    {
+      "id": "removed-manage-command",
+      "scope": "docs",
+      "pattern": "manage\\.sh tools",
+      "excused_by": "(?i)remov|deprecat|superseded|no longer",
+      "why": "`manage.sh tools` was removed"
+    }
+  ]
+}

@@ -1,6 +1,6 @@
 ---
 purpose: Lessons with evidence, the record the chain attests, outcome labels, and recall.
-last_human_reviewed: 2026-11-02
+last_human_reviewed: 2026-11-16
 covers:
   - scripts/check_lessons.py
   - scripts/recall.py
@@ -16,6 +16,7 @@ asserts:
   - scripts/memory_log.py::release_pass
   - scripts/_doc_common.py::history_outcome_problem
   - scripts/_doc_common.py::release_evidence_status
+  - scripts/_doc_common.py::def wording_problem
   - scripts/check_lessons.py::evidence_exists
   - scripts/task_brief.py::build
   - scripts/_task_evidence.py::git_facts
@@ -72,6 +73,13 @@ whole-file hash would break on every legitimate merge. A lesson's unit is its
 id and rule text: `status` and `last_confirmed` may move, while a reworded
 rule is a mismatch. Change a rule by superseding it. An unrecorded insertion is
 not detected by the chain; git history shows it.
+
+A recorded entry cannot be reworded, so both appenders check its wording before
+they write. Where a repository keeps `tests/doc_wording_rules.json`, its doc
+scans read HISTORY and REJECTED with those rules, and
+`_doc_common.wording_problem` refuses an entry that would fail them. Rules that
+exist and cannot be applied are a refusal too. Without the file nothing is
+checked: a consumer install has no such scans.
 
 `record`, `release-pass`, and `anchor-forced` are reserved event types: the
 generic `append` command refuses them, because other gates trust them.

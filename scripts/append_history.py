@@ -45,6 +45,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _doc_common import (
     HISTORY_OUTCOME_LINE_RE,
+    WORDING_RULES,
     git_short_sha,
     history_outcome_problem,
     locked_atomic_append,
@@ -52,6 +53,8 @@ from _doc_common import (
     repo_root,
     safe_read_text,
     utc_now_iso,
+    wording_problem,
+    wording_rules_present,
 )
 
 
@@ -287,6 +290,14 @@ def main() -> int:
         print("append_history: a field may not contain its own **Outcome:** line",
               file=sys.stderr)
         return 1
+
+    # Refused while it can still be rephrased, like the session-start filter above.
+    if wording_rules_present(root):
+        problem = wording_problem(
+            safe_read_text(root / WORDING_RULES, root, max_bytes=1 << 20), entry)
+        if problem:
+            print(f"append_history: {problem}", file=sys.stderr)
+            return 1
 
     try:
         atomic_append(target, entry)

@@ -1685,6 +1685,160 @@ def test_append_history_cli_validates_and_guards_off_by_one(tmp_path) -> None:
     assert "abc1234" in body and "**Knowledge:**" in body
 
 
+_WORDING_RULES = "tests/doc_wording_rules.json"
+# Built from parts so the doc scans do not read this file as carrying the wording
+# its own tests feed to the appenders.
+_PINNED_INTERPRETER = "Python 3." + "13"
+_OLD_CODEX_FLAG = "codex" + "_hooks"
+_OLD_PRODUCT_NAME = "Kit" + " v2"
+
+
+def _wording_repo(tmp_path, rules: str | None) -> Path:
+    """A repository with (or, for None, without) a wording-rules file."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / "docs").mkdir()
+    if rules is not None:
+        (tmp_path / "tests").mkdir()
+        (tmp_path / _WORDING_RULES).write_text(rules, encoding="utf-8")
+    return tmp_path
+
+
+def _kit_wording_rules() -> str:
+    return (SCRIPTS.parent / _WORDING_RULES).read_text(encoding="utf-8")
+
+
+def _append_history(repo: Path, second_sentence: str):
+    return subprocess.run(
+        [sys.executable, "-I", str(SCRIPTS / "append_history.py"), "--commit-hash", "abc1234",
+         "--summary", "documents an explicit commit", "--files", "src/app.py",
+         "--intent", "a sufficiently long intent",
+         "--knowledge", "An ordinary first sentence about the change. " + second_sentence],
+        cwd=repo, capture_output=True, text=True, timeout=60)
+
+
+def test_append_history_refuses_wording_the_doc_scans_reject(tmp_path) -> None:
+    """Found releasing v3.11.2: the doc scans read HISTORY too, but only after an
+    entry is recorded, when it can no longer be reworded. An entry named the
+    interpreter the gate ran on, the stale-pin scan failed, and the release gate
+    had to run again in a fresh clone. The appender applies the same rules first."""
+    repo = _wording_repo(tmp_path, _kit_wording_rules())
+    r = _append_history(repo, f"The gate ran on {_PINNED_INTERPRETER} on this host.")
+    assert r.returncode == 1 and "stale-python-pin" in r.stderr, r.stdout + r.stderr
+    assert not (repo / "docs" / "HISTORY.md").exists(), "a refused entry was written"
+    ok = _append_history(repo, "The gate ran on a newer interpreter on this host.")
+    assert ok.returncode == 0, ok.stderr
+
+
+def test_append_history_checks_wording_only_where_a_repository_keeps_rules(tmp_path) -> None:
+    """A consumer install has no rules file and no doc scans: its entries may
+    name any interpreter."""
+    repo = _wording_repo(tmp_path, None)
+    r = _append_history(repo, f"The service now runs on {_PINNED_INTERPRETER}.")
+    assert r.returncode == 0, r.stderr
+    assert _PINNED_INTERPRETER in (repo / "docs" / "HISTORY.md").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("rules", [
+    "{",
+    '{"rules": "none"}',
+    '{"rules": []}',
+    '{"rules": [{"id": "broken", "pattern": "("}]}',
+    '{"rules": [{"id": "huge", "pattern": "a{99999999999}"}]}',
+    '{"rules": [{"pattern": "x"}]}',
+])
+def test_append_history_refuses_when_the_wording_rules_cannot_be_applied(tmp_path, rules) -> None:
+    """Rules that exist and cannot be applied are a refusal, never a pass: the
+    entry could not be reworded afterwards."""
+    repo = _wording_repo(tmp_path, rules)
+    r = _append_history(repo, "Nothing in this note trips a rule.")
+    assert r.returncode == 1 and _WORDING_RULES in r.stderr, r.stdout + r.stderr
+    assert not (repo / "docs" / "HISTORY.md").exists(), "an unchecked entry was written"
+
+
+def test_append_history_refuses_a_linked_wording_rules_file(tmp_path) -> None:
+    """A rules file that is a link is there and cannot be read safely: a refusal,
+    though the file it points at is a valid rules file."""
+    outside = tmp_path / "outside.json"
+    outside.write_text(_kit_wording_rules(), encoding="utf-8")
+    repo = _wording_repo(tmp_path / "repo", None)
+    (repo / "tests").mkdir()
+    (repo / _WORDING_RULES).symlink_to(outside)
+    r = _append_history(repo, "Nothing in this note trips a rule.")
+    assert r.returncode == 1 and _WORDING_RULES in r.stderr, r.stdout + r.stderr
+    assert not (repo / "docs" / "HISTORY.md").exists(), "an unchecked entry was written"
+
+
+def test_rules_that_cannot_be_looked_at_count_as_present(tmp_path, monkeypatch) -> None:
+    """Security audit: a presence test that swallows every error read a tests/
+    directory without search permission as `no rules`, and the entry went
+    unchecked. Only a path that is not there is absent."""
+    from _doc_common import wording_rules_present
+    assert wording_rules_present(tmp_path) is False
+
+    def denied(*_args, **_kwargs):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(os, "lstat", denied)
+    assert wording_rules_present(tmp_path) is True
+
+
+@pytest.mark.parametrize("field", ["--summary", "--files", "--intent"])
+def test_append_history_checks_the_wording_of_every_field(tmp_path, field) -> None:
+    """The scans read whole lines of the record, so every field is checked, not
+    only the knowledge note."""
+    repo = _wording_repo(tmp_path, _kit_wording_rules())
+    args = {"--summary": "documents an explicit commit", "--files": "src/app.py",
+            "--intent": "a sufficiently long intent",
+            "--knowledge": "An ordinary first sentence about the change."}
+    args[field] += f" from the {_OLD_PRODUCT_NAME} days"
+    r = subprocess.run(
+        [sys.executable, "-I", str(SCRIPTS / "append_history.py"), "--commit-hash", "abc1234",
+         *[part for pair in args.items() for part in pair]],
+        cwd=repo, capture_output=True, text=True, timeout=60)
+    assert r.returncode == 1 and "old-product-name" in r.stderr, r.stdout + r.stderr
+    assert not (repo / "docs" / "HISTORY.md").exists(), "a refused entry was written"
+
+
+def test_a_line_that_its_own_context_excuses_passes_the_wording_rules(tmp_path) -> None:
+    repo = _wording_repo(tmp_path, _kit_wording_rules())
+    refused = _append_history(repo, f"Hosts still read {_OLD_CODEX_FLAG} from the old file.")
+    assert refused.returncode == 1 and "deprecated-codex-flag" in refused.stderr, refused.stderr
+    r = _append_history(repo, f"The deprecated {_OLD_CODEX_FLAG} alias left the template.")
+    assert r.returncode == 0, r.stderr
+
+
+def test_append_rejected_refuses_wording_the_doc_scans_reject(tmp_path) -> None:
+    """REJECTED.md is recorded and scanned like HISTORY, so it had the same trap."""
+    repo = _wording_repo(tmp_path, _kit_wording_rules())
+
+    def reject(what: str):
+        return subprocess.run(
+            [sys.executable, "-I", str(SCRIPTS / "append_rejected.py"), "--what", what,
+             "--why", "the kit has to run on every supported interpreter"],
+            cwd=repo, capture_output=True, text=True, timeout=60)
+
+    r = reject(f"pin the kit to {_PINNED_INTERPRETER}")
+    assert r.returncode == 1 and "stale-python-pin" in r.stderr, r.stdout + r.stderr
+    assert not (repo / "docs" / "REJECTED.md").exists(), "a refused entry was written"
+    assert reject("pin the kit to one interpreter").returncode == 0
+
+
+def test_append_rejected_refuses_a_linked_wording_rules_file(tmp_path) -> None:
+    outside = tmp_path / "outside.json"
+    outside.write_text(_kit_wording_rules(), encoding="utf-8")
+    repo = _wording_repo(tmp_path / "repo", None)
+    (repo / "tests").mkdir()
+    (repo / _WORDING_RULES).symlink_to(outside)
+    r = subprocess.run(
+        [sys.executable, "-I", str(SCRIPTS / "append_rejected.py"),
+         "--what", "pin the kit to one interpreter",
+         "--why", "the kit has to run on every supported interpreter"],
+        cwd=repo, capture_output=True, text=True, timeout=60)
+    assert r.returncode == 1 and _WORDING_RULES in r.stderr, r.stdout + r.stderr
+    assert not (repo / "docs" / "REJECTED.md").exists(), "an unchecked entry was written"
+
+
 def _bus_repo(tmp_path, entries: str) -> Path:
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
     (tmp_path / "AGENT_BUS.md").write_text("# Bus\n\n" + entries, encoding="utf-8")

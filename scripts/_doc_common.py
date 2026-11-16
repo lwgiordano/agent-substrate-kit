@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import errno
 import fcntl
+import json
 import os
 import re
 import subprocess
@@ -1294,3 +1295,59 @@ def record_in_chain(root: Path, relpath: str) -> tuple[int, str]:
     except Exception as e:  # pragma: no cover - environment failure
         return 1, f"memory_log did not run: {e}"
     return p.returncode, (p.stdout + p.stderr).strip()
+
+
+WORDING_RULES = "tests/doc_wording_rules.json"
+
+
+def wording_rules_present(root: Path) -> bool:
+    """Whether this repository keeps a wording-rules file.
+
+    Only a path that is not there counts as absent. Any other failure to look (no
+    search permission on tests/, say) counts as present, so the caller's guarded
+    read fails and `wording_problem` refuses the entry instead of leaving it
+    unchecked."""
+    try:
+        os.lstat(root / WORDING_RULES)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except OSError:
+        return True
+    return True
+
+
+def wording_problem(rules_text: str | None, text: str) -> str | None:
+    """Why `text` may not be appended to an append-only record, or None.
+
+    Found releasing v3.11.2: a repository that keeps WORDING_RULES scans its
+    agent-facing files with them (the kit source does, in
+    tests/test_doc_consistency.py), and those scans read HISTORY and REJECTED
+    too. They ran only after an entry was recorded, when it could no longer be
+    reworded, so one stale phrase cost a second release gate. The appenders now
+    apply the same rules to the entry first.
+
+    `rules_text` is the rules file as the caller's guarded reader returned it, so
+    None means the file is there and could not be read. That, rules that do not
+    parse or compile, and an empty rule list are all a refusal, never a pass: the
+    unchecked entry would be just as permanent. A repository with no rules file
+    has no such scans and never calls this (`wording_rules_present`)."""
+    try:
+        rules = [(r["id"], re.compile(r["pattern"]),
+                  re.compile(r["excused_by"]) if r.get("excused_by") else None)
+                 for r in json.loads(rules_text)["rules"]]
+        if not rules or not all(isinstance(rule_id, str) and rule_id for rule_id, _, _ in rules):
+            raise TypeError("no rules, or a rule without an id")
+    except (ValueError, KeyError, TypeError, AttributeError, OverflowError, RecursionError,
+            re.error):
+        return (f"{WORDING_RULES} exists but cannot be applied: it must be a private regular "
+                "file holding a JSON object with a non-empty `rules` list of id, pattern and "
+                "optional excused_by. Nothing was written, because an entry cannot be "
+                "reworded once it is recorded.")
+    tripped = sorted({rule_id for line in text.splitlines() for rule_id, pattern, excused in rules
+                      if pattern.search(line) and not (excused and excused.search(line))})
+    if not tripped:
+        return None
+    return (f"this entry would fail the repository's doc scans (rules in {WORDING_RULES}): "
+            f"{', '.join(tripped)}. The scans read the record this entry goes into, and an "
+            "entry cannot be reworded once it is recorded, so nothing was written. Rephrase "
+            "it and run again.")

@@ -140,7 +140,25 @@ def make_copy(root: Path, dest: Path) -> None:
                        env=env, check=True)
 
 
-def run_tests(copy: Path, nodes: list[str]) -> tuple[int, str]:
+# Where a tree keeps the tools its checks use, relative to its root.
+_TOOL_DIRS = (".venv/bin", ".substrate/venv/bin")
+
+
+def _path_with_tree_tools(root: Path, path: str) -> str:
+    """PATH for the copy's tests: the caller's, then the proven tree's tool dirs.
+
+    The copy holds tracked files only, so a tool that lives in the tree's own
+    environment is not in it. Under `uv` that is ruff: the interpreter running
+    this file has none beside it, and the copy has no `.venv`. A test that needs
+    the tool then skipped in the copy, with the guard and without it, so the
+    guard SURVIVED for want of a linter (found releasing v3.11.2 on a host with
+    no ruff on PATH). Appended, never prepended: a name the caller's PATH already
+    resolves keeps resolving to the same file."""
+    extra = [str(root / d) for d in _TOOL_DIRS if os.path.isdir(root / d)]
+    return os.pathsep.join(([path] if path else []) + extra)
+
+
+def run_tests(copy: Path, nodes: list[str], root: Path | None = None) -> tuple[int, str]:
     # Strip, never set: a project-dir variable naming the live repo would point
     # the copy's tests back at it, and setting it to the copy overrides the
     # temp-repo fixtures the tests build for themselves.
@@ -153,6 +171,8 @@ def run_tests(copy: Path, nodes: list[str]) -> tuple[int, str]:
     # previous guard's MUTATED code to the next run, a failure credited to the
     # wrong guard: a false "proven". Found by this file's own test flaking.
     env["PYTHONDONTWRITEBYTECODE"] = "1"
+    if root is not None:
+        env["PATH"] = _path_with_tree_tools(root, env.get("PATH", ""))
     try:
         p = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:randomly",
                             "-p", "no:cacheprovider", *nodes], cwd=copy, env=env,
@@ -199,7 +219,7 @@ def prove(root: Path, guards: list[dict]) -> int:
                 print(f"prove: FAIL {p}", file=sys.stderr)
             return 1
         nodes = sorted({t for gd in guards for t in gd["tests"]})
-        rc, out = run_tests(copy, nodes)
+        rc, out = run_tests(copy, nodes, root)
         if rc != 0:
             print(f"prove: FAIL baseline — the mapped tests do not pass on the unmodified "
                   f"tree (pytest rc {rc}), so their failing later would prove nothing:\n"
@@ -214,7 +234,7 @@ def prove(root: Path, guards: list[dict]) -> int:
             try:
                 for f, txt in mutated.items():
                     (copy / f).write_text(txt, encoding="utf-8")
-                rc, out = run_tests(copy, gd["tests"])
+                rc, out = run_tests(copy, gd["tests"], root)
             finally:
                 for f in mutated:
                     (copy / f).write_text(originals[f], encoding="utf-8")

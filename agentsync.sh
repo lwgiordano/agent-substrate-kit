@@ -79,6 +79,18 @@ msg = os.environ["AGENT_BUS_MSG"]
 # whitespace/control to single spaces — the entry stays exactly one line.
 msg = " ".join(msg.split())
 who = " ".join(str(who).split()) or "unknown"
+# v3.11.3: a bus entry is never edited, and the doc-consistency suite reads the
+# bus, so the message is checked against those scans BEFORE it is written.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(bus)), "scripts"))
+try:
+    import _stale_text
+    stale = _stale_text.refusal("**%s**: %s" % (who, msg),
+                                os.path.dirname(os.path.abspath(bus)))
+except ImportError:
+    stale = None
+if stale:
+    sys.stderr.write("agentsync: nothing was written: %s\n" % stale)
+    sys.exit(2)
 try:
     # O_NOFOLLOW: never open a symlinked bus. O_NONBLOCK: a FIFO bus fails fast
     # instead of hanging on open (round-21 P2). O_CREAT so first-run still works.

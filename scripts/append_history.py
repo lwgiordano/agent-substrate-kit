@@ -90,6 +90,16 @@ def _other_files_dirty(root: Path) -> list[str]:
         dirty.append(path)
     return dirty
 
+def _stale_text_refusal(text: str, root: Path) -> str | None:
+    """Why the doc-consistency suite would fail on this entry once recorded, or
+    None (v3.11.3). Asked BEFORE the append, since an entry is never edited."""
+    try:
+        import _stale_text
+    except ImportError:  # pragma: no cover - stripped install
+        return None
+    return _stale_text.refusal(text, root)
+
+
 def _withheld_at_session_start(summary: str, knowledge: str) -> list[str]:
     """Which parts of the entry the next session would never see. Session start
     shows the summary and the lead sentence of the knowledge field through the
@@ -286,6 +296,13 @@ def main() -> int:
     if len(HISTORY_OUTCOME_LINE_RE.findall(entry)) != 1:
         print("append_history: a field may not contain its own **Outcome:** line",
               file=sys.stderr)
+        return 1
+    # v3.11.3: the second reader that judges an entry only after it is recorded.
+    # Releasing v3.11.2, an entry failed a doc-consistency scan once it was in the
+    # file, could not be reworded, and cost the release-gate run behind it.
+    stale = _stale_text_refusal(entry, root)
+    if stale:
+        print(f"append_history: nothing was recorded: {stale}", file=sys.stderr)
         return 1
 
     try:

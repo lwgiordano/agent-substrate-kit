@@ -1,6 +1,6 @@
 ---
 purpose: Lessons with evidence, the record the chain attests, outcome labels, and recall.
-last_human_reviewed: 2026-11-02
+last_human_reviewed: 2026-11-16
 covers:
   - scripts/check_lessons.py
   - scripts/recall.py
@@ -107,7 +107,8 @@ survive a union merge: a branch forked before an upgrade appends old-tool entrie
 below the first labelled one, entries are never edited, and nothing appended
 could clear it (domain-lookup, 2026-09-28). Leaving a label off gains nothing,
 since only a label can claim success; `append_history` still writes one on every
-entry. The order-bound rules (`reverts:`/`supersedes:` and `Correction-of-`
+entry, and refuses one the [stale-text scans](09_deterministic_validators.md)
+would fail on. The order-bound rules (`reverts:`/`supersedes:` and `Correction-of-`
 name only an entry their author already had) survive the same merge, because a
 union merge keeps each side's own order; a test merges two branches to show it.
 The chain is gitignored: a receiving clone may have no chain, or a healthy

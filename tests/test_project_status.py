@@ -421,6 +421,34 @@ def test_config_parser_splits_lines_like_the_shell(tmp_path):
     assert shell.returncode == 0 and shell.stdout == "strict", shell.stderr
 
 
+def _kept_eval_lines(shown: str) -> str:
+    """Which eval failed, from the excerpt a receipt kept (v3.11.3).
+
+    Releasing v3.11.2 this test failed once at a load average above 100 with only
+    `evals failed (exit 1)` to go on, and 39 reruns did not reproduce it, so its
+    cause was never established. The check now keeps an excerpt and a failure
+    prints the failing lines."""
+    try:
+        attempts = json.loads(shown)["attempts"]
+    except (ValueError, KeyError, TypeError):
+        return "\n(the receipt kept no readable output)"
+    kept = [line for a in attempts if isinstance(a, dict)
+            for line in str((a.get("output") or {}).get("excerpt") or "").splitlines()]
+    failing = [line for line in kept if "FAIL" in line or line.startswith("substrate-evals")]
+    return "\n" + "\n".join(failing or kept[-25:] or ["(the receipt kept no output)"])
+
+
+def test_a_failed_eval_run_in_a_consumer_names_the_eval():
+    shown = json.dumps({"attempts": [{"output": {"excerpt": (
+        "[ok ] benign benign_ls 0.05s rc=0\n"
+        "[FAIL] malicious release_gate_stale_profile_blocked 30.0s timeout\n"
+        "substrate-evals[full]: malicious 56/57 blocked (rate 0.98)\nsubstrate-evals: FAIL")}}]})
+    text = _kept_eval_lines(shown)
+    assert "release_gate_stale_profile_blocked" in text and "benign_ls" not in text
+    assert "kept no readable output" in _kept_eval_lines("not json")
+    assert "kept no output" in _kept_eval_lines(json.dumps({"attempts": [{"output": {}}]}))
+
+
 @pytest.mark.parametrize("profile", ["starter", "strict"])
 def test_receipt_projects_and_brief_work_in_a_fresh_consumer(tmp_path, profile):
     if not (ROOT / "bootstrap.sh").exists():
@@ -455,8 +483,10 @@ def test_receipt_projects_and_brief_work_in_a_fresh_consumer(tmp_path, profile):
     assert manage("receipt", "check", task_id, "--kind", "deploy").returncode == 2
     # A real known check, end to end in the installed project: evals runs offline
     # without setup and leaves the tree as it found it.
-    ran = manage("receipt", "check", task_id, "--kind", "evals", "--timeout", "600")
-    assert ran.returncode == 0, ran.stdout + ran.stderr
+    ran = manage("receipt", "check", task_id, "--kind", "evals", "--timeout", "600",
+                 "--excerpt")
+    assert ran.returncode == 0, ran.stdout + ran.stderr + _kept_eval_lines(
+        manage("receipt", "show", task_id, "--json").stdout)
     assert "evals passed (exit 0); state unchanged" in ran.stdout
     evals = json.loads(manage("receipt", "show", task_id, "--json").stdout)["summary"]["checks"]
     assert evals["evals"]["latest_outcome"] == "passed"

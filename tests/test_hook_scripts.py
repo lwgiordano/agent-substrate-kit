@@ -1210,7 +1210,9 @@ def _run(script: str, args: list[str], stdin: str, cwd: Path | None = None):
         out, err = proc.communicate(input=stdin, timeout=30)
     except subprocess.TimeoutExpired:
         try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            pgid = os.getpgid(proc.pid)
+            os.killpg(pgid, signal.SIGSTOP)  # freeze first: see the runners' own _run
+            os.killpg(pgid, signal.SIGKILL)
         except Exception:
             proc.kill()
         proc.communicate()
@@ -14445,6 +14447,45 @@ def test_kit_guard_registry_is_proven(tmp_path) -> None:
                              re.M), f"{gd['id']}: {node} does not exist"
 
 
+_NEEDS_A_TREE_TOOL = (
+    "\ndef test_with_tool():\n    import shutil, pytest\n"
+    "    if shutil.which('kittool') is None:\n        pytest.skip('kittool not installed')\n"
+    "    assert m.check(-1) == 'refused'\n")
+
+
+def test_prove_gives_the_copy_the_tools_of_the_tree_it_proves(tmp_path) -> None:
+    """v3.11.3: a guard whose test needs a tool that lives in the tree's own
+    environment. The copy holds tracked files only, so the test skipped there with
+    the guard and without it, and the guard SURVIVED for want of the tool. That is
+    how `shipped-tests-ruff-clean` could not be proven on a host with no ruff on
+    PATH. The tool is found through the tree's tool dirs, appended to PATH."""
+    td, prove = _prove_repo(tmp_path, tests=["tests/test_m.py::test_with_tool"],
+                            extra_test=_NEEDS_A_TREE_TOOL)
+    tool = td / ".venv" / "bin" / "kittool"
+    tool.parent.mkdir(parents=True)
+    tool.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    tool.chmod(0o755)
+    (td / ".gitignore").write_text(".venv/\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=td, check=True)
+    r = prove()
+    assert r.returncode == 0 and "1/1 guards proven" in r.stdout, r.stdout + r.stderr
+
+
+def test_prove_appends_the_tree_tools_and_never_shadows_the_callers_path(tmp_path) -> None:
+    import importlib.util as _iu
+    spec = _iu.spec_from_file_location("_prove_path", SCRIPTS / "prove_guards.py")
+    mod = _iu.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    (tmp_path / ".venv" / "bin").mkdir(parents=True)
+    venv = str(tmp_path / ".venv" / "bin")
+    assert mod._path_with_tree_tools(tmp_path, "/usr/bin") == "/usr/bin" + os.pathsep + venv
+    assert mod._path_with_tree_tools(tmp_path, "") == venv
+    (tmp_path / ".substrate" / "venv" / "bin").mkdir(parents=True)
+    both = mod._path_with_tree_tools(tmp_path, "/usr/bin").split(os.pathsep)
+    assert both == ["/usr/bin", venv, str(tmp_path / ".substrate" / "venv" / "bin")]
+    assert mod._path_with_tree_tools(tmp_path / "absent", "/usr/bin") == "/usr/bin"
+
+
 def test_prove_runs_tests_without_a_bytecode_cache(monkeypatch) -> None:
     """A .pyc is validated by mtime (1s) and size, and a neutralization is often
     the guard's own length — so a cached .pyc served the wrong code to the
@@ -15530,3 +15571,141 @@ def test_security_scanner_output_is_redacted_before_it_is_stored():
     tail = rss._redact_tail("x" * 5000 + f" leaked {fake} here")
     assert fake not in tail and len(tail) <= 2000
 
+
+
+# --- v3.11.3: every group kill freezes the group first --------------------------
+
+def _group_signals(func):
+    """(line, target expression, signal name or None) for each signal this function
+    sends to a process GROUP: os.killpg(x, sig) and os.kill(-x, sig). Calls inside a
+    nested function belong to that function."""
+    import ast
+    found, stack = [], list(ast.iter_child_nodes(func))
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            continue
+        stack.extend(ast.iter_child_nodes(node))
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and len(node.args) >= 2):
+            continue
+        target, sig = node.args[0], node.args[1]
+        negated = isinstance(target, ast.UnaryOp) and isinstance(target.op, ast.USub)
+        if node.func.attr == "killpg" or (node.func.attr == "kill" and negated):
+            name = sig.attr if isinstance(sig, ast.Attribute) else None
+            if isinstance(sig, ast.Constant) and sig.value == 0:
+                name = "0"  # a liveness probe, not a signal
+            found.append((node.lineno, ast.unparse(target.operand if negated else target), name))
+    return sorted(found)
+
+
+def _unfrozen_group_kills(source: str) -> tuple[int, list[str]]:
+    """How many group KILLs the source sends, and which break the rule: the signal
+    is named, and a KILL follows a STOP of the same group in the same function."""
+    import ast
+    kills, offenders = 0, []
+    for func in ast.walk(ast.parse(source)):
+        if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        stopped = set()
+        for line, target, name in _group_signals(func):
+            if name is None:
+                offenders.append(f"{line}: the signal is not written as signal.SIGNAME")
+            elif name == "SIGSTOP":
+                stopped.add(target)
+            elif name == "SIGKILL":
+                kills += 1
+                if target not in stopped:
+                    offenders.append(f"{line}: SIGKILL to group {target} with no SIGSTOP first")
+    return kills, offenders
+
+
+def test_every_group_kill_in_scripts_freezes_the_group_first() -> None:
+    """Class gate. v3.11.2 found that a KILL sent to a process group lands member
+    by member on macOS, so a parent could act between its child's KILL and its own,
+    and fixed the receipt's timeout by stopping the group first. Three sibling
+    timeout sites kept the bare KILL. Read from the syntax tree, so a comment, a
+    split call or a STOP of some other group cannot satisfy it."""
+    total, offenders = 0, []
+    for path in sorted(SCRIPTS.glob("*.py")):
+        kills, bad = _unfrozen_group_kills(path.read_text(encoding="utf-8"))
+        total += kills
+        offenders += [f"{path.name}:{b}" for b in bad]
+    assert total >= 4, "the gate found fewer group kills than the kit has; is it reading them?"
+    assert not offenders, "\n".join(offenders)
+
+
+def test_the_group_kill_gate_is_not_satisfied_by_look_alikes() -> None:
+    def bad(body):
+        return _unfrozen_group_kills("import os, signal\ndef f(pgid, other, sig):\n" + body)[1]
+
+    assert not bad("    os.killpg(pgid, signal.SIGSTOP)\n    os.killpg(pgid, signal.SIGKILL)\n")
+    assert not bad("    os.killpg(pgid, 0)\n    os.killpg(pgid, signal.SIGTERM)\n")
+    assert bad("    os.killpg(pgid, signal.SIGKILL)\n")
+    assert bad("    # os.killpg(pgid, signal.SIGSTOP)\n    os.killpg(pgid, signal.SIGKILL)\n")
+    assert bad("    os.killpg(other, signal.SIGSTOP)\n    os.killpg(pgid, signal.SIGKILL)\n")
+    assert bad("    os.killpg(pgid, signal.SIGKILL)\n    os.killpg(pgid, signal.SIGSTOP)\n")
+    assert bad("    os.kill(-pgid, signal.SIGKILL)\n")
+    assert not bad("    os.kill(-pgid, signal.SIGSTOP)\n    os.kill(-pgid, signal.SIGKILL)\n")
+    assert bad("    os.killpg(pgid, sig)\n") and bad("    os.killpg(pgid, 9)\n")
+    assert bad("    os.killpg(\n        pgid,\n        signal.SIGKILL,\n    )\n")
+    # A STOP in another function does not count for this one.
+    assert _unfrozen_group_kills(
+        "import os, signal\ndef a(p):\n    os.killpg(p, signal.SIGSTOP)\n"
+        "def b(p):\n    os.killpg(p, signal.SIGKILL)\n")[1]
+
+
+def _record_group_signals(monkeypatch):
+    sent, real = [], os.killpg
+
+    def killpg(pgid, sig):
+        sent.append((pgid, sig))
+        return real(pgid, sig)
+
+    monkeypatch.setattr(os, "killpg", killpg)
+    return sent
+
+
+# The shape that leaked on macOS: a parent that runs its next command the moment
+# its child dies. On Linux a group signal is one event, so the marker cannot
+# appear with or without the freeze, and the ORDER of the signals is what this
+# pins here. A child that ignores TERM shows the KILL reaches every member.
+_ACTS_WHEN_ITS_CHILD_DIES = "(trap '' TERM; sleep 20; touch %s) & wait; touch %s"
+
+
+@pytest.mark.parametrize("runner", ["run_substrate_evals", "check_hook_smoke"])
+def test_a_timed_out_runner_stops_its_group_then_kills_all_of_it(runner, tmp_path, monkeypatch):
+    import importlib
+    import time
+    mod = importlib.import_module(runner)
+    marker = shlex.quote(str(tmp_path / "acted-after-the-timeout"))
+    sent = _record_group_signals(monkeypatch)
+    started = time.monotonic()
+    r = mod._run(["bash", "-c", _ACTS_WHEN_ITS_CHILD_DIES % (marker, marker)], "",
+                 cwd=tmp_path, timeout=1)
+    took = time.monotonic() - started
+    assert r.returncode == 124
+    assert [sig for _pgid, sig in sent] == [signal.SIGSTOP, signal.SIGKILL]
+    assert len({pgid for pgid, _sig in sent}) == 1
+    # Every member held the output pipe the runner waits on, so its returning at
+    # all means none is left: a survivor would have kept it waiting out the sleep.
+    assert took < 10, f"the runner waited {took:.1f}s for a member the kill did not reach"
+    time.sleep(0.3)
+    assert not (tmp_path / "acted-after-the-timeout").exists()
+
+
+def test_a_git_observation_that_is_cut_off_stops_its_group_then_kills_it(tmp_path, monkeypatch):
+    """The third sibling. Its ten second timeout is out of a test's reach, but the
+    output limit ends in the same `finally`, with the process still running."""
+    import _task_evidence
+    fakebin = tmp_path / "bin"
+    fakebin.mkdir()
+    fake = fakebin / "git"
+    fake.write_text("#!/bin/sh\n(sleep 20) &\nwhile :; do echo flood; done\n", encoding="utf-8")
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", str(fakebin) + os.pathsep + os.environ.get("PATH", ""))
+    sent = _record_group_signals(monkeypatch)
+    with pytest.raises(ValueError, match="exceeds output limit"):
+        _task_evidence.git(tmp_path, "status", limit=1000)
+    assert [sig for _pgid, sig in sent] == [signal.SIGSTOP, signal.SIGKILL]
+    assert len({pgid for pgid, _sig in sent}) == 1

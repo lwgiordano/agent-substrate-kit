@@ -4,7 +4,7 @@ asserts:
   - scripts/command_policy.py::looks_dangerous_command
   - scripts/check_substrate_config.py::def config_text_problem
   - scripts/lang_gate.sh::run_gate(){
-last_human_reviewed: 2026-10-31
+last_human_reviewed: 2026-11-16
 covers:
   - manage.sh
   - scripts/_substrate_config.sh
@@ -77,7 +77,11 @@ compile-clean allow-all replacement does not pass.
 Claude, Codex, and Copilot adapters normalize their host payloads into the same
 decision. Malformed or missing shell payloads fail closed when containment is
 required. Hook smoke tests exercise denial behavior rather than checking only
-that a script parses.
+that a script parses. A runner that times out stops its process group before
+it kills it, as the [receipt](11_receipts_projects.md) timeout does: on macOS a
+group signal lands member by member, and a stopped parent cannot act between
+a child's kill and its own. A scan of `scripts/` fails on any group kill that
+does not follow a stop.
 
 ## Harness usage
 

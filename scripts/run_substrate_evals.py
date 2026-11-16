@@ -107,7 +107,14 @@ def _run(args, stdin="", cwd=None, timeout=None):
         out, err = proc.communicate(stdin, timeout=timeout)
     except subprocess.TimeoutExpired:
         try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            # Freeze the group, then kill it (v3.11.3). A group signal is not one
+            # event on every kernel: macOS delivers it member by member, so a
+            # parent whose child just died of KILL can run its next command
+            # before its own KILL lands (found in the receipt timeout, v3.11.2).
+            # STOP wakes nobody, so a stopped parent cannot act.
+            pgid = os.getpgid(proc.pid)
+            os.killpg(pgid, signal.SIGSTOP)
+            os.killpg(pgid, signal.SIGKILL)
         except Exception:
             proc.kill()
         proc.communicate()

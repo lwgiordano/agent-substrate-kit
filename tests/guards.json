@@ -650,7 +650,7 @@
     {
       "id": "prove-baseline",
       "file": "scripts/prove_guards.py",
-      "find": "        rc, out = run_tests(copy, nodes)\n        if rc != 0:",
+      "find": "        rc, out = run_tests(copy, nodes, root)\n        if rc != 0:",
       "replace": "        rc, out = 0, \"\"\n        if rc != 0:",
       "tests": [
         "tests/test_hook_scripts.py::test_prove_does_not_count_a_collection_error_as_proof",
@@ -2017,6 +2017,140 @@
         "tests/test_task_receipt.py::test_a_kill_pass_that_outlasts_the_grace_period_is_followed_by_one_more"
       ],
       "why": "under load one KILL pass outlasts the grace period, and the member it missed is left running"
+    },
+    {
+      "id": "history-entry-is-scanned-before-it-is-recorded",
+      "file": "scripts/append_history.py",
+      "find": "    stale = _stale_text_refusal(entry, root)\n",
+      "replace": "    stale = None\n",
+      "tests": [
+        "tests/test_doc_consistency.py::test_history_refuses_a_stale_entry_before_it_is_recorded"
+      ],
+      "why": "an entry the doc scans reject can never be reworded once recorded; it cost a release-gate run"
+    },
+    {
+      "id": "rejected-entry-is-scanned-before-it-is-recorded",
+      "file": "scripts/append_rejected.py",
+      "find": "        stale = _stale_text.refusal(entry, root)\n",
+      "replace": "        stale = None\n",
+      "tests": [
+        "tests/test_doc_consistency.py::test_rejected_and_the_bus_refuse_a_stale_entry_before_it_is_recorded"
+      ],
+      "why": "the same trap in the second append-only record"
+    },
+    {
+      "id": "bus-entry-is-scanned-before-it-is-written",
+      "file": "agentsync.sh",
+      "find": "    stale = _stale_text.refusal(\"**%s**: %s\" % (who, msg),\n                                os.path.dirname(os.path.abspath(bus)))\n",
+      "replace": "    stale = None\n",
+      "tests": [
+        "tests/test_doc_consistency.py::test_rejected_and_the_bus_refuse_a_stale_entry_before_it_is_recorded"
+      ],
+      "why": "the same trap in the bus, which is committed and pushed in one step"
+    },
+    {
+      "id": "run-records-may-state-the-interpreter",
+      "file": "scripts/_stale_text.py",
+      "find": "        None, False),\n",
+      "replace": "        None, True),\n",
+      "tests": [
+        "tests/test_doc_consistency.py::test_a_run_record_may_state_the_interpreter_and_nothing_else_stale",
+        "tests/test_doc_consistency.py::test_history_refuses_a_stale_entry_before_it_is_recorded"
+      ],
+      "why": "a record of which interpreter a gate ran on read as a stale pin and could not be recorded truthfully"
+    },
+    {
+      "id": "pin-scan-skips-run-records",
+      "file": "tests/test_doc_consistency.py",
+      "find": "[p for p in _scannable() if p not in records])\n",
+      "replace": "_scannable())\n",
+      "tests": [
+        "tests/test_doc_consistency.py::test_the_pin_scan_reads_templates_but_not_run_records"
+      ],
+      "why": "the scan would fail on a recorded entry the writer had just accepted"
+    },
+    {
+      "id": "stale-precheck-only-where-the-suite-runs",
+      "file": "scripts/_stale_text.py",
+      "find": "    if not (Path(root) / SUITE).is_file():\n        return None\n",
+      "replace": "",
+      "tests": [
+        "tests/test_doc_consistency.py::test_a_repository_without_the_suite_records_the_entry"
+      ],
+      "why": "a consumer install has no suite, so refusing its entries is friction with no check behind it"
+    },
+    {
+      "id": "shared-stale-scans-keep-what-they-caught",
+      "file": "scripts/_stale_text.py",
+      "find": "        re.compile(r\"\\bcodex_hooks\\b\"),\n",
+      "replace": "        re.compile(r\"\\bcodex_hooks_never\\b\"),\n",
+      "tests": [
+        "tests/test_doc_consistency.py::test_shared_stale_scans_catch_exactly_what_they_name"
+      ],
+      "why": "moving the scans into a shared list could have weakened one without any test failing"
+    },
+    {
+      "id": "prove-gives-the-copy-the-trees-tools",
+      "file": "scripts/prove_guards.py",
+      "find": "        env[\"PATH\"] = _path_with_tree_tools(root, env.get(\"PATH\", \"\"))\n",
+      "replace": "        pass\n",
+      "tests": [
+        "tests/test_hook_scripts.py::test_prove_gives_the_copy_the_tools_of_the_tree_it_proves"
+      ],
+      "why": "a guard whose test needs a tool from the tree's environment survived for want of the tool"
+    },
+    {
+      "id": "prove-appends-tree-tools-after-the-callers-path",
+      "file": "scripts/prove_guards.py",
+      "find": "    return os.pathsep.join(([path] if path else []) + extra)\n",
+      "replace": "    return os.pathsep.join(extra + ([path] if path else []))\n",
+      "tests": [
+        "tests/test_hook_scripts.py::test_prove_appends_the_tree_tools_and_never_shadows_the_callers_path"
+      ],
+      "why": "prepending would change which interpreter and tools every test in the copy resolves"
+    },
+    {
+      "id": "hook-smoke-timeout-freezes-its-group",
+      "file": "scripts/check_hook_smoke.py",
+      "find": "            os.killpg(pgid, signal.SIGSTOP)\n",
+      "replace": "",
+      "tests": [
+        "tests/test_hook_scripts.py::test_every_group_kill_in_scripts_freezes_the_group_first",
+        "tests/test_hook_scripts.py::test_a_timed_out_runner_stops_its_group_then_kills_all_of_it"
+      ],
+      "why": "on macOS a group KILL lands member by member, so a parent can act after the timeout"
+    },
+    {
+      "id": "evals-timeout-freezes-its-group",
+      "file": "scripts/run_substrate_evals.py",
+      "find": "            os.killpg(pgid, signal.SIGSTOP)\n",
+      "replace": "",
+      "tests": [
+        "tests/test_hook_scripts.py::test_every_group_kill_in_scripts_freezes_the_group_first",
+        "tests/test_hook_scripts.py::test_a_timed_out_runner_stops_its_group_then_kills_all_of_it"
+      ],
+      "why": "on macOS a group KILL lands member by member, so a parent can act after the timeout"
+    },
+    {
+      "id": "git-observation-timeout-freezes-its-group",
+      "file": "scripts/_task_evidence.py",
+      "find": "                    os.killpg(proc.pid, signal.SIGSTOP)\n",
+      "replace": "                    pass\n",
+      "tests": [
+        "tests/test_hook_scripts.py::test_every_group_kill_in_scripts_freezes_the_group_first",
+        "tests/test_hook_scripts.py::test_a_git_observation_that_is_cut_off_stops_its_group_then_kills_it"
+      ],
+      "why": "the third sibling of the receipt-timeout kill, held to the same order by the class gate"
+    },
+    {
+      "id": "bus-line-is-scanned-with-the-agent-name",
+      "file": "agentsync.sh",
+      "find": "    stale = _stale_text.refusal(\"**%s**: %s\" % (who, msg),\n",
+      "replace": "    stale = _stale_text.refusal(\"%s%s\" % (\"\", msg),\n",
+      "tests": [
+        "tests/test_doc_consistency.py::test_rejected_and_the_bus_refuse_a_stale_entry_before_it_is_recorded"
+      ],
+      "why": "the agent name is written on the same bus line and was not scanned"
     }
   ]
 }

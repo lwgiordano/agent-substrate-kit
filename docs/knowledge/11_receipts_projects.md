@@ -1,6 +1,6 @@
 ---
 purpose: Work receipts and read-only multi-project status.
-last_human_reviewed: 2026-10-28
+last_human_reviewed: 2026-11-15
 covers:
   - scripts/task_receipt.py
   - scripts/project_status.py
@@ -179,7 +179,8 @@ becomes an `inspection-failed` row, so one hostile project never aborts or hides
 the others; the report finishes and exits 2. Target values are bounded: version
 and install time over 40 characters read as unknown, a hook path with `..`, an
 absolute path or a NUL reads `unsafe`, and a row keeps at most 50 diagnostics
-with an omitted count. JSON is capped at 1 MiB; projects that do not fit are
+with an omitted count. The text view prints a root's first 120 bytes, the JSON
+all of it. JSON is capped at 1 MiB; projects that do not fit are
 counted in `truncated_projects` and the command exits 2. The report names the inspecting kit's version: its
 `VERSION` file in the kit source, its install record in a consumer.
 

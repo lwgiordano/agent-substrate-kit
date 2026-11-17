@@ -9,6 +9,7 @@ asserts:
   - scripts/session_handoff.py::(?<!\w-)
   - scripts/append_history.py::def _withheld_at_session_start
   - scripts/append_history.py::def _no_commit_yet
+  - scripts/memory_log.py::def _no_commit_branch
 last_human_reviewed: 2026-11-17
 covers:
   - manage.sh
@@ -39,23 +40,28 @@ budget, and a doc that cannot take its next paragraph is one nobody updates.
 
 ## Verified skill evidence
 
-`memory skill-run <name> --verify` records a verification result only when the
-deterministic check succeeds and the repository identity remains stable. The
+`memory skill-run <name> --verify` records a verified result only when the
+deterministic check passes and the repository identity stays stable. The
 signature includes the full HEAD and symbolic ref, Git's `write-tree` object ID,
 the index, and raw filesystem identity and content for tracked paths. Length
 prefixing keeps the hash encoding unambiguous.
 
+Before the first commit the identity is the unborn branch HEAD names, which
+`_no_commit_branch` accepts only in a repository with no ref and no commit
+object. The raw pass then also reads untracked, non-ignored paths, and the
+event carries `no_commit`. No other unresolvable HEAD is verified.
+
 Git routing and configuration variables are stripped. Files are read directly
 with lstat identity, mode, link target, device, inode, and link count. Escaping
 ancestors, untracked symlink targets, unreadable state, and tracked gitlinks fail
-closed. Check tools must be regular tracked files inside the repository; a
+closed. A check tool must be a regular file inside the repository; a
 symlinked or escaping tool is not executed. The second signature includes check
-side effects, so a clean check that mutates the tree records stale verification.
+side effects, so a passing check that mutates the tree records as stale.
 
-The raw-byte pass complements `git write-tree`: Git's object model may apply
-clean filters, while the raw pass attests the bytes and filesystem identity the
-host actually exposes. This is tamper evidence, not isolation from a process
-that can continuously rewrite the repository.
+The raw pass complements `git write-tree`, whose object model may apply
+clean filters: it attests the bytes and filesystem identity the host exposes.
+This is tamper evidence, not isolation from a process that keeps rewriting the
+repository.
 
 ## Session capture and restore
 

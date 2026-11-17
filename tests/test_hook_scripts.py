@@ -4773,6 +4773,131 @@ def test_memory_log_verify_detects_branch_switch_same_commit(tmp_path) -> None:
     assert _verify_event(repo)["data"].get("verify_stale") is True
 
 
+def _run_verify(repo, check_body: str = "raise SystemExit(0)\n"):
+    """Stage memory_log and a stand-in check, run `skill-run self-audit --verify`."""
+    _stage(repo, "memory_log.py", "_substrate_root.py")
+    (repo / "scripts" / "run_smoke_verification.py").write_text(check_body, encoding="utf-8")
+    return subprocess.run([sys.executable, "-I", str(repo / "scripts" / "memory_log.py"),
+                           "skill-run", "self-audit", "--verify"],
+                          cwd=str(repo), capture_output=True, text=True, timeout=60)
+
+
+def test_memory_log_verify_passes_before_the_first_commit(tmp_path) -> None:
+    """A repository with no commit can record a verified run. `rev-parse HEAD`
+    fails there, and the guard read every failed HEAD read as "moved", so a
+    passing check on an unchanged tree was always FAILED/STALE and the
+    completion gate could never be satisfied. Git itself says when there is no
+    commit yet, and that state compares before and after like any other. The
+    same repo keeps verifying once it has a commit."""
+    if not (SCRIPTS / "memory_log.py").exists():
+        return
+    repo = _mk_verify_repo(tmp_path)
+    (repo / "notes.txt").write_text("untracked\n", encoding="utf-8")
+    (repo / "staged.txt").write_text("staged\n", encoding="utf-8")
+    subprocess.run(["git", "add", "staged.txt"], cwd=repo, check=True)   # staged and untracked alike
+    p = _run_verify(repo)
+    assert p.returncode == 0, (p.returncode, p.stdout, p.stderr)
+    assert "(pass)" in p.stderr and "FAILED/STALE" not in p.stderr, p.stderr
+    d = _verify_event(repo)["data"]
+    assert d["verified"] is True and d["result"] == "pass" and d["verify_rc"] == 0, d
+    assert "verify_stale" not in d, d
+    assert d["head"] == "none" and d.get("no_commit") is True, d
+    branch = subprocess.run(["git", "symbolic-ref", "--short", "HEAD"], cwd=repo, check=True,
+                            capture_output=True, text=True).stdout.strip()
+    assert d["branch"] == branch, d
+    # A run that verifies nothing records the same state, and claims nothing.
+    plain = subprocess.run([sys.executable, "-I", str(repo / "scripts" / "memory_log.py"),
+                            "skill-run", "self-audit", "--result", "pass"],
+                           cwd=str(repo), capture_output=True, text=True, timeout=60)
+    assert plain.returncode == 0, (plain.returncode, plain.stderr)
+    d = _verify_event(repo)["data"]
+    assert d["verified"] is False and d.get("no_commit") is True and d["branch"] == branch, d
+    # With a commit the event names it, and says nothing about a missing one.
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "first"], cwd=repo, check=True)
+    p = _run_verify(repo)
+    assert p.returncode == 0, (p.returncode, p.stdout, p.stderr)
+    d = _verify_event(repo)["data"]
+    assert d["verified"] is True and re.fullmatch(r"[0-9a-f]{40,64}", d["head"]), d
+    assert "no_commit" not in d, d
+
+
+def test_memory_log_verify_before_the_first_commit_still_fails_closed(tmp_path) -> None:
+    """Verifying without a commit keeps every guarantee the committed case has.
+    Each stand-in check exits 0, so only the before/after comparison can refuse:
+    a content change, a raw-byte change git's object model hides, the first
+    commit landing during the check, and a switch to another unborn branch."""
+    if not (SCRIPTS / "memory_log.py").exists():
+        return
+    cases = {
+        "content": "import pathlib\npathlib.Path('f.txt').write_text('changed\\n')\n",
+        # `*.txt text` makes git store LF either way, so the tree OID is the
+        # same for both spellings. Nothing is tracked yet, so only a raw pass
+        # over the untracked files can see it.
+        "raw-bytes": "import pathlib\npathlib.Path('f.txt').write_bytes(b'a\\r\\nb\\r\\n')\n",
+        "first-commit": ("import subprocess\n"
+                         "subprocess.run(['git', 'commit', '-q', '--allow-empty', '-m', 'x'], check=True)\n"),
+        "branch-switch": ("import subprocess\n"
+                          "subprocess.run(['git', 'symbolic-ref', 'HEAD', 'refs/heads/other'], check=True)\n"),
+    }
+    for name, body in cases.items():
+        (tmp_path / name).mkdir()
+        repo = _mk_verify_repo(tmp_path / name)
+        (repo / ".gitattributes").write_text("*.txt text\n", encoding="utf-8")
+        (repo / "f.txt").write_bytes(b"a\nb\n")
+        p = _run_verify(repo, body + "raise SystemExit(0)\n")
+        d = _verify_event(repo)["data"]
+        assert p.returncode != 0, (name, p.returncode, p.stdout, p.stderr)
+        assert d["verified"] is False and d.get("verify_stale") is True, (name, d)
+        assert d["verify_rc"] == 0, (name, d)   # the check passed; the tree did not hold still
+
+
+def test_memory_log_verify_unresolvable_head_is_not_no_commit(tmp_path) -> None:
+    """Unknown is not "no commit yet". Each repository here has a HEAD that
+    resolves no better than a new repository's, and none is the state `git init`
+    leaves. Nothing changes during the check, and the run is still not verified:
+    there is no identity to compare."""
+    if not (SCRIPTS / "memory_log.py").exists():
+        return
+
+    def committed(repo) -> str:
+        (repo / "f.txt").write_text("base\n", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+        subprocess.run(["git", "commit", "-qm", "base"], cwd=repo, check=True)
+        return subprocess.run(["git", "symbolic-ref", "HEAD"], cwd=repo, check=True,
+                              capture_output=True, text=True).stdout.strip()
+
+    def branch_deleted_tag_kept(repo) -> None:   # history, still reachable from a ref
+        branch = committed(repo)
+        subprocess.run(["git", "tag", "kept"], cwd=repo, check=True)
+        subprocess.run(["git", "update-ref", "-d", branch], cwd=repo, check=True)
+
+    def only_branch_deleted(repo) -> None:       # history, and no ref left to show it
+        subprocess.run(["git", "update-ref", "-d", committed(repo)], cwd=repo, check=True)
+
+    def ref_without_a_commit(repo) -> None:      # a ref, and no history
+        (repo / "f.txt").write_text("base\n", encoding="utf-8")
+        blob = subprocess.run(["git", "hash-object", "-w", "f.txt"], cwd=repo, check=True,
+                              capture_output=True, text=True).stdout.strip()
+        subprocess.run(["git", "update-ref", "refs/keep/x", blob], cwd=repo, check=True)
+
+    def head_names_no_branch(repo) -> None:      # new, but HEAD is not a branch
+        subprocess.run(["git", "symbolic-ref", "HEAD", "refs/remotes/origin/x"],
+                       cwd=repo, check=True)
+
+    for build in (branch_deleted_tag_kept, only_branch_deleted,
+                  ref_without_a_commit, head_names_no_branch):
+        name = build.__name__
+        (tmp_path / name).mkdir()
+        repo = _mk_verify_repo(tmp_path / name)
+        build(repo)
+        p = _run_verify(repo)
+        d = _verify_event(repo)["data"]
+        assert p.returncode != 0, (name, p.returncode, p.stdout, p.stderr)
+        assert d["verified"] is False and d.get("verify_stale") is True, (name, d)
+        assert "no_commit" not in d, (name, d)
+
+
 def test_manage_sh_dispatches_enable_profile() -> None:
     for rel in ("manage.sh", "templates/manage.sh.template"):
         p = ROOT / rel

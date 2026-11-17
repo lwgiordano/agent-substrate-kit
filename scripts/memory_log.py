@@ -764,7 +764,46 @@ def _write_tree_oid():
         return None
 
 
-def _raw_tracked_hash():
+def _no_commit_branch() -> str | None:
+    """The branch HEAD names when git itself says this repository has no commit
+    yet, else None. HEAD is a branch that does not exist yet, the repository
+    holds no ref at all (the definition `append_history._no_commit_yet` uses),
+    and its object store holds no commit either.
+
+    Unknown is not "no commit yet". No git, not a work tree, a timeout, a
+    detached or damaged HEAD all return None, and so does a deleted branch ref
+    in a repository with history, which `rev-parse` cannot tell from a new one.
+    Deleting the only branch leaves no ref behind, hence the look at the store.
+    Sanitized env and fsmonitor off, like every other read the verification
+    signature is built from."""
+    def git(*args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(["git", "-c", "core.fsmonitor=false", *args], cwd=ROOT,
+                              capture_output=True, text=True, timeout=15, env=_clean_env())
+    try:
+        inside = git("rev-parse", "--is-inside-work-tree")
+        if inside.returncode != 0 or inside.stdout.strip() != "true":
+            return None
+        ref = git("symbolic-ref", "--quiet", "HEAD")
+        branch = ref.stdout.strip()
+        if ref.returncode != 0 or not branch.startswith("refs/heads/"):
+            return None
+        refs = git("for-each-ref", "--count=1")
+        if refs.returncode != 0 or refs.stdout.strip():
+            return None
+        head = git("rev-parse", "--verify", "--quiet", "HEAD")
+        if head.returncode != 1 or head.stdout.strip():
+            return None
+        # Reached only with no ref, so the store is a new repository's (blobs and
+        # trees from staging) or the history of a repository that lost its refs.
+        objs = git("cat-file", "--batch-all-objects", "--batch-check=%(objecttype)")
+        if objs.returncode != 0 or "commit" in objs.stdout.split():
+            return None
+    except Exception:
+        return None
+    return branch
+
+
+def _raw_tracked_hash(untracked: bool = False):
     """SHA-256 over the RAW worktree bytes of every TRACKED path (`git ls-files -z`), read
     directly from disk. `git write-tree` stores git's OBJECT model, which (a) applies `clean`
     filters — so a `filter.*.clean` that canonicalizes differing raw bytes to one blob hides a
@@ -774,9 +813,15 @@ def _raw_tracked_hash():
     symlink targets, and regular-file permission bits (v3.8.20 / memory:255 — a mode flip on a
     tracked-but-ignored path is invisible to both the temp-index tree and a bytes-only hash).
     Length-prefixed (path, then content) so it is injective / collision-resistant. None on any
-    failure (fail closed). v3.8.18 (memory:209)."""
+    failure (fail closed). v3.8.18 (memory:209).
+
+    `untracked=True` adds every untracked path git does not ignore, under the same rules. A
+    repository with no commit has nothing tracked unless it is staged, so this pass would
+    attest nothing there and a raw change the object model hides (a line-ending rewrite under
+    a `text` attribute, a `clean` filter) would leave the whole signature unmoved."""
     try:
-        ls = subprocess.run(["git", "-c", "core.fsmonitor=false", "ls-files", "-z"],
+        others = ["--cached", "--others", "--exclude-standard"] if untracked else []
+        ls = subprocess.run(["git", "-c", "core.fsmonitor=false", "ls-files", "-z", *others],
                             cwd=ROOT, capture_output=True, timeout=60, env=_clean_env())
         if ls.returncode != 0:
             return None
@@ -888,6 +933,11 @@ def _safe_note(text: str, limit: int) -> str:
     return _redact(text)[:limit]
 
 
+# The commit half of the verification identity when the repository has no commit
+# yet. Not a 40-hex OID, so it can never equal one.
+_NO_COMMIT_YET = "no-commit-yet"
+
+
 def _run_deterministic_check() -> tuple[int, str]:
     """Run the in-process static validator chain and return (rc, output). This
     is a REAL deterministic signal (not a self-report) that `--verify` records,
@@ -929,7 +979,7 @@ def skill_run(name: str, result: str, note: str, verify: bool = False) -> int:
     stored (`verified`/`verify_rc`/`verify_hash`), and `result` is overridden
     to reflect it. Block mode (deferred) will require a verified event — an
     unverified `--result pass` is a nudge, not evidence."""
-    def _worktree_state():
+    def _worktree_state(no_commit: bool = False):
         """Return (status_lines, signature). `status_lines` feeds the human-facing
         changed_files/dirty fields. `signature` folds three git-derived views of the worktree:
         (1) a CONTENT-ADDRESSED tree OID from `git write-tree` over a TEMPORARY index (the real
@@ -941,7 +991,8 @@ def skill_run(name: str, result: str, note: str, verify: bool = False) -> int:
         the OID alone is NOT faithful to the raw bytes the checker reads (v3.8.18 / memory:209).
         signature is None on any failure (fail closed). A tracked GITLINK (submodule, index
         mode 160000) is not integrity-verifiable from the superproject tree, so we FAIL CLOSED
-        whenever one is present in the INDEX — even if its worktree path is absent/removed."""
+        whenever one is present in the INDEX — even if its worktree path is absent/removed.
+        With `no_commit`, (3) also reads the untracked paths, which is every file there."""
         # Human-facing status (also confirms git is readable); fsmonitor off + sanitized env.
         try:
             st = subprocess.run(["git", "-c", "core.fsmonitor=false", "status",
@@ -979,25 +1030,37 @@ def skill_run(name: str, result: str, note: str, verify: bool = False) -> int:
         # neither the OID nor the index hash alone reflects a filtered / tracked-ignored raw
         # change (v3.8.18 / memory:209). All three come from git's tracked set + the real files.
         oid = _write_tree_oid()
-        raw = _raw_tracked_hash()
+        raw = _raw_tracked_hash(untracked=no_commit)
         if oid is None or raw is None:
             return lines, None
         return lines, oid + ":" + hashlib.sha256(idx.stdout).hexdigest() + ":" + raw
 
     def _identity():
         # success-aware full HEAD OID + symbolic ref, under the sanitized env; "" -> None
-        # so an unborn / unreadable HEAD fails closed, and a same-commit branch switch
+        # so an unreadable HEAD fails closed, and a same-commit branch switch
         # (refs/heads/main -> refs/heads/other) is caught by the ref (v3.8.10).
-        return (_git_s("rev-parse", "HEAD") or None,
-                _git_s("rev-parse", "--symbolic-full-name", "HEAD") or None)
+        head = _git_s("rev-parse", "HEAD") or None
+        if head is not None:
+            return (head, _git_s("rev-parse", "--symbolic-full-name", "HEAD") or None)
+        # `rev-parse HEAD` fails before the first commit as it does for a HEAD that
+        # cannot be read. Only the first is a state git can name, and it compares
+        # before and after like a commit does: the first commit landing, or HEAD
+        # moving to another unborn branch, is a different identity.
+        branch = _no_commit_branch()
+        return (_NO_COMMIT_YET, branch) if branch else (None, None)
 
-    status_lines, sig_before = _worktree_state()
-    id_before = _identity()
+    def _state():
+        # Identity first: it says whether the raw pass must read untracked paths.
+        ident = _identity()
+        return (*_worktree_state(no_commit=ident[0] == _NO_COMMIT_YET), ident)
+
+    status_lines, sig_before, id_before = _state()
+    no_commit = id_before[0] == _NO_COMMIT_YET
     _sl = status_lines or []
     changed = [line[3:].strip() for line in _sl if len(line) > 3][:50]
     data = {
         "skill": _safe_note(name, 80),
-        "head": id_before[0] or "none",
+        "head": "none" if no_commit else (id_before[0] or "none"),
         "branch": _git_s("rev-parse", "--abbrev-ref", "HEAD") or "none",
         "dirty": bool(_sl),
         "changed_files": changed,
@@ -1005,16 +1068,18 @@ def skill_run(name: str, result: str, note: str, verify: bool = False) -> int:
         "note": _safe_note(note, 200),
         "verified": False,
     }
+    if no_commit:
+        data["no_commit"] = True   # "none" is also what an unreadable HEAD records
+        data["branch"] = id_before[1].removeprefix("refs/heads/")
     verify_ok = True
     if verify:
         rc, out = _run_deterministic_check()
         # TOCTOU guard (v3.8.6/v3.8.10): the working tree can move DURING the up-to-120s
         # check. Re-read state afterward and compare the CONTENT signature AND the git
         # identity. Fail closed if the signature is unreadable either side, if the
-        # signature or identity changed, or if HEAD is unborn/unreadable (no committed
-        # anchor can back a verified=true claim).
-        status_after, sig_after = _worktree_state()
-        id_after = _identity()
+        # signature or identity changed, or if HEAD is unreadable. A repository with
+        # no commit yet is a readable identity (`_no_commit_branch`), not an unknown one.
+        status_after, sig_after, id_after = _state()
         moved = (sig_before is None or sig_after is None or sig_after != sig_before
                  or id_before != id_after
                  or id_before[0] is None or id_after[0] is None)

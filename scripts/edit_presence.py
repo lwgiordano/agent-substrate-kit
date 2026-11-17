@@ -72,6 +72,7 @@ MAX_MINUTES = 1440
 KEEP_SECONDS = 24 * 3600      # a marker older than this is cleared by the next writer
 LIST_SECONDS = 3600
 MAX_MARKERS = 64              # sessions believed on one file; a fuller folder is ignored
+CLEAR_BATCH = 512             # markers one write removes from a folder that is too full
 WALK_SECONDS = 1.0            # budget for a walk over every marker folder
 _FUTURE_SLACK = 60            # a marker dated further ahead than this is not believed
 
@@ -152,7 +153,7 @@ def _writers(rel: str, now: float, clear: bool = False) -> dict | None:
     """{session key: write time} for every session with a marker on `rel` that is
     less than a day old. With `clear`, markers older than that are removed.
     None when the folder holds more markers than any file has sessions: it is
-    then not read, not believed and not added to."""
+    then not read and not believed, and with `clear` it is emptied."""
     if open_dir_chain is None:
         return {}
     folder = _marker_dir(rel)
@@ -166,6 +167,17 @@ def _writers(rel: str, now: float, clear: bool = False) -> dict | None:
         if len(names) > MAX_MARKERS:
             # Nobody has this many sessions on one file. Reading them all would
             # stall every edit of the file, so the folder is not believed at all.
+            # A writer empties it, a bounded batch per write, or the file would
+            # stay unwatched until someone removed the folder by hand. Once the
+            # last batch is gone the folder is an empty one and this write counts.
+            if clear:
+                for name in names[:CLEAR_BATCH]:
+                    try:
+                        os.unlink(name, dir_fd=fd)
+                    except OSError:
+                        pass
+                if len(names) <= CLEAR_BATCH:
+                    return {}
             return None
         for name in names:
             at = _when(_read_marker(folder / name), now)

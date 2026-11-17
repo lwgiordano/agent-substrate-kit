@@ -15967,11 +15967,14 @@ def test_audit_runs_pytest_under_its_own_limit_and_names_the_slowest_tests(
     monkeypatch.setattr(audit, "PYTEST_TIMEOUT_RANGE", (1, 3600))
     monkeypatch.setattr(audit, "QUICK_TIMEOUT", 300)
     monkeypatch.setattr(sys, "argv", ["substrate_audit.py", "--mode", "full"])
-    monkeypatch.setenv(audit.PYTEST_TIMEOUT_ENV, "1")
-    monkeypatch.setenv("FAKE_SLEEP", "5")
+    # The limit has to outlast the fake's start-up, or the partial output is
+    # empty and the run that should pass below times out too. One second was not
+    # enough on a machine at load 27: the shell had not printed its three lines.
+    monkeypatch.setenv(audit.PYTEST_TIMEOUT_ENV, "4")
+    monkeypatch.setenv("FAKE_SLEEP", "60")
     assert audit.main() == 1
     out = capsys.readouterr().out
-    assert "TIMEOUT: " in out and "did not finish within 1 s" in out and "test_slow" in out
+    assert "TIMEOUT: " in out and "did not finish within 4 s" in out and "test_slow" in out
     monkeypatch.setenv("FAKE_SLEEP", "0")
     assert audit.main() == 0
     out = capsys.readouterr().out

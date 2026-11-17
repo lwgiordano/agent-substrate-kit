@@ -42,7 +42,7 @@
         "scripts/update_manifest.py",
         "scripts/write_install_json.py"
       ],
-      "last_human_reviewed": "2026-10-31",
+      "last_human_reviewed": "2026-11-17",
       "path": "docs/knowledge/01_install_adoption.md",
       "purpose": "Installation and adoption across new and existing repositories."
     },
@@ -95,6 +95,7 @@
         "scripts/check_validator_input_coverage.py",
         "scripts/command_policy.py",
         "scripts/copilot_hook_adapter.py",
+        "scripts/edit_presence.py",
         "scripts/harness_usage.py",
         "scripts/lang_gate.sh",
         "scripts/remote_detect.py",
@@ -103,7 +104,7 @@
         "scripts/setup_branch_protection.sh",
         "scripts/substrate_profile.py"
       ],
-      "last_human_reviewed": "2026-11-16",
+      "last_human_reviewed": "2026-11-17",
       "path": "docs/knowledge/04_policy_governance.md",
       "purpose": "Command policy, hooks, sandboxing, and local or remote governance."
     },
@@ -195,7 +196,7 @@
         "scripts/_stale_text.py",
         "scripts/run_security_scanners.py"
       ],
-      "last_human_reviewed": "2026-11-16",
+      "last_human_reviewed": "2026-11-17",
       "path": "docs/knowledge/09_deterministic_validators.md",
       "purpose": "Deterministic validator layers, pinned copies, and append-only gates."
     },

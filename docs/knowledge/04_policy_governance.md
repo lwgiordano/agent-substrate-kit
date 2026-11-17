@@ -4,7 +4,10 @@ asserts:
   - scripts/command_policy.py::looks_dangerous_command
   - scripts/check_substrate_config.py::def config_text_problem
   - scripts/lang_gate.sh::run_gate(){
-last_human_reviewed: 2026-11-16
+  - scripts/edit_presence.py::def after(hook)
+  - scripts/edit_presence.py::SUBSTRATE_EDIT_PRESENCE_MINUTES
+  - templates/claude/settings.json.template::edit_presence.py
+last_human_reviewed: 2026-11-17
 covers:
   - manage.sh
   - scripts/_substrate_config.sh
@@ -19,6 +22,7 @@ covers:
   - scripts/check_validator_input_coverage.py
   - scripts/command_policy.py
   - scripts/copilot_hook_adapter.py
+  - scripts/edit_presence.py
   - scripts/harness_usage.py
   - scripts/lang_gate.sh
   - scripts/remote_detect.py
@@ -109,6 +113,30 @@ names a hook writes (the policy's reasons, read from `command_policy.py`, plus
 the hooks' fixed names); any other reads as unrecognized, so no free text from
 the log reaches an agent reading the report. It measures and changes nothing; a
 prune is a reviewed change.
+
+## Edit presence
+
+Two sessions can share one checkout, and neither knows the other is writing the
+file it is about to change. On Claude Code `edit_presence.py` runs after every
+write by an edit tool (Edit, Write, MultiEdit, NotebookEdit) and leaves one
+marker per file and session under `.substrate/usage/presence/`. When a different session wrote the
+same file inside the window (ten minutes, or `SUBSTRATE_EDIT_PRESENCE_MINUTES`),
+the hook says so once, on stderr with exit 2, which the host shows to the agent
+beside the result of its write. It says so again only when that session writes
+the file again. `SUBSTRATE_EDIT_PRESENCE` is `notice` by default. `hold` also
+runs the hook before the write and refuses the edit while another session's
+window is live. `off` records nothing.
+
+Each session writes only its own marker, so no file is updated by two sessions
+at once. Names and contents hold a hash of the session id. The next writer
+clears markers older than a day. The directory is agent-writable, so this lets
+cooperating sessions see each other and is not access control: anything that
+can write there can raise a note or, under `hold`, keep a file held. A folder
+with more markers than a file has sessions is ignored unread. A host that does
+not name the session is neither recorded nor answered, which today means Codex
+and Copilot. A file changed by a shell command is not seen here; the
+[working-tree advisory](07_agent_context_governance.md) covers the doc that
+falls behind. `edit_presence.py list` prints who wrote what in the last hour.
 
 ## Sandbox and exfiltration
 

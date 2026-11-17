@@ -1,6 +1,6 @@
 ---
 purpose: Deterministic validator layers, pinned copies, and append-only gates.
-last_human_reviewed: 2026-11-16
+last_human_reviewed: 2026-11-17
 covers:
   - extras/check_license_headers.py
   - extras/check_stale_phrases.py

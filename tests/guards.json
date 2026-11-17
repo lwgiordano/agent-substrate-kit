@@ -2384,6 +2384,66 @@
         "tests/test_hook_scripts.py::test_suite_drops_gits_hook_environment"
       ],
       "why": "the variables are dropped by a helper nothing calls, so the session still runs with a hook's GIT_DIR"
+    },
+    {
+      "id": "skill-verify-before-the-first-commit",
+      "file": "scripts/memory_log.py",
+      "find": "        return (_NO_COMMIT_YET, branch) if branch else (None, None)\n",
+      "replace": "        return (None, None)\n",
+      "tests": [
+        "tests/test_hook_scripts.py::test_memory_log_verify_passes_before_the_first_commit"
+      ],
+      "why": "a repository with no commit reads as an unreadable HEAD, so a passing check on an unchanged tree is always stale and the completion gate can never be satisfied there"
+    },
+    {
+      "id": "skill-verify-no-commit-identity-names-the-branch",
+      "file": "scripts/memory_log.py",
+      "find": "        return (_NO_COMMIT_YET, branch) if branch else (None, None)\n",
+      "replace": "        return (_NO_COMMIT_YET, \"\") if branch else (None, None)\n",
+      "tests": [
+        "tests/test_hook_scripts.py::test_memory_log_verify_before_the_first_commit_still_fails_closed"
+      ],
+      "why": "a check that moves HEAD to another unborn branch changes nothing the content signature reads, and the run is recorded as verified"
+    },
+    {
+      "id": "skill-verify-no-commit-raw-pass-reads-untracked",
+      "file": "scripts/memory_log.py",
+      "find": "        raw = _raw_tracked_hash(untracked=no_commit)\n",
+      "replace": "        raw = _raw_tracked_hash()\n",
+      "tests": [
+        "tests/test_hook_scripts.py::test_memory_log_verify_before_the_first_commit_still_fails_closed"
+      ],
+      "why": "nothing is tracked before the first commit, so a raw change git's object model hides (line endings under a text attribute, a clean filter) leaves the signature unmoved and the run is recorded as verified"
+    },
+    {
+      "id": "skill-verify-no-commit-needs-a-repository-with-no-ref",
+      "file": "scripts/memory_log.py",
+      "find": "        if refs.returncode != 0 or refs.stdout.strip():\n            return None\n",
+      "replace": "        pass\n",
+      "tests": [
+        "tests/test_hook_scripts.py::test_memory_log_verify_unresolvable_head_is_not_no_commit"
+      ],
+      "why": "a repository that holds a ref and no commit is accepted as the state git init leaves, and a run there is recorded as verified"
+    },
+    {
+      "id": "skill-verify-no-commit-needs-a-branch-head",
+      "file": "scripts/memory_log.py",
+      "find": "        if ref.returncode != 0 or not branch.startswith(\"refs/heads/\"):\n",
+      "replace": "        if ref.returncode != 0:\n",
+      "tests": [
+        "tests/test_hook_scripts.py::test_memory_log_verify_unresolvable_head_is_not_no_commit"
+      ],
+      "why": "a new repository whose HEAD names a ref outside refs/heads/ is accepted as the state git init leaves, and a run there is recorded as verified"
+    },
+    {
+      "id": "skill-verify-no-commit-needs-an-empty-history",
+      "file": "scripts/memory_log.py",
+      "find": "        if objs.returncode != 0 or \"commit\" in objs.stdout.split():\n            return None\n",
+      "replace": "        pass\n",
+      "tests": [
+        "tests/test_hook_scripts.py::test_memory_log_verify_unresolvable_head_is_not_no_commit"
+      ],
+      "why": "deleting the only branch of a repository with history leaves no ref, so it reads as no commit yet and a HEAD that cannot be resolved is recorded as verified"
     }
   ]
 }

@@ -173,7 +173,7 @@
         "scripts/memory_log.py",
         "scripts/release_gate.sh"
       ],
-      "last_human_reviewed": "2026-11-02",
+      "last_human_reviewed": "2026-11-17",
       "path": "docs/knowledge/08_memory_anchor.md",
       "purpose": "The memory trust anchor \u2014 monotonic advance, remote confirmation, and limits."
     },

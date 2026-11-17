@@ -60,6 +60,7 @@ KNOWLEDGE_ASSERTS = {
     "scripts/memory_log.py::def chained_receipts",
     "scripts/append_history.py::def _withheld_at_session_start",
     "scripts/append_history.py::def _no_commit_yet",
+    "scripts/memory_log.py::def _no_commit_branch",
     "scripts/_doc_common.py::def knowledge_prose_bytes",
     "scripts/check_doc_drift.py::def _worktree_stale",
     "scripts/check_doc_drift.py::owned_file_sha256",

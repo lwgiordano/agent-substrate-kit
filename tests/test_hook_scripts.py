@@ -15903,12 +15903,15 @@ def test_audit_timeout_is_its_own_status_and_never_a_pass() -> None:
     import time as _time
     audit = _audit_module()
     slow = [sys.executable, "-c",
-            "import time; print('progress 40%', flush=True); time.sleep(30)"]
+            "import time; print('progress 40%', flush=True); time.sleep(60)"]
     started = _time.monotonic()
-    r = audit.run(slow, timeout=1)
-    assert _time.monotonic() - started < 20
-    assert (r["status"], r["returncode"], r["timeout_seconds"]) == ("TIMEOUT", 124, 1)
-    assert "progress 40%" in r["output"] and "did not finish within 1 s" in r["output"]
+    # Four seconds, not one: the limit has to outlast the child's start-up or the
+    # partial output it is asserted on is empty. A loaded machine does not start
+    # Python and print inside a second.
+    r = audit.run(slow, timeout=4)
+    assert _time.monotonic() - started < 30
+    assert (r["status"], r["returncode"], r["timeout_seconds"]) == ("TIMEOUT", 124, 4)
+    assert "progress 40%" in r["output"] and "did not finish within 4 s" in r["output"]
     ok = audit.run([sys.executable, "-c", "pass"])
     bad = audit.run([sys.executable, "-c", "raise SystemExit(3)"])
     assert (ok["status"], bad["status"]) == ("PASS", "BLOCK")

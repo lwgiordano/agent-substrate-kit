@@ -55,7 +55,7 @@ def _hook_findings(cfg):
     b=[]; w=[]
     if not cfg: return (['settings.json unreadable'], [])
     hooks=cfg.get('hooks',{}); flat=json.dumps(hooks)
-    for script in ('session_handoff.py','todo_state_hook.py','lint_on_write.py','check_exfil_guard.py'):
+    for script in ('session_handoff.py','todo_state_hook.py','lint_on_write.py','check_exfil_guard.py','edit_presence.py'):
         if script not in flat: b.append(f'hook not wired: {script}')
     if '$CLAUDE_PROJECT_DIR' not in flat: w.append('hooks should use absolute paths ($CLAUDE_PROJECT_DIR)')
     missing_timeout=[h.get('command','?') for ms in hooks.values() for m in ms for h in m.get('hooks',[]) if 'timeout' not in h]

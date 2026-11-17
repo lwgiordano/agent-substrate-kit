@@ -20,6 +20,16 @@
             "timeout": 10
           }
         ]
+      },
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/edit_presence.py\" before",
+            "timeout": 10
+          }
+        ]
       }
     ],
     "PreCompact": [
@@ -76,6 +86,16 @@
             "type": "command",
             "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/lint_on_write.py\"",
             "timeout": 60
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/edit_presence.py\" after",
+            "timeout": 10
           }
         ]
       }

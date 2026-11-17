@@ -97,7 +97,7 @@ except Exception:
                       "tests/test_task_brief.py", "tests/test_task_receipt.py",
                       "tests/test_project_status.py",
                       "tests/test_smoke.py", "tests/test_substrate_files.py",
-                      "tests/test_harness_usage.py"}
+                      "tests/test_harness_usage.py", "tests/test_edit_presence.py"}
 # kit-source-only files + the kit's own test files (shipped into user repos by name).
 _OWNED_FILES |= {"bootstrap.sh", "agentsync.sh", "package_release.sh", "BENCHMARK.md", "CHANGES_V3.md"}
 _KIT_TEST_FILES = set(KIT_TEST_FILES)

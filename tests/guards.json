@@ -2444,6 +2444,196 @@
         "tests/test_hook_scripts.py::test_memory_log_verify_unresolvable_head_is_not_no_commit"
       ],
       "why": "deleting the only branch of a repository with history leaves no ref, so it reads as no commit yet and a HEAD that cannot be resolved is recorded as verified"
+    },
+    {
+      "id": "edit-presence-tells-the-other-session",
+      "file": "scripts/edit_presence.py",
+      "find": "    told = newest is not None and newest[0] > seen\n",
+      "replace": "    told = False\n",
+      "tests": [
+        "tests/test_edit_presence.py::test_a_second_session_is_told_once_for_each_write_by_the_other"
+      ],
+      "why": "two sessions writing one file never learn of each other, and each undoes the other's work"
+    },
+    {
+      "id": "edit-presence-says-it-once-per-write",
+      "file": "scripts/edit_presence.py",
+      "find": "\"seen\": max(seen, newest[0]) if newest else seen}),\n",
+      "replace": "\"seen\": seen}),\n",
+      "tests": [
+        "tests/test_edit_presence.py::test_a_second_session_is_told_once_for_each_write_by_the_other"
+      ],
+      "why": "the note repeats on every edit until the other session's window ends, and gets ignored"
+    },
+    {
+      "id": "edit-presence-own-writes-are-not-news",
+      "file": "scripts/edit_presence.py",
+      "find": "                   if key != me and now - at <= window), reverse=True)\n",
+      "replace": "                   if now - at <= window), reverse=True)\n",
+      "tests": [
+        "tests/test_edit_presence.py::test_the_same_session_and_other_files_are_silent"
+      ],
+      "why": "a session is warned about its own last write on every edit"
+    },
+    {
+      "id": "edit-presence-only-inside-the-window",
+      "file": "scripts/edit_presence.py",
+      "find": "                   if key != me and now - at <= window), reverse=True)\n",
+      "replace": "                   if key != me), reverse=True)\n",
+      "tests": [
+        "tests/test_edit_presence.py::test_a_write_outside_the_window_is_not_news"
+      ],
+      "why": "a write from hours ago is reported as another session being on the file now"
+    },
+    {
+      "id": "edit-presence-hold-refuses-before-the-write",
+      "file": "scripts/edit_presence.py",
+      "find": "    if not others:\n        return 0\n    wait = ",
+      "replace": "    return 0\n    wait = ",
+      "tests": [
+        "tests/test_edit_presence.py::test_hold_refuses_before_the_write_until_the_file_is_quiet"
+      ],
+      "why": "the strict setting refuses nothing"
+    },
+    {
+      "id": "edit-presence-hold-is-opt-in",
+      "file": "scripts/edit_presence.py",
+      "find": "    if _mode() != \"hold\" or target is None:\n",
+      "replace": "    if target is None:\n",
+      "tests": [
+        "tests/test_edit_presence.py::test_hold_refuses_before_the_write_until_the_file_is_quiet"
+      ],
+      "why": "the default refuses writes, so two sessions on one file stall each other without being asked to"
+    },
+    {
+      "id": "edit-presence-off-records-nothing",
+      "file": "scripts/edit_presence.py",
+      "find": "    if mode == \"off\" or target is None or safe_atomic_write is None:\n",
+      "replace": "    if target is None or safe_atomic_write is None:\n",
+      "tests": [
+        "tests/test_edit_presence.py::test_off_records_nothing_and_says_nothing"
+      ],
+      "why": "switching the hook off still writes markers and still interrupts"
+    },
+    {
+      "id": "edit-presence-session-id-is-hashed",
+      "file": "scripts/edit_presence.py",
+      "find": "    return rel.as_posix(), session_key(session)\n",
+      "replace": "    return rel.as_posix(), session\n",
+      "tests": [
+        "tests/test_edit_presence.py::test_markers_sit_in_ignored_runtime_state_and_hold_no_session_id"
+      ],
+      "why": "the host's session id is written into file names in the working tree"
+    },
+    {
+      "id": "edit-presence-runtime-and-git-paths-untracked",
+      "file": "scripts/edit_presence.py",
+      "find": "    if not rel.parts or rel.parts[0] in UNTRACKED_TOPS:\n",
+      "replace": "    if not rel.parts:\n",
+      "tests": [
+        "tests/test_edit_presence.py::test_runtime_git_and_outside_paths_are_not_tracked"
+      ],
+      "why": "writes to the kit's own runtime state and to .git are recorded and answered"
+    },
+    {
+      "id": "edit-presence-future-marker-is-not-believed",
+      "file": "scripts/edit_presence.py",
+      "find": " or at > now + _FUTURE_SLACK:\n",
+      "replace": ":\n",
+      "tests": [
+        "tests/test_edit_presence.py::test_a_marker_dated_in_the_future_is_not_believed"
+      ],
+      "why": "a marker dated ahead of the clock holds a file for as long as it says"
+    },
+    {
+      "id": "edit-presence-old-markers-are-cleared",
+      "file": "scripts/edit_presence.py",
+      "find": "                if clear:\n                    try:\n                        os.unlink(name, dir_fd=fd)\n",
+      "replace": "                if False:\n                    try:\n                        os.unlink(name, dir_fd=fd)\n",
+      "tests": [
+        "tests/test_edit_presence.py::test_markers_older_than_a_day_are_cleared_by_the_next_writer"
+      ],
+      "why": "markers of sessions long gone pile up beside every file"
+    },
+    {
+      "id": "edit-presence-idle-folders-are-cleared",
+      "file": "scripts/edit_presence.py",
+      "find": "    if first_marker:\n        _clear_idle_folders(now)\n",
+      "replace": "    if False:\n        _clear_idle_folders(now)\n",
+      "tests": [
+        "tests/test_edit_presence.py::test_folders_of_files_idle_for_a_day_go_when_a_new_file_is_first_written"
+      ],
+      "why": "one folder per file ever edited is kept for ever"
+    },
+    {
+      "id": "edit-presence-folder-walk-is-not-on-every-edit",
+      "file": "scripts/edit_presence.py",
+      "find": "    if first_marker:\n        _clear_idle_folders(now)\n",
+      "replace": "    if True:\n        _clear_idle_folders(now)\n",
+      "tests": [
+        "tests/test_edit_presence.py::test_folders_of_files_idle_for_a_day_go_when_a_new_file_is_first_written"
+      ],
+      "why": "every edit walks the whole marker directory"
+    },
+    {
+      "id": "edit-presence-never-turns-an-edit-into-an-error",
+      "file": "scripts/edit_presence.py",
+      "find": "    except Exception:  # noqa: BLE001 - this hook must never turn an edit into an error\n        return 0\n",
+      "replace": "    except Exception:  # noqa: BLE001\n        raise\n",
+      "tests": [
+        "tests/test_edit_presence.py::test_garbage_input_is_a_silent_pass"
+      ],
+      "why": "input the hook cannot parse makes every edit report a hook failure"
+    },
+    {
+      "id": "edit-presence-is-wired-after-every-edit-tool",
+      "file": "templates/claude/settings.json.template",
+      "find": "edit_presence.py\\\" after\"",
+      "replace": "edit_presence.py\\\" list\"",
+      "tests": [
+        "tests/test_edit_presence.py::test_both_hooks_are_wired_for_every_edit_tool"
+      ],
+      "why": "the script ships and nothing runs it, so no write is ever recorded"
+    },
+    {
+      "id": "edit-presence-stuffed-folder-is-not-read",
+      "file": "scripts/edit_presence.py",
+      "find": "        if len(names) > MAX_MARKERS:\n",
+      "replace": "        if False:\n",
+      "tests": [
+        "tests/test_edit_presence.py::test_a_folder_stuffed_with_markers_is_ignored_not_read"
+      ],
+      "why": "a marker folder filled with files makes every edit of that file read them all and stall"
+    },
+    {
+      "id": "edit-presence-future-seen-is-not-believed",
+      "file": "scripts/edit_presence.py",
+      "find": "    if seen > now + _FUTURE_SLACK:\n",
+      "replace": "    if False:\n",
+      "tests": [
+        "tests/test_edit_presence.py::test_a_damaged_marker_costs_one_repeated_note_and_no_error"
+      ],
+      "why": "a marker claiming it was told about writes far ahead silences every later note"
+    },
+    {
+      "id": "edit-presence-counts-the-other-sessions",
+      "file": "scripts/edit_presence.py",
+      "find": "    who = \"another session\" if len(others) == 1 else f\"{len(others)} other sessions\"\n",
+      "replace": "    who = \"another session\"\n",
+      "tests": [
+        "tests/test_edit_presence.py::test_with_two_others_on_the_file_the_note_counts_them_and_names_the_latest"
+      ],
+      "why": "with three sessions on a file the note reads as if there were two"
+    },
+    {
+      "id": "doctor-requires-the-edit-presence-hook",
+      "file": "scripts/substrate_doctor.py",
+      "find": "'check_exfil_guard.py','edit_presence.py'):",
+      "replace": "'check_exfil_guard.py'):",
+      "tests": [
+        "tests/test_edit_presence.py::test_doctor_blocks_an_install_that_does_not_run_the_hook"
+      ],
+      "why": "an install whose settings lost the hook reports healthy and no write is ever recorded"
     }
   ]
 }

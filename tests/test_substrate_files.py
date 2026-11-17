@@ -40,6 +40,7 @@ def test_hook_scripts_installed() -> None:
         "todo_state_hook.py",
         "lint_on_write.py",
         "check_exfil_guard.py",
+        "edit_presence.py",
     ):
         assert Path("scripts", s).exists(), s
 
@@ -57,6 +58,7 @@ def test_settings_json_wires_lifecycle_and_guard_hooks() -> None:
         "todo_state_hook.py",
         "lint_on_write.py",
         "check_exfil_guard.py",
+        "edit_presence.py",
     ):
         assert script in flat, f"{script} not wired"
     # Hooks must use absolute paths via $CLAUDE_PROJECT_DIR (Claude hook

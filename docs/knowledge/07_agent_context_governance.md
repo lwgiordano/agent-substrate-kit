@@ -1,6 +1,12 @@
 ---
 purpose: Agent context inventory, harness scanning, budgets, and doc drift.
-last_human_reviewed: 2026-11-16
+last_human_reviewed: 2026-11-17
+asserts:
+  - scripts/_doc_common.py::def knowledge_prose_bytes
+  - scripts/check_doc_drift.py::def _worktree_stale
+  - scripts/check_doc_drift.py::owned_file_sha256
+  - scripts/check_doc_drift.py::def _heaviest_section
+  - scripts/context_report.py::_knowledge_prose_bytes(path, root)
 covers:
   - agentsync.sh
   - manage.sh
@@ -106,11 +112,25 @@ raw NUL-framed bytes, and an unreadable index is a blocking error rather than an
 empty staged set. New-module coverage discovery stays language/suffix-based so
 arbitrary project data does not require a knowledge doc.
 
+An edit that is neither committed nor staged is outside both checks, and a
+repository with no commit never enters them. Drift also reports, as an advisory
+that does not fail the gate, each covered file with uncommitted changes and a
+later save time than its doc. Only paths Git reports as changed or untracked
+are compared, so a clean checkout reports nothing. An installed kit file that
+still matches its hash in `.substrate/install.json` is not a change, since an
+install writes files in no promised order. A pair the staged check already
+reports is not repeated. If Git cannot be asked, the advisory says so. The
+status call takes no optional locks and leaves `.git/index` as it found it.
+
 ## Budgets and progressive disclosure
 
-Each non-template knowledge document has a default 3,000-token estimate. Drift
-reports oversize docs as advisory unless `SUBSTRATE_ENFORCE_DOC_BUDGET=1` opts
-into enforcement. `context-report --budget` enumerates every knowledge doc for
+Each non-template knowledge document has a default budget of 3,000 estimated
+tokens of prose: the text after the front matter, measured by
+`knowledge_prose_bytes` for drift and for `context-report --budget` alike.
+`covers` and `asserts` are read by the gate and are not priced, so a guard line
+never costs a doc its prose. Drift reports oversize docs as advisory, naming
+the heaviest `##` section, unless `SUBSTRATE_ENFORCE_DOC_BUDGET=1` opts into
+enforcement. `context-report --budget` enumerates every knowledge doc for
 per-document rows; the separate largest-contributors display remains a compact
 top ten.
 

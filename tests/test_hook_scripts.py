@@ -1672,6 +1672,10 @@ def test_append_history_cli_validates_and_guards_off_by_one(tmp_path) -> None:
     short = subprocess.run([sys.executable, "-I", script, "--summary", "tiny", *base],
                           cwd=tmp_path, capture_output=True, text=True, timeout=60)
     assert short.returncode == 1 and ">=10 characters" in short.stderr
+    # The guard protects a PARENT commit from being recorded by mistake, so the
+    # fixture needs one (a repo with no commit is its own test, below).
+    subprocess.run(["git", "-c", "user.email=x@x", "-c", "user.name=x", "commit", "-q",
+                    "--allow-empty", "-m", "baseline"], cwd=tmp_path, check=True)
     (tmp_path / "pending.py").write_text("x = 1\n", encoding="utf-8")
     subprocess.run(["git", "add", "pending.py"], cwd=tmp_path, check=True)
     guard = subprocess.run([sys.executable, "-I", script,
@@ -1685,6 +1689,68 @@ def test_append_history_cli_validates_and_guards_off_by_one(tmp_path) -> None:
     assert ok.returncode == 0, (ok.returncode, ok.stderr[-300:])
     body = (tmp_path / "docs" / "HISTORY.md").read_text(encoding="utf-8")
     assert "abc1234" in body and "**Knowledge:**" in body
+
+
+def test_append_history_before_the_first_commit_needs_no_commit_hash(tmp_path) -> None:
+    """Before the first commit there is no parent to record by mistake, so the
+    off-by-one guard has nothing to protect. Every file in such a repo is
+    untracked, which the guard read as "mid-commit" and refused, so the WORKING
+    marker this tool and the HISTORY check both document could be reached only
+    by typing it as --commit-hash. The tool writes it itself, and the HISTORY
+    check accepts the entry. Outside a git repo nothing is known about HEAD, and
+    unknown is still refused."""
+    if not (SCRIPTS / "append_history.py").exists():
+        return
+    script = str(SCRIPTS / "append_history.py")
+    args = ["--summary", "the first entry of a new project", "--files", "src/app.py",
+            "--intent", "a sufficiently long intent", "--knowledge", "a sufficiently long knowledge note"]
+    repo = tmp_path / "unborn"
+    (repo / "docs").mkdir(parents=True)
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    (repo / "pending.py").write_text("x = 1\n", encoding="utf-8")
+    (repo / "staged.py").write_text("y = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "staged.py"], cwd=repo, check=True)   # staged and untracked alike
+    ok = subprocess.run([sys.executable, "-I", script, *args],
+                        cwd=repo, capture_output=True, text=True, timeout=60)
+    assert ok.returncode == 0, (ok.returncode, ok.stderr[-300:])
+    body = (repo / "docs" / "HISTORY.md").read_text(encoding="utf-8")
+    assert re.search(r"^## \S+ — \S+ — WORKING$", body, re.M), body
+    # The check reads the HISTORY beside its own file, so it runs from a copy
+    # inside the fixture repo, as it does in an install.
+    (repo / "scripts").mkdir()
+    for name in ("check_history_sha.py", "_doc_common.py", "_text_safety.py"):
+        (repo / "scripts" / name).write_text(
+            (SCRIPTS / name).read_text(encoding="utf-8"), encoding="utf-8")
+    sha = subprocess.run([sys.executable, "-I", str(repo / "scripts" / "check_history_sha.py")],
+                         cwd=repo, capture_output=True, text=True, timeout=60)
+    assert sha.returncode == 0, (sha.returncode, sha.stdout[-300:], sha.stderr[-300:])
+    assert "1 bootstrap" in sha.stdout + sha.stderr, sha.stdout[-300:] + sha.stderr[-300:]
+    plain = tmp_path / "not_a_repo"
+    (plain / "docs").mkdir(parents=True)
+    (plain / "pending.py").write_text("x = 1\n", encoding="utf-8")
+    refused = subprocess.run([sys.executable, "-I", script, *args],
+                             cwd=plain, capture_output=True, text=True, timeout=60,
+                             env=dict(os.environ, GIT_CEILING_DIRECTORIES=str(tmp_path)))
+    assert refused.returncode == 1, (refused.returncode, refused.stdout[-200:], refused.stderr[-300:])
+    assert "off-by-one" in refused.stderr, refused.stderr[-300:]
+    assert not (plain / "docs" / "HISTORY.md").exists()
+    # A HEAD that does not resolve is not proof of "no commit": a deleted or
+    # damaged branch ref looks the same to rev-parse. This repo has a commit,
+    # reachable from a tag, so the guard still applies.
+    lost = tmp_path / "lost_branch"
+    (lost / "docs").mkdir(parents=True)
+    subprocess.run(["git", "init", "-q"], cwd=lost, check=True)
+    git = ["git", "-c", "user.email=x@x", "-c", "user.name=x"]
+    subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", "baseline"], cwd=lost, check=True)
+    subprocess.run([*git, "tag", "kept"], cwd=lost, check=True)
+    branch = subprocess.run(["git", "symbolic-ref", "HEAD"], cwd=lost, check=True,
+                            capture_output=True, text=True).stdout.strip()
+    subprocess.run(["git", "update-ref", "-d", branch], cwd=lost, check=True)
+    (lost / "pending.py").write_text("x = 1\n", encoding="utf-8")
+    refused = subprocess.run([sys.executable, "-I", script, *args],
+                             cwd=lost, capture_output=True, text=True, timeout=60)
+    assert refused.returncode == 1 and "off-by-one" in refused.stderr, (refused.returncode, refused.stderr[-300:])
+    assert not (lost / "docs" / "HISTORY.md").exists()
 
 
 def _bus_repo(tmp_path, entries: str) -> Path:
@@ -11739,6 +11805,314 @@ def test_doc_drift_doc_committed_with_code_is_not_stale(monkeypatch) -> None:
     assert dd._doc_stale(doc, "scripts/y.py", Path(".")) is not None
 
 
+def _guard_heavy_doc(repo: Path) -> Path:
+    """Rewrite the fixture doc so its front matter dwarfs its prose: forty guard
+    lines that all hold, over one sentence."""
+    doc = repo / "docs" / "knowledge" / "01_mod.md"
+    doc.write_text(
+        "---\npurpose: mod\nlast_human_reviewed: 2026-07-29\ncovers:\n  - src/mod.py\nasserts:\n"
+        + "  - src/mod.py::real_symbol\n" * 40
+        + "---\n\n# Mod\n\nOne line of prose.\n", encoding="utf-8")
+    return doc
+
+
+def _oversize_rows(repo: Path, budget: str) -> list:
+    p = subprocess.run([sys.executable, "-I", str(SCRIPTS / "check_doc_drift.py"), "--json"],
+                       cwd=repo, capture_output=True, text=True, timeout=120,
+                       env=dict(os.environ, SUBSTRATE_KNOWLEDGE_DOC_TOKENS=budget))
+    return json.loads(p.stdout)["oversize_doc"]
+
+
+def test_doc_drift_size_budget_counts_prose_not_front_matter(tmp_path) -> None:
+    """The budget prices the prose a reader pays for. `covers:` and `asserts:`
+    are read by the gate, and while they counted, every guard line a doc gained
+    took room from its prose: a doc near the line could stay under it only by
+    shedding guards. Forty guard lines over one sentence is a small doc; the
+    same doc with a long body is not."""
+    if not (SCRIPTS / "check_doc_drift.py").exists():
+        return
+    repo = _drift_repo(tmp_path, "")
+    doc = _guard_heavy_doc(repo)
+    assert doc.stat().st_size > 4 * 100, "the fixture must exceed the budget as a whole file"
+    assert _oversize_rows(repo, "100") == []
+    doc.write_text(doc.read_text(encoding="utf-8") + "filler words here. " * 40, encoding="utf-8")
+    rows = _oversize_rows(repo, "100")
+    assert [r[0] for r in rows] == ["docs/knowledge/01_mod.md"], rows
+
+
+def test_context_report_budget_agrees_with_doc_drift_on_prose_size(tmp_path) -> None:
+    """Two tools report the same budget; they must measure the same thing. A doc
+    that is all front matter is under budget in both, and once its prose grows
+    past the line both name it with the same estimate."""
+    if not (SCRIPTS / "context_report.py").exists():
+        return
+    repo = _drift_repo(tmp_path, "")
+    doc = _guard_heavy_doc(repo)
+
+    def report_rows() -> list:
+        p = subprocess.run([sys.executable, "-I", str(SCRIPTS / "context_report.py"),
+                            "--root", str(repo), "--budget", "--json"],
+                           capture_output=True, text=True, timeout=120,
+                           env=dict(os.environ, SUBSTRATE_KNOWLEDGE_DOC_TOKENS="100"))
+        assert p.returncode == 0, p.stderr[-300:]
+        return [r for r in json.loads(p.stdout)["budget"] if r["item"].startswith("knowledge_doc:")]
+    assert report_rows() == []
+    doc.write_text(doc.read_text(encoding="utf-8") + "filler words here. " * 40, encoding="utf-8")
+    rows = report_rows()
+    assert [r["item"] for r in rows] == ["knowledge_doc:docs/knowledge/01_mod.md"], rows
+    assert rows[0]["est_tokens"] < round(doc.stat().st_size / 4), "front matter still counted"
+    drift = _oversize_rows(repo, "100")
+    assert drift[0][1] == f"~{rows[0]['est_tokens']} tok", (drift, rows)
+
+
+def test_doc_drift_oversize_names_the_heaviest_section(tmp_path) -> None:
+    """An over-budget doc is reported with the section that weighs most, so the
+    reader knows where to cut or split without measuring the doc by hand."""
+    if not (SCRIPTS / "check_doc_drift.py").exists():
+        return
+    repo = _drift_repo(tmp_path, "")
+    doc = repo / "docs" / "knowledge" / "01_mod.md"
+    doc.write_text(
+        "---\npurpose: mod\nlast_human_reviewed: 2026-07-29\ncovers:\n  - src/mod.py\n---\n\n# Mod\n\n"
+        "## Short part\n\nA line.\n\n## How the heavy part works\n\nA line.\n\n"
+        "```\n## not a heading, this is inside a fence\n" + "filler words here. " * 60
+        + "\n```\n\n## Tail\n\nA line.\n",
+        encoding="utf-8")
+    rows = _oversize_rows(repo, "100")
+    assert len(rows) == 1, rows
+    # The weight sits inside the fence, after a line that only looks like a
+    # heading: it belongs to the section the fence is in.
+    assert "How the heavy part works" in rows[0][-1], rows
+    assert "not a heading" not in " ".join(rows[0])
+
+
+def _set_mtime(path: Path, when: int) -> None:
+    os.utime(path, (when, when))
+
+
+def test_doc_drift_flags_covered_code_changed_on_disk_after_its_doc(tmp_path) -> None:
+    """A covered file edited after its doc was last saved is reported while the
+    edit is still uncommitted and unstaged. Commit dates and the index both miss
+    that window, and it is where a doc goes stale: the code was changed, the
+    gate stayed green, and the doc kept describing the old rule. Advisory only.
+    A clean checkout never flags, whatever its mtimes say (a clone or a branch
+    switch sets them arbitrarily)."""
+    if not (SCRIPTS / "check_doc_drift.py").exists():
+        return
+    repo = _staged_drift_repo(tmp_path, "scripts/tool.sh")
+    doc = repo / "docs" / "knowledge" / "01_surface.md"
+    code = repo / "scripts" / "tool.sh"
+    # A second covered file that stays committed and untouched throughout.
+    untouched = repo / "scripts" / "untouched.sh"
+    untouched.write_text("baseline\n", encoding="utf-8")
+    doc.write_text(doc.read_text(encoding="utf-8").replace(
+        "  - scripts/tool.sh\n", "  - scripts/tool.sh\n  - scripts/untouched.sh\n"), encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "second covered file"], cwd=repo, check=True)
+    pair = [["docs/knowledge/01_surface.md", "scripts/tool.sh"]]
+    _set_mtime(doc, 1_700_000_000)
+    _set_mtime(code, 1_700_000_500)
+    _set_mtime(untouched, 1_700_000_500)
+    index_before = (repo / ".git" / "index").read_bytes()
+    assert _drift_json(repo)["worktree_stale_doc"] == []      # clean: newer mtime proves nothing
+    quiet = subprocess.run([sys.executable, "-I", str(SCRIPTS / "check_doc_drift.py")],
+                           cwd=repo, capture_output=True, text=True, timeout=120)
+    assert "WORKING-TREE STALE DOC" not in quiet.stdout, quiet.stdout[-400:]
+    # Asking git what changed must not write the index back. The new mtimes
+    # make its stat cache out of date, which a plain `git status` would repair
+    # on disk, and a check that rewrites .git/index alters the state verified
+    # evidence is signed over.
+    assert (repo / ".git" / "index").read_bytes() == index_before, "the check rewrote .git/index"
+    code.write_text("changed\n", encoding="utf-8")
+    _set_mtime(code, 1_700_000_500)
+    d = _drift_json(repo)
+    # only the edited file: the untouched one is just as new on disk, and clean
+    assert d["worktree_stale_doc"] == pair, d["worktree_stale_doc"]
+    assert d["pending_stale_doc"] == []
+    gate = subprocess.run([sys.executable, "-I", str(SCRIPTS / "check_doc_drift.py")],
+                          cwd=repo, capture_output=True, text=True, timeout=120)
+    assert gate.returncode == 0, (gate.returncode, gate.stdout[-400:])
+    assert "WORKING-TREE STALE DOC (advisory — does not fail the gate)" in gate.stdout
+    named = [ln for ln in gate.stdout.splitlines() if "1 covered file(s)" in ln]
+    assert len(named) == 1 and named[0].rstrip().endswith("scripts/tool.sh"), gate.stdout[-400:]
+    assert "docs/knowledge/01_surface.md" in named[0]
+    _set_mtime(doc, 1_700_000_900)                            # the doc was saved after the code
+    assert _drift_json(repo)["worktree_stale_doc"] == []
+    # Staged code with an unstaged doc is the gate's own PENDING finding. It is
+    # reported once, there, and not a second time as an advisory.
+    _set_mtime(doc, 1_700_000_000)
+    subprocess.run(["git", "add", "scripts/tool.sh"], cwd=repo, check=True)
+    d = _drift_json(repo)
+    assert [p[:2] for p in d["pending_stale_doc"]] == pair, d["pending_stale_doc"]
+    assert d["worktree_stale_doc"] == []
+
+
+def test_doc_drift_flags_stale_docs_in_a_repo_with_no_commit(tmp_path) -> None:
+    """Before the first commit every file is untracked, so neither commit dates
+    nor the index can show that code moved after its doc. The saved-on-disk
+    order still can, and it is the only signal such a repo has."""
+    if not (SCRIPTS / "check_doc_drift.py").exists():
+        return
+    repo = _drift_repo(tmp_path, "")
+    doc = repo / "docs" / "knowledge" / "01_mod.md"
+    code = repo / "src" / "mod.py"
+    _set_mtime(doc, 1_700_000_000)
+    _set_mtime(code, 1_700_000_500)
+    assert _drift_json(repo)["worktree_stale_doc"] == [["docs/knowledge/01_mod.md", "src/mod.py"]]
+    _set_mtime(doc, 1_700_000_900)
+    assert _drift_json(repo)["worktree_stale_doc"] == []
+
+
+def test_doc_drift_installed_kit_file_matching_its_record_is_not_changed(tmp_path) -> None:
+    """An install or upgrade writes kit files in no promised order, so a kit
+    script can land on disk after the doc that covers it. A file that still
+    matches the hash recorded at install has not been changed by anyone, and
+    the advisory says nothing about it. Edit the file and it is reported."""
+    if not (SCRIPTS / "check_doc_drift.py").exists():
+        return
+    import hashlib
+    repo = _drift_repo(tmp_path, "")
+    doc = repo / "docs" / "knowledge" / "01_mod.md"
+    code = repo / "src" / "mod.py"
+    (repo / ".substrate").mkdir()
+    (repo / ".substrate" / "install.json").write_text(json.dumps({
+        "schema": 1,
+        "owned_file_sha256": {"src/mod.py": hashlib.sha256(code.read_bytes()).hexdigest()},
+    }), encoding="utf-8")
+    _set_mtime(doc, 1_700_000_000)
+    _set_mtime(code, 1_700_000_500)
+    assert _drift_json(repo)["worktree_stale_doc"] == []
+    code.write_text("def real_symbol():\n    return 2\n", encoding="utf-8")
+    _set_mtime(code, 1_700_000_500)
+    assert _drift_json(repo)["worktree_stale_doc"] == [["docs/knowledge/01_mod.md", "src/mod.py"]]
+    # A record that cannot be read vouches for nothing: the file is reported.
+    code.write_text("def real_symbol():\n    return 1\n", encoding="utf-8")
+    _set_mtime(code, 1_700_000_500)
+    assert _drift_json(repo)["worktree_stale_doc"] == []
+    (repo / ".substrate" / "install.json").write_text("{not json", encoding="utf-8")
+    assert _drift_json(repo)["worktree_stale_doc"] == [["docs/knowledge/01_mod.md", "src/mod.py"]]
+    (repo / ".substrate" / "install.json").write_text(
+        json.dumps({"owned_file_sha256": ["src/mod.py"]}), encoding="utf-8")
+    assert _drift_json(repo)["worktree_stale_doc"] == [["docs/knowledge/01_mod.md", "src/mod.py"]]
+
+
+def _many_covered_repo(tmp_path: Path, names: list) -> Path:
+    """A committed repo whose one knowledge doc covers scripts/<name> for each name."""
+    repo = _staged_drift_repo(tmp_path, f"scripts/{names[0]}")
+    doc = repo / "docs" / "knowledge" / "01_surface.md"
+    for name in names[1:]:
+        (repo / "scripts" / name).write_text("baseline\n", encoding="utf-8")
+    doc.write_text(doc.read_text(encoding="utf-8").replace(
+        f"  - scripts/{names[0]}\n", "".join(f"  - scripts/{n}\n" for n in names)), encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "more covered files"], cwd=repo, check=True)
+    _set_mtime(doc, 1_700_000_000)
+    return repo
+
+
+def test_doc_drift_worktree_advisory_groups_by_doc_and_caps_the_names(tmp_path) -> None:
+    """One line per doc, the first five files named and the rest counted, so a
+    large change stays a short advisory. A deleted covered file is the gate's
+    PHANTOM finding and is not also listed here."""
+    if not (SCRIPTS / "check_doc_drift.py").exists():
+        return
+    names = [f"f{i}.sh" for i in range(8)]
+    repo = _many_covered_repo(tmp_path, names)
+    for name in names[:7]:
+        (repo / "scripts" / name).write_text("changed\n", encoding="utf-8")
+        _set_mtime(repo / "scripts" / name, 1_700_000_500)
+    (repo / "scripts" / "f7.sh").unlink()
+    d = _drift_json(repo)
+    assert d["worktree_stale_doc"] == [["docs/knowledge/01_surface.md", f"scripts/{n}"] for n in names[:7]]
+    assert d["phantom_doc"] == [["docs/knowledge/01_surface.md", "scripts/f7.sh"]]
+    out = subprocess.run([sys.executable, "-I", str(SCRIPTS / "check_doc_drift.py")],
+                         cwd=repo, capture_output=True, text=True, timeout=120).stdout
+    line = [ln for ln in out.splitlines() if "covered file(s)" in ln]
+    assert len(line) == 1, out[-600:]
+    assert "7 covered file(s)" in line[0] and line[0].rstrip().endswith("(+2 more)"), line
+    assert [n for n in names if f"scripts/{n}" in line[0]] == names[:5], line
+
+
+def test_doc_drift_worktree_status_reads_renames_and_every_batch(tmp_path, monkeypatch) -> None:
+    """git frames a rename as two NUL-separated names. Reading it as one would
+    shift every path after it, so the files sorted after a rename must come
+    back whole. The paths are asked for in batches; a change in the last batch
+    must be seen as surely as one in the first."""
+    if not (SCRIPTS / "check_doc_drift.py").exists():
+        return
+    import importlib
+    sys.path.insert(0, str(SCRIPTS))
+    dd = importlib.import_module("check_doc_drift")
+    names = ["a.sh", "m.sh", "y.sh", "z.sh"]
+    repo = _many_covered_repo(tmp_path, names)
+    subprocess.run(["git", "mv", "scripts/m.sh", "scripts/n.sh"], cwd=repo, check=True)
+    (repo / "scripts" / "z.sh").write_text("changed\n", encoding="utf-8")
+    covered = {f"scripts/{n}" for n in [*names, "n.sh"]}
+    want = {"scripts/m.sh", "scripts/n.sh", "scripts/z.sh"}
+    assert dd._dirty_covered(repo, covered) == want
+    monkeypatch.setattr(dd, "_STATUS_BATCH", 2)
+    assert dd._dirty_covered(repo, covered) == want
+    # NUL cannot be passed to git at all; such an entry is dropped, not fatal.
+    assert dd._dirty_covered(repo, covered | {"scripts/z\0.sh", "/etc/hosts", "../x"}) == want
+
+
+def test_doc_drift_worktree_advisory_says_when_it_could_not_look(tmp_path, monkeypatch) -> None:
+    """An advisory that could not ask git says so in place of printing nothing:
+    silence would read as "no doc is behind". With the index itself unreadable
+    the gate is already failing, and the advisory points there. When only the
+    status call fails, every other finding and the exit code are unchanged."""
+    if not (SCRIPTS / "check_doc_drift.py").exists():
+        return
+    import importlib
+    sys.path.insert(0, str(SCRIPTS))
+    dd = importlib.import_module("check_doc_drift")
+    plain = tmp_path / "not_a_repo"
+    (plain / "docs" / "knowledge").mkdir(parents=True)
+    (plain / "docs" / "knowledge" / "01_topic.md").write_text(
+        "---\npurpose: topic\nlast_human_reviewed: 2026-01-01\ncovers: []\n---\n", encoding="utf-8")
+    p = subprocess.run([sys.executable, "-I", str(SCRIPTS / "check_doc_drift.py"), "--json"],
+                       cwd=plain, capture_output=True, text=True, timeout=120,
+                       env=dict(os.environ, GIT_CEILING_DIRECTORIES=str(tmp_path)))
+    d = json.loads(p.stdout)
+    assert d["staged_read_error"] and "STAGED READ ERROR" in d["worktree_read_error"], d
+    assert d["worktree_stale_doc"] == []
+    repo = _staged_drift_repo(tmp_path / "repo", "scripts/tool.sh")
+    real_git = dd._git
+
+    def status_fails(args, cwd):
+        if "status" in args:
+            raise RuntimeError("cannot read staged git state: CalledProcessError")
+        return real_git(args, cwd)
+    monkeypatch.setattr(dd, "_git", status_fails)
+    d = dd.detect(repo)
+    assert d["worktree_stale_doc"] == [] and d["staged_read_error"] is None
+    assert d["worktree_read_error"] == "cannot read working tree state: CalledProcessError"
+    import io
+    buf = io.StringIO()
+    assert dd.report(d, file=buf) is False           # advisory only: the gate still passes
+    out = buf.getvalue()
+    assert "WORKING-TREE STALE DOC" in out
+    assert "not checked: cannot read working tree state" in out, out
+
+
+def test_doc_drift_oversize_row_without_sections_and_tilde_fences(tmp_path) -> None:
+    """A doc with no `## ` heading has no heaviest section to name, and the row
+    says nothing in its place. A `~~~` fence hides a heading as a backtick
+    fence does."""
+    if not (SCRIPTS / "check_doc_drift.py").exists():
+        return
+    repo = _drift_repo(tmp_path, "")
+    doc = repo / "docs" / "knowledge" / "01_mod.md"
+    head = "---\npurpose: mod\nlast_human_reviewed: 2026-07-29\ncovers:\n  - src/mod.py\n---\n\n# Mod\n\n"
+    doc.write_text(head + "filler words here. " * 60 + "\n", encoding="utf-8")
+    rows = _oversize_rows(repo, "100")
+    assert len(rows) == 1 and len(rows[0]) == 3, rows
+    doc.write_text(head + "## Real part\n\nA line.\n\n~~~\n## fenced\n" + "filler words here. " * 60
+                   + "\n~~~\n", encoding="utf-8")
+    rows = _oversize_rows(repo, "100")
+    assert len(rows[0]) == 4 and '"Real part"' in rows[0][3], rows
+
+
 def test_release_matrix_strict_provides_codeowners() -> None:
     """v3.4.1: the strict full-setup matrix job must synthesize a valid active
     CODEOWNERS — a fresh CI repo can't have real teams, so `doctor --strict`
@@ -14789,6 +15163,56 @@ def test_narrative_lint_warns_only_and_skips_front_matter_and_fences(tmp_path) -
     assert "ok" in run("check_knowledge_narrative.py").stdout
 
 
+def test_narrative_lint_flags_dated_change_notes() -> None:
+    """A knowledge doc says what the code does now. "Since 17 November 2026 it
+    cuts by date" and "Until that day it was typed" say what changed and when,
+    which is HISTORY's job, and they are how a doc grows past its budget one
+    edit at a time. A date that is part of a rule (a cohort window, a cut-off,
+    an expiry) is contract language and stays silent."""
+    import importlib.util as _iu
+    spec = _iu.spec_from_file_location("_narrative_dated", SCRIPTS / "check_knowledge_narrative.py")
+    mod = _iu.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    change_notes = [
+        "`RG1.py`, since 17 November 2026, cuts by date on 13 August.",
+        "Since 2026-11-17 it works out the rate itself.",
+        "Before that it read the staff table.",
+        "Until that day it was a typed 12.",
+        "An audit on 17 November 2026 changed five things in it.",
+        "The cut was changed on November 17, 2026.",
+        "Since May 2026 it reads the tag.",                        # month and year, no day
+        "since 3 May the base is smaller",                         # a day with no year, after "since"
+        "Changed 17 November 2026: first-day buyers leave the base.",   # a changelog line
+        "- Added 2026-11-17: the auction report.",
+        "The table was rewritten in March 2026.",
+        "Sept 3, 2026 changed the rule.",
+        "It has applied since\t17 November 2026.",                 # a tab between the words
+        "It has applied since 17 November 2026.",             # a non-breaking space
+        "Until then it read the staff table.",
+    ]
+    for line in change_notes:
+        hits = mod.scan("# T\n\n" + line + "\n")
+        assert [h[1] for h in hits] == ["dated change note"], (line, hits)
+    contract = [
+        "Joined on or before 13 August 2026 by date.",
+        "Sign-ups that joined from 14 November 2025 to 13 November 2026.",
+        "Status as it stood in the registrants file of 16 November 2026.",
+        "Run S3 first; before that, the table must exist.",
+        "The old flag is accepted until 2099-12-31.",
+        "It retries since 3 markers may be late.",
+        # A change verb next to something that is not a dated change: a count,
+        # a rule about dated entries, an identifier that starts like a date.
+        "It added 12 March items to the queue.",
+        "It removed 5 May.",
+        "It changed March 5 policy.",
+        "Entries removed on 2099-12-31 are ignored.",
+        "It was fixed in 2026-11-17-01.",
+        "Rows dated 2026-01-01 are kept.",
+    ]
+    for line in contract:
+        assert mod.scan("# T\n\n" + line + "\n") == [], line
+
+
 def test_doctor_warns_when_the_pre_push_hook_is_missing(tmp_path) -> None:
     """v3.9.0 friction budget: the test suite runs at the pre-push STAGE, so a
     clone set up before v3.9.0 (pre-commit hook only) silently stopped running
@@ -15153,6 +15577,37 @@ def test_no_near_future_date_literals_in_tests() -> None:
                 if today < d <= horizon:
                     hits.append(f"{p.name}:{n}: {m.group(0)}")
     assert not hits, "near-future date literals will expire:\n" + "\n".join(hits)
+
+
+def test_suite_drops_gits_hook_environment(tmp_path) -> None:
+    """git exports GIT_DIR to a hook, and from a linked worktree it is an absolute
+    path. A fixture's `git init`, `git config` or `git commit` in its own temp
+    directory then acts on the repository being pushed. conftest drops git's
+    repository-local variables before any test runs.
+
+    The child session below is that push in miniature. It gets this suite's
+    conftest and one fixture-style test, and it inherits a GIT_DIR naming another
+    repository. The fixture must build its own repo and leave that one as it was."""
+    real = tmp_path / "real_repo"
+    subprocess.run(["git", "init", "-q", str(real)], check=True)
+    before = (real / ".git" / "config").read_bytes()
+    suite = tmp_path / "suite" / "tests"
+    suite.mkdir(parents=True)
+    (suite / "conftest.py").write_text(
+        Path(__file__).with_name("conftest.py").read_text(encoding="utf-8"), encoding="utf-8")
+    (suite / "test_fixture_git.py").write_text(
+        "import subprocess\n\n\n"
+        "def test_fixture_git_stays_in_its_own_directory(tmp_path):\n"
+        "    subprocess.run(['git', 'init', '-q'], cwd=tmp_path, check=True)\n"
+        "    subprocess.run(['git', 'config', 'user.name', 'leak'], cwd=tmp_path, check=True)\n"
+        "    assert (tmp_path / '.git').is_dir()\n", encoding="utf-8")
+    env = dict(os.environ, GIT_DIR=str(real / ".git"), GIT_INDEX_FILE=str(real / ".git" / "index"))
+    child = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", str(suite)],
+        cwd=suite.parent, capture_output=True, text=True, timeout=300, env=env)
+    assert child.returncode == 0, child.stdout[-600:] + child.stderr[-300:]
+    assert (real / ".git" / "config").read_bytes() == before, \
+        "a fixture's git command wrote to the repository GIT_DIR named"
 
 
 def test_bus_output_neutralizes_terminal_escapes_and_bidi(tmp_path) -> None:

@@ -18,12 +18,41 @@
   that put its own fixtures here (live-DNS refusal, per-test resets) had to
   choose between losing them and refusing the upgrade. conftest_project.py is
   preserved by upgrades and left out of the drift baseline.
+- Drops git's repository-local variables before anything else runs. git exports
+  GIT_DIR to a hook, and from a linked worktree it is an absolute path, so a
+  fixture's `git init`, `git config` or `git commit` in its own temp directory
+  acts on the repository being pushed. Run by a pre-push hook from a worktree,
+  this suite marked the real repository bare, set a test identity on it, added
+  sixteen commits to the branch and repointed its hooks at a temp directory.
+  A test that needs one of these variables passes it to its own subprocess.
 """
 import contextlib
 import faulthandler
 import importlib.util
 import os
 from pathlib import Path
+
+# `git rev-parse --local-env-vars`, plus GIT_NAMESPACE: the variables that say
+# WHICH repository a git command acts on, or carry another command's config.
+_GIT_LOCAL_ENV = (
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CONFIG", "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT", "GIT_OBJECT_DIRECTORY", "GIT_DIR", "GIT_WORK_TREE",
+    "GIT_IMPLICIT_WORK_TREE", "GIT_GRAFT_FILE", "GIT_INDEX_FILE",
+    "GIT_NO_REPLACE_OBJECTS", "GIT_REPLACE_REF_BASE", "GIT_PREFIX",
+    "GIT_SHALLOW_FILE", "GIT_COMMON_DIR", "GIT_NAMESPACE",
+)
+
+
+def _drop_git_hook_env() -> list:
+    """Remove git's repository-local variables from this process, so every child
+    finds its repository from its own working directory. Returns what was set."""
+    dropped = [name for name in _GIT_LOCAL_ENV if name in os.environ]
+    for name in dropped:
+        os.environ.pop(name, None)
+    return dropped
+
+
+_GIT_ENV_DROPPED = _drop_git_hook_env()
 
 _FULL_SUITE_WATCHDOG_SECONDS = 1800
 _watchdog_file = None

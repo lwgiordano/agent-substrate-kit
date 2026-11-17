@@ -8,7 +8,8 @@ asserts:
   - scripts/session_handoff.py::_rejected_block
   - scripts/session_handoff.py::(?<!\w-)
   - scripts/append_history.py::def _withheld_at_session_start
-last_human_reviewed: 2026-11-16
+  - scripts/append_history.py::def _no_commit_yet
+last_human_reviewed: 2026-11-17
 covers:
   - manage.sh
   - scripts/_doc_common.py
@@ -98,6 +99,14 @@ fits newest-first — a blind slice cut the newest entry, the one most needed.
 Each appended entry is also recorded in the memory chain, so a later edit is a
 `RECORD MISMATCH`; outcome labels and lessons are in
 [lessons, records, and recall](10_lessons_recall.md).
+
+A HISTORY header names the commit it documents. With a dirty tree and no
+`--commit-hash`, `append_history` refuses, because HEAD would be the parent of
+the commit being described. A repository with no commit has no parent to record
+by mistake: when HEAD is a branch that does not exist yet and the repository
+holds no ref at all, the guard is skipped and the header carries the bootstrap
+marker `WORKING`. An unresolvable HEAD beside existing refs is a deleted or
+damaged branch, and it is refused like any other unknown Git state.
 
 HISTORY and REJECTED share `_doc_common.locked_atomic_append`. It takes a bounded,
 nonblocking exclusive lock on the parent directory, rereads under the lock,

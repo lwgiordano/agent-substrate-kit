@@ -61,6 +61,11 @@ except Exception:  # pragma: no cover - stripped install
     def _safe_read_text(path, root=None, max_bytes=None, tail_bytes=None):
         return None
 try:
+    from _doc_common import knowledge_prose_bytes as _knowledge_prose_bytes
+except Exception:  # pragma: no cover - stripped install
+    def _knowledge_prose_bytes(path, root=None):
+        return None  # the caller then prices the whole file, the stricter number
+try:
     from _substrate_root import substrate_root as _sr
     _DEFAULT_ROOT = _sr()
 except Exception:
@@ -309,6 +314,9 @@ def _budget(d: dict, root: Path) -> list:
     # rather than an aggregate nobody can act on. Enumerate the source directory
     # directly: largest_contributors is intentionally a top-ten display and must
     # never become an accidental completeness boundary for budget enforcement.
+    # The budget prices a doc's PROSE (the text after its front matter), by the
+    # helper check_doc_drift's OVERSIZE advisory uses, so the two agree. `covers:`
+    # and `asserts:` are machine-read; pricing them made each guard line cost prose.
     kb = _BUDGETS["knowledge_doc"]
     knowledge = root / "docs" / "knowledge"
     docs = []
@@ -316,7 +324,8 @@ def _budget(d: dict, root: Path) -> list:
         for path in knowledge.glob("*.md"):
             if path.is_file() and not path.name.startswith("_"):
                 rel = path.relative_to(root).as_posix()
-                docs.append((_tok(_size(path)), rel))
+                prose = _knowledge_prose_bytes(path, root)
+                docs.append((_tok(_size(path) if prose is None else prose), rel))
     for tok, rel in sorted(docs, key=lambda row: (-row[0], row[1])):
         if tok > kb:
             out.append({"item": f"knowledge_doc:{rel}", "est_tokens": tok,

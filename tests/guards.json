@@ -2161,6 +2161,209 @@
         "tests/test_hook_scripts.py::test_prove_does_not_call_a_skipped_test_a_pass"
       ],
       "why": "a guard whose tests never ran on the host is reported as one its tests passed without"
+    },
+    {
+      "id": "doc-budget-prices-prose-not-front-matter",
+      "file": "scripts/_doc_common.py",
+      "find": "    return m.group(2) if m else text\n",
+      "replace": "    return text\n",
+      "tests": [
+        "tests/test_hook_scripts.py::test_doc_drift_size_budget_counts_prose_not_front_matter",
+        "tests/test_hook_scripts.py::test_context_report_budget_agrees_with_doc_drift_on_prose_size"
+      ],
+      "why": "pricing covers: and asserts: lines makes every guard a doc gains cost it prose"
+    },
+    {
+      "id": "doc-budget-names-the-heaviest-section",
+      "file": "scripts/check_doc_drift.py",
+      "find": "            if top: row.append(f'heaviest section \"{top[0][:60]}\" ~{round(top[1]/4)} tok')\n",
+      "replace": "            pass\n",
+      "tests": [
+        "tests/test_hook_scripts.py::test_doc_drift_oversize_names_the_heaviest_section"
+      ],
+      "why": "an oversize report that names no section leaves the reader to measure the doc by hand"
+    },
+    {
+      "id": "doc-budget-fenced-heading-is-not-a-section",
+      "file": "scripts/check_doc_drift.py",
+      "find": "        if ln.lstrip().startswith(('```', '~~~')): fence=not fence\n        elif not fence and ln.startswith('## '): title=ln[3:].strip()\n",
+      "replace": "        if ln.startswith('## '): title=ln[3:].strip()\n",
+      "tests": [
+        "tests/test_hook_scripts.py::test_doc_drift_oversize_names_the_heaviest_section",
+        "tests/test_hook_scripts.py::test_doc_drift_oversize_row_without_sections_and_tilde_fences"
+      ],
+      "why": "a ## line inside a code fence is read as a heading and the weight is charged to a section that does not exist"
+    },
+    {
+      "id": "doc-drift-worktree-stale-is-reported",
+      "file": "scripts/check_doc_drift.py",
+      "find": "            out.append((d['path'], cov))\n",
+      "replace": "            pass\n",
+      "tests": [
+        "tests/test_hook_scripts.py::test_doc_drift_flags_covered_code_changed_on_disk_after_its_doc",
+        "tests/test_hook_scripts.py::test_doc_drift_flags_stale_docs_in_a_repo_with_no_commit"
+      ],
+      "why": "code edited after its doc, uncommitted and unstaged, leaves every gate green while the doc describes the old rule"
+    },
+    {
+      "id": "doc-drift-worktree-stale-ignores-a-clean-file",
+      "file": "scripts/check_doc_drift.py",
+      "find": "            if cov not in dirty or (d['path'], cov) in seen: continue\n",
+      "replace": "            if (d['path'], cov) in seen: continue\n",
+      "tests": [
+        "tests/test_hook_scripts.py::test_doc_drift_flags_covered_code_changed_on_disk_after_its_doc"
+      ],
+      "why": "a clone or a branch switch sets mtimes arbitrarily, so an unchanged file newer than its doc would be reported on every checkout"
+    },
+    {
+      "id": "doc-drift-worktree-stale-does-not-repeat-pending",
+      "file": "scripts/check_doc_drift.py",
+      "find": "            if cov not in dirty or (d['path'], cov) in seen: continue\n",
+      "replace": "            if cov not in dirty: continue\n",
+      "tests": [
+        "tests/test_hook_scripts.py::test_doc_drift_flags_covered_code_changed_on_disk_after_its_doc"
+      ],
+      "why": "a pair the gate already fails as PENDING is reported a second time as an advisory"
+    },
+    {
+      "id": "doc-drift-installed-file-is-not-a-change",
+      "file": "scripts/check_doc_drift.py",
+      "find": "                if unchanged[cov]: continue\n",
+      "replace": "                pass\n",
+      "tests": [
+        "tests/test_hook_scripts.py::test_doc_drift_installed_kit_file_matching_its_record_is_not_changed"
+      ],
+      "why": "an install writes kit files in no promised order, so untouched kit scripts are reported against the kit's own docs"
+    },
+    {
+      "id": "narrative-dated-change-notes",
+      "file": "scripts/check_knowledge_narrative.py",
+      "find": "        rf\"\\b(?i:since),?{_SP}(?:{_DATED}|{_DAY})\"\n",
+      "replace": "        r\"(?!x)x\"\n",
+      "tests": [
+        "tests/test_hook_scripts.py::test_narrative_lint_flags_dated_change_notes"
+      ],
+      "why": "\"since\" next to a date is how a change note enters a knowledge doc, unflagged, and pushes it past its budget"
+    },
+    {
+      "id": "narrative-back-references-to-a-change",
+      "file": "scripts/check_knowledge_narrative.py",
+      "find": "        r\"|\\b(?i:before that it|until that day|until then it)\\b\")),\n",
+      "replace": "        r\"|(?!x)x\")),\n",
+      "tests": [
+        "tests/test_hook_scripts.py::test_narrative_lint_flags_dated_change_notes"
+      ],
+      "why": "a sentence that points back at the day a rule changed is change narrative with the date left out"
+    },
+    {
+      "id": "history-append-before-the-first-commit",
+      "file": "scripts/append_history.py",
+      "find": "    if not args.commit_hash and not _no_commit_yet(root):\n",
+      "replace": "    if not args.commit_hash:\n",
+      "tests": [
+        "tests/test_hook_scripts.py::test_append_history_before_the_first_commit_needs_no_commit_hash"
+      ],
+      "why": "every file in a repo with no commit is untracked, so the off-by-one guard refuses every entry and the bootstrap marker is unreachable"
+    },
+    {
+      "id": "doc-drift-worktree-status-leaves-the-index-alone",
+      "file": "scripts/check_doc_drift.py",
+      "find": "    raw=_git(['--no-optional-locks','--literal-pathspecs',",
+      "replace": "    raw=_git(['--literal-pathspecs',",
+      "tests": [
+        "tests/test_hook_scripts.py::test_doc_drift_flags_covered_code_changed_on_disk_after_its_doc"
+      ],
+      "why": "git status writes the refreshed index back, so running the check changes the repository state that verified evidence signs"
+    },
+    {
+      "id": "narrative-passive-change-with-a-date",
+      "file": "scripts/check_knowledge_narrative.py",
+      "find": "        rf\"|\\b(?:was|were|been|got){_SP}{_CHANGED}{_SP}{_ON}{_DATED}\"\n",
+      "replace": "        r\"|(?!x)x\"\n",
+      "tests": [
+        "tests/test_hook_scripts.py::test_narrative_lint_flags_dated_change_notes"
+      ],
+      "why": "\"was changed on <date>\" is change narrative and goes unflagged"
+    },
+    {
+      "id": "narrative-changelog-line",
+      "file": "scripts/check_knowledge_narrative.py",
+      "find": "        rf\"|^\\W*{_CHANGED}{_SP}{_ON}{_DATED}\"\n",
+      "replace": "        r\"|(?!x)x\"\n",
+      "tests": [
+        "tests/test_hook_scripts.py::test_narrative_lint_flags_dated_change_notes"
+      ],
+      "why": "a line that opens like a changelog entry (\"Changed 17 November 2026:\") goes unflagged"
+    },
+    {
+      "id": "narrative-date-then-change-verb",
+      "file": "scripts/check_knowledge_narrative.py",
+      "find": "        rf\"|{_DATED},?{_SP}{_CHANGED}\\b\"\n",
+      "replace": "        r\"|(?!x)x\"\n",
+      "tests": [
+        "tests/test_hook_scripts.py::test_narrative_lint_flags_dated_change_notes"
+      ],
+      "why": "\"an audit on <date> changed\" is change narrative and goes unflagged"
+    },
+    {
+      "id": "narrative-day-without-year-only-after-since",
+      "file": "scripts/check_knowledge_narrative.py",
+      "find": "        rf\"|\\b(?:was|were|been|got){_SP}{_CHANGED}{_SP}{_ON}{_DATED}\"\n",
+      "replace": "        rf\"|\\b{_CHANGED}{_SP}{_ON}(?:{_DATED}|{_DAY})\"\n",
+      "tests": [
+        "tests/test_hook_scripts.py::test_narrative_lint_flags_dated_change_notes"
+      ],
+      "why": "a change verb before a number and a month-like word flags counts and rules (\"added 12 March items\", \"entries removed on <date> are ignored\")"
+    },
+    {
+      "id": "history-append-unresolvable-head-is-not-unborn",
+      "file": "scripts/append_history.py",
+      "find": "        if refs.returncode != 0 or refs.stdout.strip():\n            return False\n",
+      "replace": "        pass\n",
+      "tests": [
+        "tests/test_hook_scripts.py::test_append_history_before_the_first_commit_needs_no_commit_hash"
+      ],
+      "why": "a deleted or damaged branch ref makes HEAD unresolvable in a repo that has commits, and the off-by-one guard would be skipped there"
+    },
+    {
+      "id": "doc-drift-status-rename-is-two-names",
+      "file": "scripts/check_doc_drift.py",
+      "find": "            if j < len(fields) and fields[j]: out.add(os.fsdecode(fields[j]))\n            j+=1\n",
+      "replace": "            pass\n",
+      "tests": [
+        "tests/test_hook_scripts.py::test_doc_drift_worktree_status_reads_renames_and_every_batch"
+      ],
+      "why": "a rename's second name read as a status entry shifts every path after it"
+    },
+    {
+      "id": "doc-drift-status-asks-every-batch",
+      "file": "scripts/check_doc_drift.py",
+      "find": "        dirty |= _status_paths(root, paths[i:i+_STATUS_BATCH])\n",
+      "replace": "        dirty |= _status_paths(root, paths[:_STATUS_BATCH])\n",
+      "tests": [
+        "tests/test_hook_scripts.py::test_doc_drift_worktree_status_reads_renames_and_every_batch"
+      ],
+      "why": "covered paths past the first batch are never asked about, so their changes are invisible"
+    },
+    {
+      "id": "doc-drift-nul-covers-entry-is-dropped",
+      "file": "scripts/check_doc_drift.py",
+      "find": "    return bool(rel) and '\\0' not in rel and not rel.startswith('/')",
+      "replace": "    return bool(rel) and not rel.startswith('/')",
+      "tests": [
+        "tests/test_hook_scripts.py::test_doc_drift_worktree_status_reads_renames_and_every_batch"
+      ],
+      "why": "a NUL in one covers entry makes the status call raise and blanks the advisory for every doc"
+    },
+    {
+      "id": "doc-drift-worktree-advisory-says-not-checked",
+      "file": "scripts/check_doc_drift.py",
+      "find": "            print(f\"  - not checked: {d['worktree_read_error']}\", file=file)\n",
+      "replace": "            pass\n",
+      "tests": [
+        "tests/test_hook_scripts.py::test_doc_drift_worktree_advisory_says_when_it_could_not_look"
+      ],
+      "why": "an advisory that could not ask git prints nothing, which reads as no doc being behind"
     }
   ]
 }

@@ -27,7 +27,8 @@ workflow). Pass `--commit-hash <sha>` explicitly if you know the actual
 commit SHA the entry refers to (typical post-commit usage:
 `append_history.py --commit-hash $(git rev-parse --short HEAD)` after
 the commit is made; the HISTORY entry then lands in a follow-up commit
-or a future amend).
+or a future amend). In a repo with no commit yet the entry is written with
+the bootstrap marker WORKING and no flag is needed.
 
 Exit codes: 0 ok | 1 invalid args | 2 file I/O error.
 """
@@ -89,6 +90,39 @@ def _other_files_dirty(root: Path) -> list[str]:
             continue
         dirty.append(path)
     return dirty
+
+
+def _no_commit_yet(root: Path) -> bool:
+    """True only when git itself says this work tree has no commit (an unborn
+    HEAD). There is then no parent to record by mistake, so the off-by-one guard
+    has nothing to protect, and the entry carries the bootstrap marker WORKING.
+
+    Every file in such a repo is untracked, which the guard read as "mid-commit"
+    and refused; WORKING, which `git_short_sha` and check_history_sha both
+    document, could be reached only by typing it as --commit-hash.
+
+    Unknown is not unborn: no git, not a work tree, a timeout or any other
+    failure all return False, and the guard decides as before. An unresolvable
+    HEAD alone is not enough either, since rev-parse exits 1 for a deleted or
+    damaged branch ref too. HEAD must be a branch that does not exist yet in a
+    repository that holds no ref at all."""
+    def git(*args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(["git", *args], cwd=root, capture_output=True,
+                              text=True, timeout=30)
+    try:
+        inside = git("rev-parse", "--is-inside-work-tree")
+        if inside.returncode != 0 or inside.stdout.strip() != "true":
+            return False
+        if git("symbolic-ref", "--quiet", "HEAD").returncode != 0:
+            return False
+        refs = git("for-each-ref", "--count=1")
+        if refs.returncode != 0 or refs.stdout.strip():
+            return False
+        head = git("rev-parse", "--verify", "--quiet", "HEAD")
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return head.returncode == 1 and not head.stdout.strip()
+
 
 def _stale_text_refusal(text: str, root: Path) -> str | None:
     """Why the doc-consistency suite would fail on this entry once recorded, or
@@ -268,7 +302,10 @@ def main() -> int:
     # Detection: if --commit-hash is not provided AND the working tree
     # has non-HISTORY files modified, the user is mid-commit. Refuse
     # the fallback and force them to use --commit-hash explicitly.
-    if not args.commit_hash:
+    #
+    # A repo with no commit has no parent to capture: the fallback there is
+    # the bootstrap marker WORKING, so the guard is skipped (_no_commit_yet).
+    if not args.commit_hash and not _no_commit_yet(root):
         non_history_dirty = _other_files_dirty(root)
         if non_history_dirty:
             print(

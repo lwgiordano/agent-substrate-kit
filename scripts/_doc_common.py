@@ -97,6 +97,29 @@ def parse_front_matter(path: Path) -> tuple[dict, str]:
     return fm, body
 
 
+def knowledge_prose(text: str) -> str:
+    """A knowledge doc's prose: everything after its front matter, split by the
+    rule `parse_front_matter` uses. A doc with no front matter is all prose.
+
+    The per-doc size budget measures this and not the file. Front matter is
+    `covers:` and `asserts:`, which the gate reads; while it counted, every
+    guard line a doc gained took room from its prose, so a doc near the line
+    could stay under it only by dropping guards."""
+    m = _FRONT_MATTER_RE.match(text)
+    return m.group(2) if m else text
+
+
+def knowledge_prose_bytes(path, root=None) -> int | None:
+    """UTF-8 size of a knowledge doc's prose, or None when the doc cannot be
+    read safely (the caller then falls back to the file's size, the stricter
+    number). The one measure behind both `check_doc_drift`'s OVERSIZE advisory
+    and `context-report --budget`, so the two cannot disagree."""
+    text = safe_read_text(path, root, max_bytes=8 << 20)
+    if text is None:
+        return None
+    return len(knowledge_prose(text).encode("utf-8", "replace"))
+
+
 def _strip_quotes(s: str) -> str:
     s = s.strip()
     if len(s) >= 2 and ((s[0] == '"' and s[-1] == '"') or (s[0] == "'" and s[-1] == "'")):

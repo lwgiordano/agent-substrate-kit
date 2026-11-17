@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Docs/code drift detector with staged-edit awareness."""
 from __future__ import annotations
-import argparse, json, os, subprocess, sys
+import argparse, hashlib, json, os, stat, subprocess, sys
 from datetime import date
 from pathlib import Path
 # Explicit local import path so this works under `python -I` (isolated mode
@@ -17,7 +17,12 @@ try:
 except Exception:  # pragma: no cover - stripped install
     def _safe_read_text(path, root=None, max_bytes=None, tail_bytes=None):
         return None
-from _doc_common import CODE_SUFFIXES, DEFAULT_EXCLUDES, git_file_last_modified, iter_code_modules, parse_front_matter, repo_root
+try:
+    from _doc_common import safe_read_bytes as _safe_read_bytes
+except Exception:  # pragma: no cover - stripped install
+    def _safe_read_bytes(path, root=None, max_bytes=None, tail_bytes=None):
+        return None
+from _doc_common import CODE_SUFFIXES, DEFAULT_EXCLUDES, git_file_last_modified, iter_code_modules, knowledge_prose, knowledge_prose_bytes, parse_front_matter, repo_root
 KNOWLEDGE_DIR='docs/knowledge'; MANIFEST_PATH='docs/manifest.json'
 def _git(args, cwd):
     try:
@@ -149,18 +154,132 @@ def _assert_failures(doc, root:Path) -> list:
 _DOC_TOKEN_BUDGET = int(os.environ.get('SUBSTRATE_KNOWLEDGE_DOC_TOKENS') or 3000)
 
 
+def _heaviest_section(prose:str):
+    """(title, bytes) of the largest `## ` section of a doc's prose, or None when
+    it has no such heading. Text before the first heading is its own part, and a
+    `## ` line inside a code fence is not a heading."""
+    parts={}; title='(before the first ## heading)'; fence=False
+    for ln in prose.splitlines(keepends=True):
+        if ln.lstrip().startswith(('```', '~~~')): fence=not fence
+        elif not fence and ln.startswith('## '): title=ln[3:].strip()
+        parts[title]=parts.get(title,0)+len(ln.encode('utf-8','replace'))
+    if len(parts) < 2: return None
+    return max(parts.items(), key=lambda kv: kv[1])
+
+
 def _oversize_docs(docs, root:Path) -> list:
-    """Knowledge docs over the per-doc token budget (~bytes/4, the same estimate
-    context_report uses). ADVISORY: reported by report() but deliberately EXCLUDED
-    from its failure boolean — see the comment there."""
+    """Knowledge docs whose PROSE is over the per-doc token budget (~bytes/4 of
+    the text after the front matter: `knowledge_prose_bytes`, the measure
+    context_report uses too). `covers:` and `asserts:` are read by this gate and
+    are not priced, so adding a guard line never costs a doc its prose. ADVISORY:
+    reported by report() but deliberately EXCLUDED from its failure boolean — see
+    the comment there. Each row names the heaviest section, which is where a
+    split or a trim pays most."""
     out=[]
     for d in docs:
         p=root/d['path']
-        try: nbytes=p.stat().st_size
-        except OSError: continue
+        nbytes=knowledge_prose_bytes(p, root)
+        if nbytes is None:
+            try: nbytes=p.stat().st_size
+            except OSError: continue
         tok=round(nbytes/4)
         if tok > _DOC_TOKEN_BUDGET:
-            out.append((d['path'], f'~{tok} tok', f'budget {_DOC_TOKEN_BUDGET}'))
+            row=[d['path'], f'~{tok} tok', f'budget {_DOC_TOKEN_BUDGET}']
+            top=_heaviest_section(knowledge_prose(_safe_read_text(p, root, max_bytes=8 << 20) or ''))
+            if top: row.append(f'heaviest section "{top[0][:60]}" ~{round(top[1]/4)} tok')
+            out.append(tuple(row))
+    return out
+
+
+INSTALL_RECORD='.substrate/install.json'
+
+
+def _plain_rel(rel:str) -> bool:
+    """A covers entry that can be handed to git as a path inside this repo."""
+    return bool(rel) and '\0' not in rel and not rel.startswith('/') and '..' not in rel.split('/')
+
+
+_STATUS_BATCH = 200
+
+
+def _status_paths(root:Path, paths) -> set:
+    """Paths among `paths` that git reports as modified, staged or untracked.
+    NUL framing; a rename or copy contributes both of its names.
+
+    `--no-optional-locks`: a plain `git status` refreshes the index's stat cache
+    and writes it back. This gate is run as a CHECK, and a check that rewrites
+    .git/index changes the repository identity that verified skill evidence
+    signs, so its own run would read as stale."""
+    raw=_git(['--no-optional-locks','--literal-pathspecs','status','--porcelain','-z','--untracked-files=all','--',*paths], root)
+    out=set(); fields=raw.split(b'\0'); j=0
+    while j < len(fields):
+        entry=fields[j]; j+=1
+        if len(entry) < 4: continue
+        out.add(os.fsdecode(entry[3:]))
+        if entry[:1] in (b'R', b'C') or entry[1:2] in (b'R', b'C'):
+            if j < len(fields) and fields[j]: out.add(os.fsdecode(fields[j]))
+            j+=1
+    return out
+
+
+def _dirty_covered(root:Path, covered) -> set:
+    """The covered paths git calls changed or untracked. Git is asked about
+    covered paths only (literal pathspecs, after `--`), in batches, so an
+    untracked tree no doc covers is never walked. A covers entry git cannot be
+    given (absolute, `..`, a NUL) is left out. Raises RuntimeError when git does
+    not answer; the caller reports that and compares nothing."""
+    dirty=set(); paths=sorted(p for p in covered if _plain_rel(p))
+    for i in range(0, len(paths), _STATUS_BATCH):
+        dirty |= _status_paths(root, paths[i:i+_STATUS_BATCH])
+    return dirty
+
+
+def _install_hashes(root:Path) -> dict:
+    """sha256 by path of the kit files an install wrote here, from the install
+    record. Empty when there is none (the kit's own repo) or it cannot be read."""
+    try: data=json.loads(_safe_read_text(root/INSTALL_RECORD, root, max_bytes=8 << 20) or 'null')
+    except Exception: return {}
+    owned=data.get('owned_file_sha256') if isinstance(data, dict) else None
+    return {str(k): str(v) for k, v in owned.items()} if isinstance(owned, dict) else {}
+
+
+def _as_installed(root:Path, rel:str, want:str) -> bool:
+    """True when `rel` still has the bytes the install record names. Unreadable
+    is not a match: the advisory then reports the file, which is the safe side."""
+    data=_safe_read_bytes(root/rel, root, max_bytes=64 << 20)
+    return data is not None and hashlib.sha256(data).hexdigest() == want
+
+
+def _worktree_stale(docs, root:Path, pending) -> list:
+    """(doc, covered file) pairs where the file has uncommitted changes AND was
+    saved after the doc. This is the window `stale_doc` (commit dates) and
+    `pending_stale_doc` (the index) cannot see: code edited, nothing staged,
+    the doc still describing the old rule, every gate green. A repo with no
+    commit lives in that window permanently.
+
+    Only files git calls changed are compared, so a clean checkout never flags
+    whatever its mtimes are (a clone or a branch switch sets them arbitrarily).
+    A kit file that still matches its install record is not changed either: an
+    install or upgrade writes files in no promised order, and nobody edited it.
+    A pair the gate already reports as PENDING is not repeated here. ADVISORY,
+    like size: a save order is evidence that a doc may be behind, not proof."""
+    covered={c for d in docs for c in d['covers']}
+    dirty=_dirty_covered(root, covered)
+    if not dirty: return []
+    installed=_install_hashes(root); seen={(p[0], p[1]) for p in pending}; unchanged={}
+    out=[]
+    for d in docs:
+        try: doc_saved=(root/d['path']).stat().st_mtime_ns
+        except OSError: continue
+        for cov in d['covers']:
+            if cov not in dirty or (d['path'], cov) in seen: continue
+            try: st=(root/cov).stat()
+            except OSError: continue
+            if not stat.S_ISREG(st.st_mode) or st.st_mtime_ns <= doc_saved: continue
+            if cov in installed:
+                if cov not in unchanged: unchanged[cov]=_as_installed(root, cov, installed[cov])
+                if unchanged[cov]: continue
+            out.append((d['path'], cov))
     return out
 
 
@@ -195,6 +314,16 @@ def detect(root:Path):
                 continue
             pending.append((doc['path'], code_path, str(doc.get('last_human_reviewed',''))))
     manifest=_manifest_paths(root); on_disk={d['path'] for d in docs}
+    # The working-tree advisory needs git too. With the index unreadable the gate
+    # is already failing on that, and there is nothing further to ask git for.
+    worktree_stale = []; worktree_error = None
+    if staged_error:
+        worktree_error = 'git state is unreadable (see STAGED READ ERROR)'
+    else:
+        try:
+            worktree_stale = _worktree_stale(docs, root, pending)
+        except RuntimeError as exc:
+            worktree_error = str(exc).replace('staged git state', 'working tree state')
     return {
       'coverage_gap':sorted(code-covered),
       'staged_coverage_gap':sorted(p for p in _staged_code(root, staged) if p not in cov_to_docs),
@@ -204,6 +333,8 @@ def detect(root:Path):
       'orphan_doc':sorted(on_disk-(manifest or set())),
       'assert_failed':[f for d in docs for f in _assert_failures(d, root)],
       'oversize_doc':_oversize_docs(docs, root),
+      'worktree_stale_doc':worktree_stale,
+      'worktree_read_error':worktree_error,
       'missing_manifest':manifest is None,
       'staged_read_error':staged_error,
     }
@@ -238,9 +369,26 @@ def report(d,file=sys.stdout):
         print('\nOVERSIZE DOC (advisory — does not fail the gate):', file=file)
         for item in over: print('  - '+' -> '.join(map(str,item)), file=file)
         print('  Fix: knowledge docs describe ONE subsystem (contract/organization/scope); '
-              'per-release narrative belongs in docs/HISTORY.md. Split or trim.', file=file)
+              'per-release narrative belongs in docs/HISTORY.md. Split or trim. The size is '
+              'the prose only: covers: and asserts: lines are not counted, so keep them.', file=file)
         if os.environ.get('SUBSTRATE_ENFORCE_DOC_BUDGET') == '1':
             found=True
+    # ALSO ADVISORY: a save order says a doc MAY be behind its code; it does not
+    # prove it, and an edit in progress is the normal state of a working tree.
+    stale = d.get('worktree_stale_doc') or []
+    if stale or d.get('worktree_read_error'):
+        print('\nWORKING-TREE STALE DOC (advisory — does not fail the gate):', file=file)
+        if d.get('worktree_read_error'):
+            print(f"  - not checked: {d['worktree_read_error']}", file=file)
+        by_doc={}
+        for doc, cov in stale: by_doc.setdefault(doc, []).append(cov)
+        for doc, covs in by_doc.items():
+            more=f' (+{len(covs)-5} more)' if len(covs) > 5 else ''
+            print(f"  - {doc} -> {len(covs)} covered file(s) with uncommitted changes saved after the doc: "
+                  + ', '.join(covs[:5]) + more, file=file)
+        print('  Fix: read each file against the doc, correct what no longer holds, then save the doc '
+              'and bump last_human_reviewed. The commit-date and staged checks above cannot see an '
+              'edit that is neither committed nor staged.', file=file)
     if not found: print('doc-drift: no drift detected.', file=file)
     return found
 def main():

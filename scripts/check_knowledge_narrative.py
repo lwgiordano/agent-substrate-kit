@@ -19,6 +19,12 @@ Flags, per line, outside front matter and code fences:
     ("previously anchored" and "no longer in the chain" are contract language,
     so they are deliberately not flagged: a warn-only signal must be precise)
   - release narrative: "(v3.8.54 …", "v3.8.54: …", "round-37", "Codex round"
+  - dated change notes: "since 17 November 2026", "since May 2026", "was
+    changed on 2026-11-17", a line opening "Changed 17 November 2026:",
+    "2026-11-17 replaced", "before that it", "until that day", "until then it".
+    A date inside a rule ("joined on or before 13 August 2026", "accepted until
+    2099-12-31", "entries removed on 2099-12-31 are ignored") is contract
+    language and is not flagged.
 
 Exit codes: 0 (warnings allowed) | 1 --strict and something flagged.
 """
@@ -32,12 +38,39 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _doc_common import repo_root, safe_read_text  # noqa: E402
 
+# Calendar dates. Month names are matched as written (capitalized), so the verb
+# "may" and a word that only starts like a month ("3 markers") are not dates.
+# _DATED names its year: ISO, "17 November 2026", "November 17, 2026", "May 2026".
+# _DAY does not ("3 May"), and counts only after "since": next to a change verb
+# it is as likely a count ("added 12 March items"). An ISO date followed by
+# "-01" is an identifier, not a date. Words are separated by spaces, tabs or a
+# non-breaking space.
+_SP = r"[ \t ]+"
+_MONTH = (r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|June?|July?|Aug(?:ust)?"
+          r"|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)")
+_DATED = (rf"(?:\d{{4}}-\d{{2}}-\d{{2}}(?![\w-])|\d{{1,2}}{_SP}{_MONTH}{_SP}\d{{4}}\b"
+          rf"|{_MONTH}{_SP}\d{{1,2}},{_SP}\d{{4}}\b|{_MONTH}{_SP}\d{{4}}\b)")
+_DAY = rf"(?:\d{{1,2}}{_SP}{_MONTH}\b|{_MONTH}{_SP}\d{{1,2}}\b)"
+_CHANGED = (r"(?i:changed|replaced|removed|added|rewrote|rewritten|reworded|fixed"
+            r"|introduced|dropped|renamed|moved)")
+_ON = rf"(?:(?:on|in){_SP})?"
+
 _PATTERNS = [
     ("history verb", re.compile(
         r"\b(?:used to|formerly)\b"
         r"|\b(?:it|this|that|which|the gate|the check) once\b", re.I)),
     ("release narrative", re.compile(
         r"\(v\d+\.\d+\.\d+\b|\bv\d+\.\d+\.\d+\s*[:(]|\bround-\d+\b|\bCodex round\b")),
+    # A change verb before a date is narrative only as a passive ("was changed
+    # on" a date) or opening a line like a changelog ("Changed 17 November 2026:").
+    # A bare participle is rule language: "entries removed on 2099-12-31 are
+    # ignored".
+    ("dated change note", re.compile(
+        rf"\b(?i:since),?{_SP}(?:{_DATED}|{_DAY})"
+        rf"|\b(?:was|were|been|got){_SP}{_CHANGED}{_SP}{_ON}{_DATED}"
+        rf"|^\W*{_CHANGED}{_SP}{_ON}{_DATED}"
+        rf"|{_DATED},?{_SP}{_CHANGED}\b"
+        r"|\b(?i:before that it|until that day|until then it)\b")),
 ]
 
 

@@ -59,6 +59,12 @@ KNOWLEDGE_ASSERTS = {
     "scripts/task_receipt.py::receipt-deleted",
     "scripts/memory_log.py::def chained_receipts",
     "scripts/append_history.py::def _withheld_at_session_start",
+    "scripts/append_history.py::def _no_commit_yet",
+    "scripts/_doc_common.py::def knowledge_prose_bytes",
+    "scripts/check_doc_drift.py::def _worktree_stale",
+    "scripts/check_doc_drift.py::owned_file_sha256",
+    "scripts/check_doc_drift.py::def _heaviest_section",
+    "scripts/context_report.py::_knowledge_prose_bytes(path, root)",
     "scripts/project_status.py::not checked",
     "scripts/project_status.py::inspection-failed",
     "scripts/check_substrate_config.py::def parse_config_text",
@@ -157,6 +163,13 @@ def test_source_knowledge_is_functionally_partitioned() -> None:
     }
     assert set(docs) == set(KNOWLEDGE_DOCS)
 
+    # The budget is on a doc's prose, by the helper the drift gate and
+    # context-report use. Sizing the whole file here priced covers: and asserts:
+    # lines, so a kit doc near the line could take a new guard only by losing text.
+    import sys
+    sys.path.insert(0, str(KIT / "scripts"))
+    from _doc_common import knowledge_prose_bytes
+
     assertion_counts: dict[str, int] = {}
     covers: set[str] = set()
     purposes: set[str] = set()
@@ -173,7 +186,9 @@ def test_source_knowledge_is_functionally_partitioned() -> None:
         for assertion in front_matter.get("asserts", []):
             key = str(assertion)
             assertion_counts[key] = assertion_counts.get(key, 0) + 1
-        assert round(path.stat().st_size / 4) <= KNOWLEDGE_TOKEN_BUDGET, name
+        prose = knowledge_prose_bytes(path, KIT)
+        assert prose is not None, f"{name} could not be read safely"
+        assert round(prose / 4) <= KNOWLEDGE_TOKEN_BUDGET, name
 
     assert len(purposes) == len(KNOWLEDGE_DOCS)
     assert set(assertion_counts) == KNOWLEDGE_ASSERTS

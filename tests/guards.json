@@ -2364,6 +2364,26 @@
         "tests/test_hook_scripts.py::test_doc_drift_worktree_advisory_says_when_it_could_not_look"
       ],
       "why": "an advisory that could not ask git prints nothing, which reads as no doc being behind"
+    },
+    {
+      "id": "suite-drops-gits-hook-environment",
+      "file": "tests/conftest.py",
+      "find": "        os.environ.pop(name, None)\n    return dropped\n",
+      "replace": "        pass\n    return dropped\n",
+      "tests": [
+        "tests/test_hook_scripts.py::test_suite_drops_gits_hook_environment"
+      ],
+      "why": "a hook's absolute GIT_DIR makes every fixture git command act on the repository being pushed"
+    },
+    {
+      "id": "suite-drops-gits-hook-environment-at-import",
+      "file": "tests/conftest.py",
+      "find": "_GIT_ENV_DROPPED = _drop_git_hook_env()\n",
+      "replace": "_GIT_ENV_DROPPED = []\n",
+      "tests": [
+        "tests/test_hook_scripts.py::test_suite_drops_gits_hook_environment"
+      ],
+      "why": "the variables are dropped by a helper nothing calls, so the session still runs with a hook's GIT_DIR"
     }
   ]
 }

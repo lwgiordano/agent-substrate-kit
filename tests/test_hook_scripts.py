@@ -15579,6 +15579,37 @@ def test_no_near_future_date_literals_in_tests() -> None:
     assert not hits, "near-future date literals will expire:\n" + "\n".join(hits)
 
 
+def test_suite_drops_gits_hook_environment(tmp_path) -> None:
+    """git exports GIT_DIR to a hook, and from a linked worktree it is an absolute
+    path. A fixture's `git init`, `git config` or `git commit` in its own temp
+    directory then acts on the repository being pushed. conftest drops git's
+    repository-local variables before any test runs.
+
+    The child session below is that push in miniature. It gets this suite's
+    conftest and one fixture-style test, and it inherits a GIT_DIR naming another
+    repository. The fixture must build its own repo and leave that one as it was."""
+    real = tmp_path / "real_repo"
+    subprocess.run(["git", "init", "-q", str(real)], check=True)
+    before = (real / ".git" / "config").read_bytes()
+    suite = tmp_path / "suite" / "tests"
+    suite.mkdir(parents=True)
+    (suite / "conftest.py").write_text(
+        Path(__file__).with_name("conftest.py").read_text(encoding="utf-8"), encoding="utf-8")
+    (suite / "test_fixture_git.py").write_text(
+        "import subprocess\n\n\n"
+        "def test_fixture_git_stays_in_its_own_directory(tmp_path):\n"
+        "    subprocess.run(['git', 'init', '-q'], cwd=tmp_path, check=True)\n"
+        "    subprocess.run(['git', 'config', 'user.name', 'leak'], cwd=tmp_path, check=True)\n"
+        "    assert (tmp_path / '.git').is_dir()\n", encoding="utf-8")
+    env = dict(os.environ, GIT_DIR=str(real / ".git"), GIT_INDEX_FILE=str(real / ".git" / "index"))
+    child = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", str(suite)],
+        cwd=suite.parent, capture_output=True, text=True, timeout=300, env=env)
+    assert child.returncode == 0, child.stdout[-600:] + child.stderr[-300:]
+    assert (real / ".git" / "config").read_bytes() == before, \
+        "a fixture's git command wrote to the repository GIT_DIR named"
+
+
 def test_bus_output_neutralizes_terminal_escapes_and_bidi(tmp_path) -> None:
     """The bus is agent-written and the digest is read into other agents' context and
     human terminals: control, bidi and invisible characters are shown as `?`."""

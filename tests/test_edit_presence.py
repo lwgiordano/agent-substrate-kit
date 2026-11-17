@@ -317,21 +317,50 @@ def test_folders_of_files_idle_for_a_day_go_when_a_new_file_is_first_written(tmp
     assert _marker(root, ALICE, "docs/b.md").exists() and _marker(root, BOB, "docs/b.md").exists()
 
 
-def test_a_folder_stuffed_with_markers_is_ignored_not_read(tmp_path) -> None:
-    """The runtime directory is agent-writable. A folder holding more markers
-    than any file has sessions would make every edit of that file read them
-    all, so it is not read, not believed and not added to."""
-    root = _repo(tmp_path)
+def _stuff(root: Path, count: int) -> Path:
+    """Fill docs/a.md's marker folder with `count` fresh markers no session wrote."""
     _hook(root, "after", ALICE)
     folder = _marker(root, ALICE).parent
     body = _marker(root, ALICE).read_text(encoding="utf-8")
-    for i in range(ep.MAX_MARKERS + 1):
+    _marker(root, ALICE).unlink()
+    for i in range(count):
         (folder / f"{i:016x}.json").write_text(body, encoding="utf-8")
-    before = len(list(folder.iterdir()))
+    return folder
+
+
+def test_a_folder_stuffed_with_markers_is_not_read_and_not_believed(tmp_path) -> None:
+    """The runtime directory is agent-writable. A folder holding more markers
+    than any file has sessions would make every edit of that file read them
+    all, so none of it is read: no note, and `hold` sees nobody."""
+    root = _repo(tmp_path)
+    _stuff(root, ep.MAX_MARKERS + 1)
+    assert _hook(root, "before", BOB, SUBSTRATE_EDIT_PRESENCE="hold").returncode == 0
     told = _hook(root, "after", BOB)
     assert (told.returncode, told.stderr) == (0, ""), told.stderr
-    assert _hook(root, "before", BOB, SUBSTRATE_EDIT_PRESENCE="hold").returncode == 0
-    assert len(list(folder.iterdir())) == before and not _marker(root, BOB).exists()
+
+
+def test_a_stuffed_folder_is_emptied_by_the_next_writer_and_watched_again(tmp_path) -> None:
+    """Ignoring a stuffed folder for good would leave that one file unwatched
+    until someone deleted the folder by hand. The next writer clears it, and
+    the file is watched again from that write on."""
+    root = _repo(tmp_path)
+    folder = _stuff(root, ep.MAX_MARKERS + 1)
+    assert _hook(root, "after", BOB).returncode == 0
+    assert [p.name for p in folder.iterdir()] == [_marker(root, BOB).name]
+    told = _hook(root, "after", ALICE)
+    assert told.returncode == 2 and _tag(BOB) in told.stderr, told.stderr
+
+
+def test_a_very_large_stuffed_folder_is_emptied_a_batch_at_a_time(tmp_path) -> None:
+    """One edit must not pay for deleting a hundred thousand files, so each
+    write removes a bounded batch and records nothing until the folder is small."""
+    root = _repo(tmp_path)
+    total = ep.CLEAR_BATCH + ep.MAX_MARKERS + 1
+    folder = _stuff(root, total)
+    assert _hook(root, "after", BOB).returncode == 0
+    assert len(list(folder.iterdir())) == total - ep.CLEAR_BATCH and not _marker(root, BOB).exists()
+    assert _hook(root, "after", BOB).returncode == 0
+    assert [p.name for p in folder.iterdir()] == [_marker(root, BOB).name]
 
 
 def test_the_idle_walk_removes_markers_and_nothing_else(tmp_path) -> None:

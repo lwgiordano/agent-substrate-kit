@@ -2601,7 +2601,7 @@
       "find": "        if len(names) > MAX_MARKERS:\n",
       "replace": "        if False:\n",
       "tests": [
-        "tests/test_edit_presence.py::test_a_folder_stuffed_with_markers_is_ignored_not_read"
+        "tests/test_edit_presence.py::test_a_folder_stuffed_with_markers_is_not_read_and_not_believed"
       ],
       "why": "a marker folder filled with files makes every edit of that file read them all and stall"
     },
@@ -2634,6 +2634,26 @@
         "tests/test_edit_presence.py::test_doctor_blocks_an_install_that_does_not_run_the_hook"
       ],
       "why": "an install whose settings lost the hook reports healthy and no write is ever recorded"
+    },
+    {
+      "id": "edit-presence-stuffed-folder-is-emptied",
+      "file": "scripts/edit_presence.py",
+      "find": "            if clear:\n                for name in names[:CLEAR_BATCH]:\n",
+      "replace": "            if False:\n                for name in names[:CLEAR_BATCH]:\n",
+      "tests": [
+        "tests/test_edit_presence.py::test_a_stuffed_folder_is_emptied_by_the_next_writer_and_watched_again"
+      ],
+      "why": "a marker folder that was once too full leaves its file unwatched until someone deletes it by hand"
+    },
+    {
+      "id": "edit-presence-stuffed-folder-is-emptied-in-batches",
+      "file": "scripts/edit_presence.py",
+      "find": "                for name in names[:CLEAR_BATCH]:\n",
+      "replace": "                for name in names:\n",
+      "tests": [
+        "tests/test_edit_presence.py::test_a_very_large_stuffed_folder_is_emptied_a_batch_at_a_time"
+      ],
+      "why": "one edit pays for deleting every file in a folder of any size"
     }
   ]
 }

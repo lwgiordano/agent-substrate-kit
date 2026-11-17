@@ -132,7 +132,8 @@ at once. Names and contents hold a hash of the session id. The next writer
 clears markers older than a day. The directory is agent-writable, so this lets
 cooperating sessions see each other and is not access control: anything that
 can write there can raise a note or, under `hold`, keep a file held. A folder
-with more markers than a file has sessions is ignored unread. A host that does
+with more markers than a file has sessions is ignored unread, which also means
+`hold` sees nobody there, and the next writer empties it. A host that does
 not name the session is neither recorded nor answered, which today means Codex
 and Copilot. A file changed by a shell command is not seen here; the
 [working-tree advisory](07_agent_context_governance.md) covers the doc that

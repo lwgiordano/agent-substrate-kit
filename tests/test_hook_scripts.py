@@ -14410,6 +14410,51 @@ def test_prove_fails_a_stale_or_ambiguous_snippet(tmp_path) -> None:
     assert r.returncode == 1 and "does not identify one guard" in r.stderr, r.stderr
 
 
+_SKIPPING_TEST = ("\nimport pytest\n\n"
+                  "def test_needs_a_tool():\n    pytest.skip('tool not installed')\n")
+
+
+@pytest.mark.parametrize("addopts", ["", "-q"])
+def test_prove_does_not_call_a_skipped_test_a_pass(tmp_path, addopts) -> None:
+    """Found releasing v3.11.2: a guard whose only test skipped on the host was
+    reported as `its tests still PASS without it`. They had not run. v3.11.3 made
+    the tool behind that one skip visible to the copy; a test skipped for any
+    other reason still read as a pass. prove now says the guard was not run and
+    gives the reason for each skip.
+
+    The kit's own pytest.ini adds a -q to the one prove passes, and at that level
+    pytest prints no totals line: a first version of this read the totals and
+    worked everywhere except in the kit."""
+    td, prove = _prove_repo(tmp_path, tests=["tests/test_m.py::test_needs_a_tool"],
+                            extra_test=_SKIPPING_TEST)
+    (td / "pytest.ini").write_text(f"[pytest]\naddopts = {addopts}\n", encoding="utf-8")
+    r = prove()
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "NOT RUN  neg" in r.stderr and "tool not installed" in r.stderr, r.stderr
+    assert "still PASS" not in r.stderr and "survived" not in r.stderr, r.stderr
+    assert "could not be proven on this host" in r.stderr, r.stderr
+
+
+def test_prove_names_the_skipped_tests_of_a_guard_that_survives(tmp_path) -> None:
+    """One mapped test ran and passed without the guard, one skipped: the guard
+    survived, and the skip is named so nobody reads it as a second witness."""
+    td, prove = _prove_repo(
+        tmp_path, tests=["tests/test_m.py::test_weak", "tests/test_m.py::test_needs_a_tool"],
+        extra_test=_SKIPPING_TEST)
+    (td / "pytest.ini").write_text("[pytest]\naddopts = -q\n", encoding="utf-8")
+    r = prove()
+    assert r.returncode == 1 and "SURVIVED neg" in r.stderr, r.stdout + r.stderr
+    assert "1 skipped here" in r.stderr and "tool not installed" in r.stderr, r.stderr
+    # pytest folds skips that share a reason into one `SKIPPED [2]` line.
+    td, prove = _prove_repo(
+        tmp_path / "two",
+        tests=["tests/test_m.py::test_weak", "tests/test_m.py::test_needs_a_tool",
+               "tests/test_m.py::test_needs_it_too"],
+        extra_test=_SKIPPING_TEST + "\ntest_needs_it_too = test_needs_a_tool\n")
+    r = prove()
+    assert r.returncode == 1 and "2 skipped here" in r.stderr, r.stdout + r.stderr
+
+
 def test_prove_does_not_count_a_collection_error_as_proof(tmp_path) -> None:
     """A typo'd node id makes pytest exit nonzero (rc 4/5) with the guard
     removed — and with it present. A nonzero exit is not evidence of the failure
